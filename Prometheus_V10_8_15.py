@@ -3222,6 +3222,43 @@ def validate_single_inputs(comm_meta, inputs):
     """Compatibility delegate to shared validation used by UI and future API."""
     return _core_validate_single_inputs(comm_meta, inputs)
 
+
+class _ScreenSwitcher(tk.Frame):
+    """Drop-in replacement for the old top-level ttk.Notebook, driven by the
+    sidebar instead of a tab strip. Screens are overlaid via place()+tkraise()
+    and swapped with .select(frame) — the same call signature the rest of the
+    file already uses (self.nb.select(self.tab_x)), so none of those call
+    sites need to change. .select() with no args returns the current screen's
+    widget path (like ttk.Notebook.select()) for the self.nb.nametowidget(...)
+    lazy-refresh pattern; .bind("<<NotebookTabChanged>>", cb) is honored too."""
+
+    def __init__(self, master, app, **kw):
+        super().__init__(master, **kw)
+        self._app = app
+        self._current = None
+        self._on_change_cb = None
+
+    def select(self, tab=None):
+        if tab is None:
+            return str(self._current) if self._current is not None else ""
+        if tab is self._current:
+            return
+        self._current = tab
+        tab.tkraise()
+        self._app._on_sidebar_screen_changed(tab)
+        if self._on_change_cb:
+            try:
+                self._on_change_cb()
+            except Exception:
+                pass
+
+    def bind(self, sequence=None, func=None, add=None):
+        if sequence == "<<NotebookTabChanged>>":
+            self._on_change_cb = func
+            return
+        return super().bind(sequence, func, add)
+
+
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -3766,6 +3803,9 @@ class App(tk.Tk):
             self._sb_fx_var.set(
                 f"FX: {fx_price:.4f}  ({fx_ts[:10] if fx_ts else '—'})"
                 if fx_price else "FX: —")
+            if hasattr(self, "_topbar_fx_var"):
+                self._topbar_fx_var.set(
+                    f"USD/EGP {fx_price:.2f}" if fx_price else "USD/EGP —")
             cbot_d     = md.get("cbot_quotes", {}) or {}
             cbot_corn  = to_float(cbot_d.get("CORN"), None)
             cbot_ts    = md.get("cbot_ts", "")
@@ -3970,24 +4010,117 @@ class App(tk.Tk):
         save_state(self.state_obj)
         self.on_select_contract()
 
-    def _build_top_bar(self):
-        bar = ttk.Frame(self, padding=(10,6))
-        bar.pack(fill="x")
+    # Sidebar nav key -> (page title, subtitle) shown in the top bar,
+    # mirroring the web mockup's per-screen header.
+    _SCREEN_META = {
+        "home":        ("Home", "Market overview and portfolio at a glance"),
+        "contracts":   ("Contracts", "Import contracts, local purchases and CBOT slots"),
+        "calculate":   ("Calculate", "Deal Evaluator — landed cost vs local benchmark"),
+        "analysis":    ("Analysis", "Performance, basis tracking and exposure"),
+        "consumption": ("Consumption", "Stock levels, burn rate and coverage"),
+        "setup":       ("Setup & Data", "Suppliers, freight rates and market data feeds"),
+    }
+    _NAV_ITEMS = (
+        ("home", "Home"), ("contracts", "Contracts"), ("calculate", "Calculate"),
+        ("analysis", "Analysis"), ("consumption", "Consumption"), ("setup", "Setup & Data"),
+    )
 
-        ttk.Label(bar, text="Selected Contract:").pack(side="left")
+    def _build_top_bar(self):
+        """Builds the whole app shell: dark left sidebar (nav) + a right
+        column holding the top bar, the relocated global contract-picker
+        utility strip, and a content host that _build_tabs() fills. Kept
+        under this method name (called first from __init__) so the sidebar
+        exists before _build_tabs() populates the content host."""
+        shell = tk.Frame(self, bg=CLR["bg"])
+        shell.pack(fill="both", expand=True)
+
+        # ── Sidebar ──────────────────────────────────────────────────
+        sidebar = tk.Frame(shell, bg=CLR["sidebar_bg"], width=232)
+        sidebar.pack(side="left", fill="y")
+        sidebar.pack_propagate(False)
+
+        brand = tk.Frame(sidebar, bg=CLR["sidebar_bg"])
+        brand.pack(fill="x", padx=14, pady=(20, 22))
+        tk.Frame(brand, bg=CLR["primary"], width=30, height=30).pack(side="left")
+        brand_txt = tk.Frame(brand, bg=CLR["sidebar_bg"])
+        brand_txt.pack(side="left", padx=(10, 0))
+        tk.Label(brand_txt, text="Prometheus", bg=CLR["sidebar_bg"], fg="#ffffff",
+                 font=(FONT_FAMILY, 12, "bold")).pack(anchor="w")
+        tk.Label(brand_txt, text="Procurement · CPG", bg=CLR["sidebar_bg"],
+                 fg=CLR["sidebar_text_dim"], font=(FONT_FAMILY, 8)).pack(anchor="w")
+
+        nav_wrap = tk.Frame(sidebar, bg=CLR["sidebar_bg"])
+        nav_wrap.pack(fill="x", padx=10)
+        self._sidebar_nav_widgets = {}
+        for key, label in self._NAV_ITEMS:
+            row = tk.Label(nav_wrap, text="  " + label, bg=CLR["sidebar_bg"],
+                           fg=CLR["sidebar_text"], font=(FONT_FAMILY, FS_BODY),
+                           anchor="w", padx=8, pady=9, cursor="hand2")
+            row.pack(fill="x", pady=1)
+            row.bind("<Button-1>", lambda e, k=key: self._select_screen(k))
+            self._sidebar_nav_widgets[key] = row
+
+        footer = tk.Frame(sidebar, bg=CLR["sidebar_bg"])
+        footer.pack(side="bottom", fill="x", padx=14, pady=14)
+        tk.Frame(footer, bg=CLR["sidebar_border"], height=1).pack(fill="x", pady=(0, 10))
+        tk.Label(footer, text=APP_BUILD, bg=CLR["sidebar_bg"], fg=CLR["sidebar_text_dim"],
+                 font=(FONT_FAMILY, 8), wraplength=190, justify="left").pack(anchor="w")
+
+        # ── Right column: top bar + utility strip + content host ──────
+        right = tk.Frame(shell, bg=CLR["bg"])
+        right.pack(side="left", fill="both", expand=True)
+        self._right_col = right
+
+        topbar = tk.Frame(right, bg=CLR["surface"], height=64,
+                          highlightthickness=1, highlightbackground=CLR["border"])
+        topbar.pack(fill="x")
+        topbar.pack_propagate(False)
+
+        title_box = tk.Frame(topbar, bg=CLR["surface"])
+        title_box.pack(side="left", padx=28)
+        self._topbar_title_var = tk.StringVar(value="Home")
+        self._topbar_subtitle_var = tk.StringVar(value="")
+        tk.Label(title_box, textvariable=self._topbar_title_var, bg=CLR["surface"],
+                 fg=CLR["text"], font=(FONT_FAMILY, 15, "bold")).pack(anchor="w", pady=(14, 0))
+        tk.Label(title_box, textvariable=self._topbar_subtitle_var, bg=CLR["surface"],
+                 fg=CLR["muted"], font=(FONT_FAMILY, FS_BODY)).pack(anchor="w")
+
+        meta_box = tk.Frame(topbar, bg=CLR["surface"])
+        meta_box.pack(side="right", padx=28)
+        self._topbar_fx_var = tk.StringVar(value="USD/EGP —")
+        fx_pill = tk.Frame(meta_box, bg="#f7f4ee", highlightthickness=1,
+                           highlightbackground=CLR["border"])
+        fx_pill.pack(side="left")
+        tk.Frame(fx_pill, bg=CLR["success"], width=6, height=6
+                 ).pack(side="left", padx=(10, 6), pady=8)
+        tk.Label(fx_pill, textvariable=self._topbar_fx_var, bg="#f7f4ee", fg=CLR["muted"],
+                 font=(FONT_MONO, 9)).pack(side="left", padx=(0, 10), pady=6)
+        tk.Frame(meta_box, bg=CLR["border"], width=1, height=24).pack(side="left", padx=16)
+        _today = dt.date.today()
+        self._topbar_date_var = tk.StringVar(
+            value=f"{_today:%b} {_today.day}, {_today:%Y}")
+        tk.Label(meta_box, textvariable=self._topbar_date_var, bg=CLR["surface"],
+                 fg=CLR["muted"], font=(FONT_MONO, 10)).pack(side="left")
+
+        # ── Utility strip: relocated global contract picker + actions.
+        # No equivalent in the mockup (no auth/global-picker concept there);
+        # kept as a slim bar so the functionality survives the redesign.
+        util = ttk.Frame(right, padding=(14, 6))
+        util.pack(fill="x")
+        ttk.Label(util, text="Selected Contract:").pack(side="left")
         self.contract_filter_var = tk.StringVar(
             value=contract_label(
                 self.state_obj,
                 self.state_obj["ui"].get("selected_contract_id", "ALL")))
         self.contract_filter_combo = ttk.Combobox(
-            bar, textvariable=self.contract_filter_var, values=[], width=52,
+            util, textvariable=self.contract_filter_var, values=[], width=44,
             state="normal")
         self.contract_filter_combo.pack(side="left", padx=(8, 6))
         self.contract_filter_open_var = tk.BooleanVar(
             value=bool(self.state_obj.setdefault("ui", {}).get(
                 "top_contract_open_only", True)))
         ttk.Checkbutton(
-            bar, text="Open only", variable=self.contract_filter_open_var,
+            util, text="Open only", variable=self.contract_filter_open_var,
             command=self._on_top_contract_open_only_change).pack(
                 side="left", padx=(0, 12))
         self._wire_contract_typeahead(
@@ -3997,16 +4130,38 @@ class App(tk.Tk):
                 query=q, include_all=True),
             on_commit=self.on_select_contract)
 
-        ttk.Button(bar, text="Refresh", command=lambda: self.refresh_all(fetch_market=True)).pack(side="left", padx=(0,8))
-        ttk.Button(bar, text="Glossary", command=self._show_glossary).pack(
+        ttk.Button(util, text="Refresh", command=lambda: self.refresh_all(fetch_market=True)).pack(side="left", padx=(0,8))
+        ttk.Button(util, text="Glossary", command=self._show_glossary).pack(
             side="left", padx=(0, 8))
         # Backup / Load / Reset intentionally NOT here: destructive and
         # data-management actions live in  Setup & Data → Data Management.
-        ttk.Label(bar, text="Backup · restore · reset →  ⚙ Setup & Data",
+        ttk.Label(util, text="Backup · restore · reset →  Setup & Data",
                   font=(FONT_FAMILY, FS_BODY), foreground=CLR["muted"]).pack(side="left")
 
         self.status_var = tk.StringVar(value="")
-        ttk.Label(bar, textvariable=self.status_var).pack(side="right")
+        ttk.Label(util, textvariable=self.status_var).pack(side="right")
+
+        self._content_host = tk.Frame(right, bg=CLR["bg"])
+        self._content_host.pack(fill="both", expand=True)
+
+    def _select_screen(self, key):
+        frame = getattr(self, "_screen_frames", {}).get(key)
+        if frame is not None:
+            self.nb.select(frame)
+
+    def _on_sidebar_screen_changed(self, frame):
+        key = getattr(self, "_frame_to_key", {}).get(frame)
+        if key is None:
+            return
+        self._active_screen_key = key
+        title, subtitle = self._SCREEN_META.get(key, (key, ""))
+        self._topbar_title_var.set(title)
+        self._topbar_subtitle_var.set(subtitle)
+        for k, w in self._sidebar_nav_widgets.items():
+            active = (k == key)
+            w.configure(bg=(CLR["sidebar_hover"] if active else CLR["sidebar_bg"]),
+                       fg=("#ffffff" if active else CLR["sidebar_text"]),
+                       font=(FONT_FAMILY, FS_BODY, "bold" if active else "normal"))
 
     # ══════════════════════════════════════════════════════════════════
     #  ORIGIN COMPARE  — BRZ vs UKR quality-adjusted decision tool
@@ -6202,7 +6357,7 @@ class App(tk.Tk):
     # completion state of initial setup and disappears once done.
     # ------------------------------------------------------------------
     def _build_onboarding_strip(self):
-        self._onb_frame = ttk.Frame(self, padding=(10, 4))
+        self._onb_frame = ttk.Frame(self._right_col, padding=(10, 4))
         self.nb.bind("<<NotebookTabChanged>>", self._on_tab_change)
         self._refresh_onboarding_strip()
 
@@ -6239,7 +6394,7 @@ class App(tk.Tk):
                       font=(FONT_FAMILY, FS_BODY),
                       foreground=CLR["muted"]).pack(side="left", padx=(6, 0))
             if not self._onb_frame.winfo_ismapped():
-                self._onb_frame.pack(fill="x", before=self.nb)
+                self._onb_frame.pack(fill="x", before=self._content_host)
         except Exception as e:
             log_exception(e, "_refresh_onboarding_strip")
 
@@ -6391,32 +6546,32 @@ class App(tk.Tk):
         return None
 
     def _build_tabs(self):
-        self.nb = ttk.Notebook(self)
+        # ── Main navigation: 6 destinations, driven by the sidebar built in
+        # _build_top_bar() rather than a tab strip.
+        #   Home          status: ticker, KPIs, alerts, open MTM
+        #   Contracts     transactions: imports · local purchases · CBOT slots
+        #   Calculate     deal evaluator · scenario what-if
+        #   Analysis      performance · scorecards · seasonality · origin · savings
+        #   Consumption   stock, burn rate, coverage
+        #   Setup & Data  suppliers · commodities · market data · data mgmt
+        self.nb = _ScreenSwitcher(self._content_host, self, bg=CLR["bg"])
         self.nb.pack(fill="both", expand=True)
 
-        # ── Main navigation: 6 destinations (V8 information architecture) ─
-        #   🏠 Home          status: ticker, KPIs, alerts, open MTM
-        #   📋 Contracts     transactions: imports · local purchases · CBOT slots
-        #   🧮 Calculate     deal evaluator · scenario what-if
-        #   📊 Analysis      performance · scorecards · seasonality · origin · savings
-        #   🏭 Consumption   stock, burn rate, coverage
-        #   ⚙ Setup & Data   suppliers · commodities · market data · data mgmt
-        # Tab order mirrors the daily loop: see status → transact → decide
-        # → analyse → operate → configure.
+        self.tab_home              = tk.Frame(self.nb, bg=CLR["bg"])
+        self.tab_contracts_group   = tk.Frame(self.nb, bg=CLR["bg"])
+        self.tab_single_outer      = tk.Frame(self.nb, bg=CLR["bg"])
+        self.tab_analysis_outer    = tk.Frame(self.nb, bg=CLR["bg"])
+        self.tab_consumption_outer = tk.Frame(self.nb, bg=CLR["bg"])
+        self.tab_setup_outer       = tk.Frame(self.nb, bg=CLR["bg"])
 
-        self.tab_home              = ttk.Frame(self.nb)
-        self.tab_contracts_group   = ttk.Frame(self.nb)
-        self.tab_single_outer      = ttk.Frame(self.nb)
-        self.tab_analysis_outer    = ttk.Frame(self.nb)
-        self.tab_consumption_outer = ttk.Frame(self.nb)
-        self.tab_setup_outer       = ttk.Frame(self.nb)
-
-        self.nb.add(self.tab_home,              text="🏠 Home")
-        self.nb.add(self.tab_contracts_group,   text="📋 Contracts")
-        self.nb.add(self.tab_single_outer,      text="🧮 Calculate")
-        self.nb.add(self.tab_analysis_outer,    text="📊 Analysis")
-        self.nb.add(self.tab_consumption_outer, text="🏭 Consumption")
-        self.nb.add(self.tab_setup_outer,       text="⚙ Setup & Data")
+        self._screen_frames = {
+            "home": self.tab_home, "contracts": self.tab_contracts_group,
+            "calculate": self.tab_single_outer, "analysis": self.tab_analysis_outer,
+            "consumption": self.tab_consumption_outer, "setup": self.tab_setup_outer,
+        }
+        self._frame_to_key = {v: k for k, v in self._screen_frames.items()}
+        for _frame in self._screen_frames.values():
+            _frame.place(in_=self.nb, x=0, y=0, relwidth=1, relheight=1)
 
         # ── Contracts group: everything transactional in one place ───────
         self.tab_contracts_group.columnconfigure(0, weight=1)
@@ -6480,6 +6635,7 @@ class App(tk.Tk):
         self._build_analysis_tab()
 
         self._build_onboarding_strip()
+        self.nb.select(self.tab_home)
 
 
     # ------------------------------------------------------------------
