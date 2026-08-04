@@ -62,26 +62,94 @@ try:
 except Exception:
     HAS_MPL = False
 
-FONT_FAMILY = "Segoe UI"
+# ══════════════════════════════════════════════════════════════════════
+# Bundled fonts (Inter / IBM Plex Mono, both SIL OFL) — loaded privately
+# for this process only so the app doesn't depend on the fonts being
+# installed on the user's Windows machine. FONT_FAMILY/FONT_MONO start as
+# safe system-font fallbacks and are upgraded in place (global rebind) by
+# _resolve_fonts() once a Tk root exists and can query font.families().
+# ══════════════════════════════════════════════════════════════════════
+_BUNDLED_FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
+
+
+def _load_bundled_fonts():
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        FR_PRIVATE = 0x10
+        for sub in ("Inter", "IBM_Plex_Mono"):
+            d = os.path.join(_BUNDLED_FONT_DIR, sub)
+            if not os.path.isdir(d):
+                continue
+            for fn in os.listdir(d):
+                if fn.lower().endswith((".ttf", ".otf")):
+                    try:
+                        ctypes.windll.gdi32.AddFontResourceExW(
+                            os.path.join(d, fn), FR_PRIVATE, 0)
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+
+
+_load_bundled_fonts()
+
+FONT_FAMILY = "Segoe UI"   # resolved to "Inter" by _resolve_fonts() when available
+FONT_MONO   = "Consolas"   # resolved to "IBM Plex Mono" by _resolve_fonts() when available
 FS_BODY  = 9    # default body / labels / table text
 FS_EMPH  = 10   # emphasized rows, section labels
 FS_KPI   = 13   # KPI card values
 FS_TITLE = 16   # page / hero titles
 
+
+def _resolve_fonts(root):
+    """Upgrade FONT_FAMILY/FONT_MONO to the bundled fonts once a Tk root
+    exists to query them; call from App.__init__ before any widget is built."""
+    global FONT_FAMILY, FONT_MONO
+    try:
+        import tkinter.font as _tkfont
+        available = set(_tkfont.families(root))
+        if "Inter" in available:
+            FONT_FAMILY = "Inter"
+        if "IBM Plex Mono" in available:
+            FONT_MONO = "IBM Plex Mono"
+    except Exception:
+        pass
+
+
+# ══════════════════════════════════════════════════════════════════════
+# DESIGN TOKENS — single source of truth for the app's color system,
+# matching the Prometheus web mockup (oklch values converted to hex,
+# since Tk has no oklch()/CSS-grid/border-radius support).
+# Rule: no UI text below FS_BODY (9pt); muted text no lighter than
+# CLR["muted"] on light backgrounds (WCAG AA at small sizes).
+# ══════════════════════════════════════════════════════════════════════
 CLR = {
-    "bg":       "#f4f7fb",   # app background
-    "surface":  "#ffffff",   # cards
-    "border":   "#d7e0ea",   # card / table borders
-    "text":     "#0f172a",   # primary text
-    "muted":    "#5f6b7a",   # secondary text on light bg
-    "muted_dk": "#9db4cb",   # secondary text on dark bg
-    "primary":  "#2563eb",   # primary action
-    "success":  "#15803d",
-    "warning":  "#b45309",
-    "danger":   "#b00020",
-    "accent":   "#0ea5e9",
-    "dark":     "#0f172a",   # dark rail
-    "dark2":    "#111c31",   # dark card
+    "bg":            "#f5f2ed",   # app background (warm off-white)
+    "surface":       "#fdfcfb",   # cards
+    "border":        "#dedad2",   # card / table borders
+    "text":          "#211e1a",   # primary text
+    "muted":         "#6b6459",   # secondary text on light bg
+    "muted_dk":      "#9db4cb",   # secondary text on dark bg
+    "primary":       "#2563eb",   # primary action / accent blue
+    "primary_hover": "#1d4ed8",
+    "success":       "#15803d",
+    "success_bg":    "#dbf3de",
+    "success_text":  "#1f6b2e",
+    "warning":       "#b45309",
+    "warning_bg":    "#f5e6ce",
+    "warning_text":  "#8a5a16",
+    "danger":        "#b00020",
+    "accent":        "#0ea5e9",
+    "accent_gold":   "#c99a4b",   # secondary chart line / avatar accent
+    "dark":          "#211e1a",   # dark rail
+    "dark2":         "#111c31",   # dark card
+    "sidebar_bg":       "#1b2036",   # left nav background
+    "sidebar_hover":    "#28304c",
+    "sidebar_border":   "#2e3550",
+    "sidebar_text":     "#d9dbe8",   # default nav item text
+    "sidebar_text_dim": "#8d90a8",   # muted nav sub-text
 }
 
 DATE_ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -3157,6 +3225,7 @@ def validate_single_inputs(comm_meta, inputs):
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
+        _resolve_fonts(self)
         self.title(APP_NAME)
         self.geometry("1450x900")
         # Allow smaller/laptop screens; large tabs now scroll instead of hiding sections.
@@ -3258,22 +3327,112 @@ class App(tk.Tk):
             pass
 
     def _apply_global_style(self):
-        """V8 design tokens applied once, app-wide: one base font, readable
+        """Design tokens applied once, app-wide: one base font, readable
         trees, consistent notebook chrome. Individual screens must not
         override these except through the token constants."""
         try:
             style = ttk.Style(self)
-            style.configure(".", font=(FONT_FAMILY, FS_BODY))
+            try:
+                style.theme_use("clam")
+            except Exception:
+                pass
+            style.configure(".", font=(FONT_FAMILY, FS_BODY),
+                             background=CLR["bg"], foreground=CLR["text"])
+            style.configure("TFrame", background=CLR["bg"])
+            style.configure("TLabel", background=CLR["bg"], foreground=CLR["text"])
             style.configure("Treeview",
-                            rowheight=max(22, round(24 * getattr(self, "_font_scale", 1.0))),
-                            font=(FONT_FAMILY, FS_BODY))
-            style.configure("Treeview.Heading", font=(FONT_FAMILY, FS_BODY, "bold"))
-            style.configure("TNotebook.Tab", font=(FONT_FAMILY, FS_BODY), padding=(12, 5))
+                             rowheight=max(22, round(26 * getattr(self, "_font_scale", 1.0))),
+                             font=(FONT_FAMILY, FS_BODY),
+                             background=CLR["surface"], fieldbackground=CLR["surface"],
+                             foreground=CLR["text"], borderwidth=0)
+            style.map("Treeview",
+                      background=[("selected", CLR["primary"])],
+                      foreground=[("selected", "#ffffff")])
+            style.configure("Treeview.Heading", font=(FONT_FAMILY, FS_BODY, "bold"),
+                             background="#efebe3", foreground=CLR["muted"],
+                             relief="flat", borderwidth=0)
+            style.map("Treeview.Heading", background=[("active", "#efebe3")])
+            style.configure("TNotebook", background=CLR["bg"], borderwidth=0)
+            style.configure("TNotebook.Tab", font=(FONT_FAMILY, FS_BODY), padding=(12, 5),
+                             background=CLR["bg"], foreground=CLR["muted"])
+            style.map("TNotebook.Tab",
+                      background=[("selected", CLR["surface"])],
+                      foreground=[("selected", CLR["text"])])
+            style.configure("TLabelframe", background=CLR["bg"], borderwidth=1,
+                             relief="solid", bordercolor=CLR["border"])
             style.configure("TLabelframe.Label", font=(FONT_FAMILY, FS_BODY, "bold"),
-                            foreground="#1a4fa0")
-            style.configure("TButton", font=(FONT_FAMILY, FS_BODY))
+                             background=CLR["bg"], foreground=CLR["primary"])
+            style.configure("TButton", font=(FONT_FAMILY, FS_BODY), padding=(10, 6))
+            style.configure("TEntry", fieldbackground=CLR["surface"],
+                             bordercolor=CLR["border"])
+            style.configure("TCombobox", fieldbackground=CLR["surface"],
+                             bordercolor=CLR["border"])
         except Exception as e:
             log_exception(e, "_apply_global_style")
+
+    # ------------------------------------------------------------------
+    # SHARED CARD-BASED WIDGET HELPERS — reused across every screen so the
+    # web-mockup look (bordered card, KPI tile, pill sub-tabs) is built once.
+    # ------------------------------------------------------------------
+    def _card(self, parent, title=None, subtitle=None, action_text=None,
+              action_command=None, dark=False):
+        """Bordered card matching the mockup. Returns (card_frame, body_frame);
+        callers pack their content into body_frame."""
+        bg = CLR["dark2"] if dark else CLR["surface"]
+        border = CLR["sidebar_border"] if dark else CLR["border"]
+        fg = "#ffffff" if dark else CLR["text"]
+        muted = CLR["sidebar_text_dim"] if dark else CLR["muted"]
+        card = tk.Frame(parent, bg=bg, highlightthickness=1, highlightbackground=border)
+        if title:
+            head = tk.Frame(card, bg=bg)
+            head.pack(fill="x", padx=16, pady=(14, 2 if subtitle else 8))
+            tk.Label(head, text=title, bg=bg, fg=fg,
+                     font=(FONT_FAMILY, FS_EMPH, "bold")).pack(side="left")
+            if action_text:
+                act = tk.Label(head, text=action_text, bg=bg, fg=CLR["primary"],
+                               font=(FONT_FAMILY, FS_BODY, "bold"), cursor="hand2")
+                act.pack(side="right")
+                if action_command:
+                    act.bind("<Button-1>", lambda e: action_command())
+            if subtitle:
+                tk.Label(card, text=subtitle, bg=bg, fg=muted,
+                         font=(FONT_FAMILY, FS_BODY)).pack(anchor="w", padx=16, pady=(0, 8))
+        body = tk.Frame(card, bg=bg)
+        body.pack(fill="both", expand=True, padx=16, pady=(0 if title else 16, 16))
+        return card, body
+
+    def _kpi_card(self, parent, label, value, trend="", trend_color=None, dot=None):
+        """KPI tile: uppercase label (+ optional dot), big mono value, trend line."""
+        bg = CLR["surface"]
+        card = tk.Frame(parent, bg=bg, highlightthickness=1, highlightbackground=CLR["border"])
+        top = tk.Frame(card, bg=bg)
+        top.pack(fill="x", padx=14, pady=(12, 0))
+        tk.Label(top, text=label.upper(), bg=bg, fg=CLR["muted"],
+                 font=(FONT_FAMILY, 8, "bold")).pack(side="left")
+        if dot:
+            tk.Frame(top, bg=dot, width=8, height=8).pack(side="right", pady=2)
+        tk.Label(card, text=value, bg=bg, fg=CLR["text"],
+                 font=(FONT_MONO, FS_KPI, "bold")).pack(anchor="w", padx=14, pady=(4, 0))
+        tk.Label(card, text=trend or " ", bg=bg, fg=(trend_color or CLR["muted"]),
+                 font=(FONT_FAMILY, 9, "bold")).pack(anchor="w", padx=14, pady=(4, 12))
+        return card
+
+    def _pill_tabbar(self, parent, items, active_key, on_select):
+        """items: [(key, label), ...] pill sub-tab row (mockup's contract/analysis/
+        setup sub-navigation). Caller re-renders/rebuilds the bar after on_select."""
+        outer = tk.Frame(parent, bg=CLR["bg"])
+        inner = tk.Frame(outer, bg="#eeeae2")
+        inner.pack(anchor="w", pady=4)
+        for key, label in items:
+            active = key == active_key
+            lbl = tk.Label(inner, text=label,
+                           bg=("#ffffff" if active else "#eeeae2"),
+                           fg=(CLR["text"] if active else CLR["muted"]),
+                           font=(FONT_FAMILY, FS_BODY, "bold" if active else "normal"),
+                           padx=16, pady=8, cursor="hand2")
+            lbl.pack(side="left", padx=2, pady=2)
+            lbl.bind("<Button-1>", lambda e, k=key: on_select(k))
+        return outer
 
     # ------------------------------------------------------------------
     # AUTO-SAVE  — every 30 s, only if state was dirtied since last save
