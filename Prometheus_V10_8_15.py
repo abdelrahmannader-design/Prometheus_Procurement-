@@ -3224,19 +3224,23 @@ def validate_single_inputs(comm_meta, inputs):
 
 
 class _ScreenSwitcher(tk.Frame):
-    """Drop-in replacement for the old top-level ttk.Notebook, driven by the
-    sidebar instead of a tab strip. Screens are overlaid via place()+tkraise()
-    and swapped with .select(frame) — the same call signature the rest of the
-    file already uses (self.nb.select(self.tab_x)), so none of those call
-    sites need to change. .select() with no args returns the current screen's
-    widget path (like ttk.Notebook.select()) for the self.nb.nametowidget(...)
-    lazy-refresh pattern; .bind("<<NotebookTabChanged>>", cb) is honored too."""
+    """Drop-in replacement for a ttk.Notebook, driven by an external pill/
+    sidebar nav instead of a tab strip. Screens are overlaid via
+    place()+tkraise() and swapped with .select(frame) — the same call
+    signature ttk.Notebook has (self.nb.select(self.tab_x)), so call sites
+    elsewhere in the file don't need to change. .select() with no args
+    returns the current screen's widget path (like ttk.Notebook.select())
+    for the self.nb.nametowidget(...) lazy-refresh pattern;
+    .bind("<<NotebookTabChanged>>", cb) is honored too. `on_select(tab)` is
+    an optional extra hook (e.g. to restyle the nav that drives this
+    switcher) fired before the NotebookTabChanged callback."""
 
-    def __init__(self, master, app, **kw):
+    def __init__(self, master, app, on_select=None, **kw):
         super().__init__(master, **kw)
         self._app = app
         self._current = None
         self._on_change_cb = None
+        self._on_select_hook = on_select
 
     def select(self, tab=None):
         if tab is None:
@@ -3245,7 +3249,8 @@ class _ScreenSwitcher(tk.Frame):
             return
         self._current = tab
         tab.tkraise()
-        self._app._on_sidebar_screen_changed(tab)
+        if self._on_select_hook:
+            self._on_select_hook(tab)
         if self._on_change_cb:
             try:
                 self._on_change_cb()
@@ -3458,22 +3463,51 @@ class App(tk.Tk):
                  font=(FONT_FAMILY, 9, "bold"), **trend_kw).pack(anchor="w", padx=14, pady=(4, 12))
         return card
 
-    def _pill_tabbar(self, parent, items, active_key, on_select):
-        """items: [(key, label), ...] pill sub-tab row (mockup's contract/analysis/
-        setup sub-navigation). Caller re-renders/rebuilds the bar after on_select."""
-        outer = tk.Frame(parent, bg=CLR["bg"])
-        inner = tk.Frame(outer, bg="#eeeae2")
-        inner.pack(anchor="w", pady=4)
-        for key, label in items:
-            active = key == active_key
-            lbl = tk.Label(inner, text=label,
-                           bg=("#ffffff" if active else "#eeeae2"),
+    def _build_pill_switcher(self, parent, items, extra=None):
+        """Pill sub-tab row (mockup's Contracts/Analysis/Setup sub-navigation)
+        wired to a _ScreenSwitcher content host. `items`: [(key, label), ...].
+        Returns (bar_frame, host_frame, screens_dict, select_fn) — bar_frame
+        and host_frame still need to be gridded/packed by the caller;
+        screens_dict[key] is that pill's content frame to build into.
+        `extra` optionally packs extra widgets (e.g. search/actions) into the
+        same row as the pills, right-aligned."""
+        bar = tk.Frame(parent, bg=CLR["bg"])
+        pill_row = tk.Frame(bar, bg="#eeeae2")
+        pill_row.pack(side="left", anchor="w", pady=4)
+        if extra:
+            extra_row = tk.Frame(bar, bg=CLR["bg"])
+            extra_row.pack(side="right", anchor="e")
+            extra(extra_row)
+
+        host = tk.Frame(parent, bg=CLR["bg"])
+        screens = {}
+        pill_labels = {}
+
+        def _select(key):
+            switcher.select(screens[key])
+
+        def _on_switch(_tab):
+            for k, w in pill_labels.items():
+                active = (screens[k] is _tab)
+                w.configure(bg=("#ffffff" if active else "#eeeae2"),
                            fg=(CLR["text"] if active else CLR["muted"]),
-                           font=(FONT_FAMILY, FS_BODY, "bold" if active else "normal"),
-                           padx=16, pady=8, cursor="hand2")
+                           font=(FONT_FAMILY, FS_BODY, "bold" if active else "normal"))
+
+        switcher = _ScreenSwitcher(host, self, on_select=_on_switch, bg=CLR["bg"])
+        switcher.pack(fill="both", expand=True)
+
+        for key, label in items:
+            frame = tk.Frame(switcher, bg=CLR["bg"])
+            frame.place(in_=switcher, x=0, y=0, relwidth=1, relheight=1)
+            screens[key] = frame
+            lbl = tk.Label(pill_row, text=label, bg="#eeeae2", fg=CLR["muted"],
+                           font=(FONT_FAMILY, FS_BODY), padx=16, pady=8, cursor="hand2")
             lbl.pack(side="left", padx=2, pady=2)
-            lbl.bind("<Button-1>", lambda e, k=key: on_select(k))
-        return outer
+            lbl.bind("<Button-1>", lambda e, k=key: _select(k))
+            pill_labels[key] = lbl
+
+        _select(items[0][0])
+        return bar, host, screens, switcher
 
     # ------------------------------------------------------------------
     # AUTO-SAVE  — every 30 s, only if state was dirtied since last save
@@ -6558,7 +6592,8 @@ class App(tk.Tk):
         #   Analysis      performance · scorecards · seasonality · origin · savings
         #   Consumption   stock, burn rate, coverage
         #   Setup & Data  suppliers · commodities · market data · data mgmt
-        self.nb = _ScreenSwitcher(self._content_host, self, bg=CLR["bg"])
+        self.nb = _ScreenSwitcher(self._content_host, self,
+                                  on_select=self._on_sidebar_screen_changed, bg=CLR["bg"])
         self.nb.pack(fill="both", expand=True)
 
         self.tab_home              = tk.Frame(self.nb, bg=CLR["bg"])
@@ -6577,17 +6612,18 @@ class App(tk.Tk):
         for _frame in self._screen_frames.values():
             _frame.place(in_=self.nb, x=0, y=0, relwidth=1, relheight=1)
 
-        # ── Contracts group: everything transactional in one place ───────
+        # ── Contracts group: everything transactional in one place, as
+        # pill sub-tabs matching the mockup's Import/Local/Slots pattern ──
         self.tab_contracts_group.columnconfigure(0, weight=1)
-        self.tab_contracts_group.rowconfigure(0, weight=1)
-        self._contracts_nb = ttk.Notebook(self.tab_contracts_group)
-        self._contracts_nb.grid(row=0, column=0, sticky="nsew")
-        self.tab_contracts_outer       = ttk.Frame(self._contracts_nb)
-        self.tab_local_purchases_outer = ttk.Frame(self._contracts_nb)
-        self.tab_slots_outer           = ttk.Frame(self._contracts_nb)
-        self._contracts_nb.add(self.tab_contracts_outer,       text="Import Contracts")
-        self._contracts_nb.add(self.tab_local_purchases_outer, text="Local Purchases")
-        self._contracts_nb.add(self.tab_slots_outer,           text="CBOT Slots")
+        self.tab_contracts_group.rowconfigure(1, weight=1)
+        _c_bar, _c_host, _c_screens, self._contracts_nb = self._build_pill_switcher(
+            self.tab_contracts_group,
+            [("import", "Import Contracts"), ("local", "Local Purchases"), ("slots", "CBOT Slots")])
+        _c_bar.grid(row=0, column=0, sticky="w", padx=12, pady=(10, 0))
+        _c_host.grid(row=1, column=0, sticky="nsew")
+        self.tab_contracts_outer       = _c_screens["import"]
+        self.tab_local_purchases_outer = _c_screens["local"]
+        self.tab_slots_outer           = _c_screens["slots"]
 
         # ── Scrollable inner frames (existing builders keep their names) ─
         self.tab_contracts       = self._make_scrollable_tab(self.tab_contracts_outer, padding=10)
@@ -16228,31 +16264,31 @@ class App(tk.Tk):
         self.tab_contracts.columnconfigure(0, weight=1)
         style = ttk.Style(self)
         style.configure("Contracts.Treeview", rowheight=max(28, round(30 * getattr(self, "_font_scale", 1.0))),
-                        font=(FONT_FAMILY, FS_BODY), background="#ffffff", fieldbackground="#ffffff")
+                        font=(FONT_FAMILY, FS_BODY), background=CLR["surface"], fieldbackground=CLR["surface"])
         style.configure("Contracts.Treeview.Heading", font=(FONT_FAMILY, FS_BODY, "bold"),
-                        padding=(7, 7), foreground="#1e293b")
+                        padding=(7, 7), foreground=CLR["muted"])
         style.configure("Contracts.TNotebook.Tab", font=(FONT_FAMILY, FS_BODY, "bold"), padding=(14, 8))
         style.configure("Contracts.TLabelframe.Label", font=(FONT_FAMILY, FS_BODY, "bold"),
-                        foreground="#1d4ed8")
+                        foreground=CLR["primary"])
 
-        hero = tk.Frame(self.tab_contracts, bg="#0b1f3a",
-                        highlightthickness=1, highlightbackground="#183b66")
+        hero = tk.Frame(self.tab_contracts, bg=CLR["sidebar_bg"],
+                        highlightthickness=1, highlightbackground=CLR["sidebar_border"])
         hero.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         hero.columnconfigure(0, weight=1)
-        title_box = tk.Frame(hero, bg="#0b1f3a")
+        title_box = tk.Frame(hero, bg=CLR["sidebar_bg"])
         title_box.grid(row=0, column=0, sticky="w", padx=16, pady=13)
-        tk.Label(title_box, text="Contract Portfolio", bg="#0b1f3a", fg="#ffffff",
+        tk.Label(title_box, text="Contract Portfolio", bg=CLR["sidebar_bg"], fg="#ffffff",
                  font=(FONT_FAMILY, 18, "bold")).pack(anchor="w")
         tk.Label(title_box, text="Create, price, monitor and audit every import contract from one desk",
-                 bg="#0b1f3a", fg="#a9c2de", font=(FONT_FAMILY, FS_BODY)).pack(anchor="w")
-        actions = tk.Frame(hero, bg="#0b1f3a")
+                 bg=CLR["sidebar_bg"], fg=CLR["sidebar_text_dim"], font=(FONT_FAMILY, FS_BODY)).pack(anchor="w")
+        actions = tk.Frame(hero, bg=CLR["sidebar_bg"])
         actions.grid(row=0, column=1, sticky="e", padx=14, pady=12)
         self._contract_editor_button_var = tk.StringVar(value="Hide editor")
         self._contract_history_button_var = tk.StringVar(value="Show history")
         def _hero_button(text_value=None, text=None, command=None, primary=False):
             return tk.Button(actions, textvariable=text_value, text=text or "", command=command,
-                             bg="#2563eb" if primary else "#16375f", fg="#ffffff",
-                             activebackground="#1d4ed8" if primary else "#234c78",
+                             bg=CLR["primary"] if primary else CLR["sidebar_hover"], fg="#ffffff",
+                             activebackground=CLR["primary_hover"] if primary else CLR["sidebar_border"],
                              activeforeground="#ffffff", relief="flat", cursor="hand2",
                              padx=12, pady=7, font=(FONT_FAMILY, FS_BODY, "bold"))
         hero_actions = [
@@ -16287,25 +16323,17 @@ class App(tk.Tk):
         for i in range(7):
             kpi_strip.columnconfigure(i, weight=1)
 
-        def _ct_kpi(col, title, var, sub, accent="#38bdf8"):
-            card = tk.Frame(kpi_strip, bg="#ffffff", highlightbackground="#dbe4ef",
-                            highlightthickness=1, bd=0)
+        def _ct_kpi(col, title, var, sub, accent=CLR["primary"]):
+            card = self._kpi_card(kpi_strip, title, var, sub, dot=accent)
             card.grid(row=0, column=col, sticky="nsew", padx=(0 if col == 0 else 6, 0))
-            tk.Frame(card, bg=accent, height=4).pack(fill="x", side="top")
-            tk.Label(card, text=title, bg="#ffffff", fg="#64748b",
-                     font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=10, pady=(7, 0))
-            tk.Label(card, textvariable=var, bg="#ffffff", fg="#0f172a",
-                     font=("Segoe UI", 13, "bold")).pack(anchor="w", padx=10)
-            tk.Label(card, text=sub, bg="#ffffff", fg="#5f6b7a",
-                     font=("Segoe UI", 9)).pack(anchor="w", padx=10, pady=(0, 7))
 
-        _ct_kpi(0, "Total", self.ct_kpi_total_var, "visible rows", "#64748b")
-        _ct_kpi(1, "Open", self.ct_kpi_open_var, "live exposure", "#38bdf8")
-        _ct_kpi(2, "Closed", self.ct_kpi_closed_var, "realized", "#22c55e")
-        _ct_kpi(3, "Open Qty", self.ct_kpi_open_qty_var, "contract qty", "#0ea5e9")
+        _ct_kpi(0, "Total", self.ct_kpi_total_var, "visible rows", CLR["muted"])
+        _ct_kpi(1, "Open", self.ct_kpi_open_var, "live exposure", CLR["accent"])
+        _ct_kpi(2, "Closed", self.ct_kpi_closed_var, "realized", CLR["success"])
+        _ct_kpi(3, "Open Qty", self.ct_kpi_open_qty_var, "contract qty", CLR["accent"])
         _ct_kpi(4, "Remaining", self.ct_kpi_remaining_var, "est. balance", "#8b5cf6")
-        _ct_kpi(5, "Open Edge", self.ct_kpi_open_edge_var, "vs latest local", "#f59e0b")
-        _ct_kpi(6, "Missing", self.ct_kpi_missing_var, "data checks", "#ef4444")
+        _ct_kpi(5, "Open Edge", self.ct_kpi_open_edge_var, "vs latest local", CLR["warning"])
+        _ct_kpi(6, "Missing", self.ct_kpi_missing_var, "data checks", CLR["danger"])
 
         form = ttk.LabelFrame(self.tab_contracts, text="Contract Editor · commercial, pricing and logistics", padding=12, style="Contracts.TLabelframe")
         form.grid(row=2, column=0, sticky="ew", pady=(0,10))
