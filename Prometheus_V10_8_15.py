@@ -17227,10 +17227,16 @@ class App(tk.Tk):
 
         parent = scroll_frame
 
-        ttk.Label(parent, text="Single Deal Calculator (Add snapshot to History)", font=("Segoe UI", 12, "bold")).grid(row=0, column=0, sticky="w")
+        header = tk.Frame(parent, bg=CLR["bg"])
+        header.grid(row=0, column=0, sticky="w", pady=(0, 4))
+        tk.Label(header, text="Deal Evaluator", bg=CLR["bg"], fg=CLR["text"],
+                 font=(FONT_FAMILY, FS_TITLE, "bold")).pack(anchor="w")
+        tk.Label(header, text="Compare an import offer against your local landed-cost benchmark.",
+                 bg=CLR["bg"], fg=CLR["muted"], font=(FONT_FAMILY, FS_BODY)).pack(anchor="w")
 
-        frm = ttk.Frame(parent)
-        frm.grid(row=1, column=0, sticky="nw", pady=(10,0))
+        form_card, form_body = self._card(parent)
+        form_card.grid(row=1, column=0, sticky="new", pady=(8, 0))
+        frm = form_body
         for i in range(6):
             frm.columnconfigure(i, weight=0, minsize=150)
 
@@ -17545,8 +17551,8 @@ class App(tk.Tk):
     }
 
     def _build_decision_card(self, parent, row0):
-        card = tk.Frame(parent, bg="#ffffff", highlightthickness=2,
-                        highlightbackground="#1f3864")
+        card = tk.Frame(parent, bg=CLR["surface"], highlightthickness=2,
+                        highlightbackground=CLR["primary"])
         card.grid(row=row0, column=0, columnspan=2, sticky="ew", pady=(4, 8))
         self._dec_head = tk.Label(card, text="Recommendation: run Calculate",
                                   bg="#f1f5f9", fg="#334155", anchor="w",
