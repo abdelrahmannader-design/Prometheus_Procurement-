@@ -11882,39 +11882,34 @@ class App(tk.Tk):
     # SETUP TAB  (merged: Suppliers + Commodities + Local Prices)
     # ------------------------------------------------------------------
     def _build_setup_tab(self):
-        """Create an inner notebook inside tab_setup holding the three setup sub-tabs."""
+        """Create the Setup & Data sub-screens as pill tabs inside tab_setup."""
         self.tab_setup.columnconfigure(0, weight=1)
-        self.tab_setup.rowconfigure(1, weight=1)
+        self.tab_setup.rowconfigure(2, weight=1)
 
-        banner = ttk.Frame(self.tab_setup, padding=(0, 0, 0, 6))
-        banner.grid(row=0, column=0, sticky="ew")
-        ttk.Label(
-            banner,
-            text="Setup & Data  —  suppliers & commodities (one-time)  ·  "
-                 "market data logs (ongoing)  ·  backup, restore & reset.",
-            font=(FONT_FAMILY, FS_EMPH, "bold"),
-            foreground="#1a6ebd",
-        ).pack(anchor="w")
+        header = tk.Frame(self.tab_setup, bg=CLR["bg"])
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 4))
+        tk.Label(header, text="Setup & Data", bg=CLR["bg"], fg=CLR["text"],
+                 font=(FONT_FAMILY, FS_TITLE, "bold")).pack(anchor="w")
+        tk.Label(header, text="Suppliers & commodities (one-time) · market data logs "
+                              "(ongoing) · backup, restore & reset",
+                 bg=CLR["bg"], fg=CLR["muted"], font=(FONT_FAMILY, FS_BODY)).pack(anchor="w")
 
-        inner_nb = ttk.Notebook(self.tab_setup)
-        inner_nb.grid(row=1, column=0, sticky="nsew")
+        _s_bar, _s_host, _s_screens, self._setup_nb, _s_finalize = self._build_pill_switcher(
+            self.tab_setup,
+            [("suppliers", "Suppliers"), ("commodities", "Commodities"),
+             ("local_prices", "Local Prices"), ("freight", "Freight Rates"),
+             ("fx_history", "FX & CBOT History"), ("datamgmt", "Data Management")])
+        _s_bar.grid(row=1, column=0, sticky="w", pady=(0, 4))
+        _s_host.grid(row=2, column=0, sticky="nsew")
+
         # Stored so other screens can open the exact Setup & Data record.
         # Basis Tracker uses this for direct access to the selected local-price row.
-        self._setup_nb = inner_nb
-
-        self.tab_suppliers    = ttk.Frame(inner_nb, padding=8)
-        self.tab_commodities  = ttk.Frame(inner_nb, padding=8)
-        self.tab_local_prices = ttk.Frame(inner_nb, padding=8)
-        self.tab_freight      = ttk.Frame(inner_nb, padding=8)
-        self.tab_fx_history   = ttk.Frame(inner_nb, padding=8)
-        self.tab_datamgmt     = ttk.Frame(inner_nb, padding=8)
-
-        inner_nb.add(self.tab_suppliers,    text="Suppliers")
-        inner_nb.add(self.tab_commodities,  text="Commodities")
-        inner_nb.add(self.tab_local_prices, text="Local Prices")
-        inner_nb.add(self.tab_freight,      text="Freight Rates")
-        inner_nb.add(self.tab_fx_history,   text="FX & CBOT History")
-        inner_nb.add(self.tab_datamgmt,     text="Data Management")
+        self.tab_suppliers    = _s_screens["suppliers"]
+        self.tab_commodities  = _s_screens["commodities"]
+        self.tab_local_prices = _s_screens["local_prices"]
+        self.tab_freight      = _s_screens["freight"]
+        self.tab_fx_history   = _s_screens["fx_history"]
+        self.tab_datamgmt     = _s_screens["datamgmt"]
 
         self._build_suppliers()
         self._build_commodities()
@@ -11922,6 +11917,7 @@ class App(tk.Tk):
         self._build_freight_tab()
         self._build_fx_history_tab()
         self._build_data_management()
+        _s_finalize()
 
     def _build_data_management(self):
         """Settings + backup/restore + the (now safely gated) reset action.
