@@ -1,0 +1,5 @@
+# Optional dependencies already supported by the V10.4 desktop interface.
+# The modular calculation core and its tests require only Python 3.10+.
+matplotlib
+openpyxl
+reportlab
