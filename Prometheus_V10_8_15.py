@@ -7001,14 +7001,14 @@ class App(tk.Tk):
             frame.columnconfigure(col, weight=1, uniform="home-commodity")
         for index, comm in enumerate(options):
             row, col = divmod(index, columns)
-            card = tk.Frame(frame, bg="#0b1728", highlightthickness=1,
-                            highlightbackground="#1f3550", cursor="hand2")
+            card = tk.Frame(frame, bg="#1b2036", highlightthickness=1,
+                            highlightbackground="#2e3550", cursor="hand2")
             card.grid(row=row, column=col, sticky="nsew",
                       padx=(0, 8), pady=(0, 8), ipady=2)
             accent = tk.Frame(card, bg="#64748b", height=4)
             accent.pack(fill="x", side="top")
             tk.Label(card, text=comm, font=("Segoe UI", 11, "bold"),
-                     bg="#0b1728", fg="#f8fafc").pack(anchor="w", padx=10, pady=(7, 2))
+                     bg="#1b2036", fg="#f8fafc").pack(anchor="w", padx=10, pady=(7, 2))
             line_specs = [
                 ("realized", "Realised —", ("Segoe UI", 9, "bold"), "#72e39a"),
                 ("saving_mt", "Saving/MT —", ("Segoe UI", 9), "#dbeafe"),
@@ -7024,11 +7024,11 @@ class App(tk.Tk):
             for key, default, font, fg in line_specs:
                 var = tk.StringVar(value=default)
                 lbl = tk.Label(card, textvariable=var, font=font,
-                               bg="#0b1728", fg=fg)
+                               bg="#1b2036", fg=fg)
                 lbl.pack(anchor="w", padx=10, pady=(0, 1))
                 vars_[key] = var
                 vars_[key + "_label"] = lbl
-            tk.Frame(card, bg="#0b1728", height=4).pack(fill="x")
+            tk.Frame(card, bg="#1b2036", height=4).pack(fill="x")
             for widget in (card, *card.winfo_children()):
                 widget.bind("<Button-1>", lambda _e, c=comm: self._home_select_commodity(c))
             self._hd_comm_kpi_vars[comm] = vars_
@@ -7130,14 +7130,14 @@ class App(tk.Tk):
     @staticmethod
     def _home_dark_panel(parent, title, subtitle="", columnspan=1):
         """Create one reusable dark dashboard panel."""
-        panel = tk.Frame(parent, bg="#0b1728", highlightthickness=1,
-                         highlightbackground="#1f3550")
+        panel = tk.Frame(parent, bg="#1b2036", highlightthickness=1,
+                         highlightbackground="#2e3550")
         panel.columnconfigure(0, weight=1)
-        tk.Label(panel, text=title, bg="#0b1728", fg="#f8fafc",
+        tk.Label(panel, text=title, bg="#1b2036", fg="#f8fafc",
                  font=("Segoe UI", 10, "bold")).grid(
                      row=0, column=0, sticky="w", padx=12, pady=(10, 0))
         if subtitle:
-            tk.Label(panel, text=subtitle, bg="#0b1728", fg="#7890a8",
+            tk.Label(panel, text=subtitle, bg="#1b2036", fg="#7890a8",
                      font=("Segoe UI", 8)).grid(
                          row=1, column=0, sticky="w", padx=12, pady=(0, 4))
         return panel
@@ -7243,7 +7243,7 @@ class App(tk.Tk):
 
     def _build_home_modern_overview(self, parent):
         """Build the dark executive section shown above operational detail."""
-        bg = "#07111f"
+        bg = "#1b2036"
         parent.configure(bg=bg)
         parent.columnconfigure(0, weight=1)
 
@@ -7276,30 +7276,30 @@ class App(tk.Tk):
         trend.grid(row=0, column=0, columnspan=2, sticky="nsew", padx=(0, 8), pady=(0, 8))
         self._hd_modern_trend_title = tk.StringVar(value="Realised savings by period")
         tk.Label(trend, textvariable=self._hd_modern_trend_title,
-                 bg="#0b1728", fg="#60a5fa", font=("Segoe UI", 8, "bold")).grid(
+                 bg="#1b2036", fg="#60a5fa", font=("Segoe UI", 8, "bold")).grid(
                      row=2, column=0, sticky="w", padx=12, pady=(0, 2))
         self._hd_modern_trend_canvas = tk.Canvas(trend, width=560, height=155,
-                                                 bg="#0b1728", highlightthickness=0)
+                                                 bg="#1b2036", highlightthickness=0)
         self._hd_modern_trend_canvas.grid(row=3, column=0, sticky="ew", padx=4, pady=(0, 4))
 
         exposure = self._home_dark_panel(overview, "Open Exposure by Commodity", "Current own-after value")
         exposure.grid(row=0, column=2, sticky="nsew", padx=(0, 8), pady=(0, 8))
         self._hd_modern_exposure_canvas = tk.Canvas(exposure, width=330, height=165,
-                                                    bg="#0b1728", highlightthickness=0)
+                                                    bg="#1b2036", highlightthickness=0)
         self._hd_modern_exposure_canvas.grid(row=2, column=0, sticky="ew", padx=4, pady=(2, 4))
 
         actions = self._home_dark_panel(overview, "Action Centre", "Highest-priority management issues")
         actions.grid(row=0, column=3, sticky="nsew", pady=(0, 8))
         self._hd_modern_action_rows = []
         for idx in range(4):
-            row = tk.Frame(actions, bg="#0b1728")
+            row = tk.Frame(actions, bg="#1b2036")
             row.grid(row=2+idx, column=0, sticky="ew", padx=10, pady=2)
             row.columnconfigure(1, weight=1)
-            icon = tk.Label(row, text="●", bg="#0b1728", fg="#f59e0b",
+            icon = tk.Label(row, text="●", bg="#1b2036", fg="#f59e0b",
                             font=("Segoe UI", 9, "bold"))
             icon.grid(row=0, column=0, sticky="n", padx=(0, 7))
             var = tk.StringVar(value="Refresh to load actions")
-            lbl = tk.Label(row, textvariable=var, bg="#0b1728", fg="#cbd5e1",
+            lbl = tk.Label(row, textvariable=var, bg="#1b2036", fg="#cbd5e1",
                            font=("Segoe UI", 8), justify="left", wraplength=220)
             lbl.grid(row=0, column=1, sticky="w")
             badge = tk.Label(row, text="", bg="#10243c", fg="#93c5fd",
@@ -7309,12 +7309,12 @@ class App(tk.Tk):
 
         recent = self._home_dark_panel(overview, "Top Contracts / Recent Decisions", "Latest contract activity")
         recent.grid(row=1, column=0, columnspan=2, sticky="nsew", padx=(0, 8), pady=(0, 8))
-        hdr = tk.Frame(recent, bg="#0b1728")
+        hdr = tk.Frame(recent, bg="#1b2036")
         hdr.grid(row=2, column=0, sticky="ew", padx=12, pady=(3, 2))
         widths = (("Contract", 16), ("Commodity", 12), ("Supplier", 18), ("Qty", 12), ("Status", 12))
         for col, (name, width) in enumerate(widths):
             hdr.columnconfigure(col, weight=1 if col == 2 else 0)
-            tk.Label(hdr, text=name, width=width, anchor="w", bg="#0b1728", fg="#7890a8",
+            tk.Label(hdr, text=name, width=width, anchor="w", bg="#1b2036", fg="#7890a8",
                      font=("Segoe UI", 7, "bold")).grid(row=0, column=col, sticky="w")
         self._hd_modern_recent_rows = []
         for idx in range(4):
@@ -7334,17 +7334,17 @@ class App(tk.Tk):
         coverage.grid(row=1, column=2, sticky="nsew", padx=(0, 8), pady=(0, 8))
         self._hd_modern_coverage_rows = []
         for idx in range(5):
-            row = tk.Frame(coverage, bg="#0b1728")
+            row = tk.Frame(coverage, bg="#1b2036")
             row.grid(row=2+idx, column=0, sticky="ew", padx=12, pady=2)
             row.columnconfigure(0, weight=1)
             name = tk.StringVar(value="—")
             days = tk.StringVar(value="—")
-            dot = tk.Label(row, text="●", bg="#0b1728", fg="#64748b",
+            dot = tk.Label(row, text="●", bg="#1b2036", fg="#64748b",
                            font=("Segoe UI", 8))
             dot.grid(row=0, column=0, sticky="w")
-            tk.Label(row, textvariable=name, bg="#0b1728", fg="#cbd5e1",
+            tk.Label(row, textvariable=name, bg="#1b2036", fg="#cbd5e1",
                      font=("Segoe UI", 8, "bold")).grid(row=0, column=0, sticky="w", padx=(15, 0))
-            dl = tk.Label(row, textvariable=days, bg="#0b1728", fg="#f8fafc",
+            dl = tk.Label(row, textvariable=days, bg="#1b2036", fg="#f8fafc",
                           font=("Segoe UI", 8, "bold"))
             dl.grid(row=0, column=1, sticky="e")
             self._hd_modern_coverage_rows.append((dot, name, days, dl))
@@ -7354,15 +7354,15 @@ class App(tk.Tk):
         self._hd_modern_quality_var = tk.StringVar(value="Refresh to assess")
         self._hd_modern_quality_lbl = tk.Label(
             quality, textvariable=self._hd_modern_quality_var,
-            bg="#0b1728", fg="#72e39a", font=("Segoe UI", 12, "bold"),
+            bg="#1b2036", fg="#72e39a", font=("Segoe UI", 12, "bold"),
             justify="left")
         self._hd_modern_quality_lbl.grid(row=2, column=0, sticky="w", padx=12, pady=(6, 2))
         self._hd_modern_quality_note = tk.StringVar(value="")
         tk.Label(quality, textvariable=self._hd_modern_quality_note,
-                 bg="#0b1728", fg="#7890a8", font=("Segoe UI", 8),
+                 bg="#1b2036", fg="#7890a8", font=("Segoe UI", 8),
                  wraplength=240, justify="left").grid(row=3, column=0, sticky="w",
                                                        padx=12, pady=(0, 8))
-        links = tk.Frame(quality, bg="#0b1728")
+        links = tk.Frame(quality, bg="#1b2036")
         links.grid(row=4, column=0, sticky="ew", padx=10, pady=(0, 10))
         for col in range(2):
             links.columnconfigure(col, weight=1)
@@ -7448,7 +7448,7 @@ class App(tk.Tk):
             else:
                 var.set("")
                 badge.configure(text="")
-                icon.configure(fg="#0b1728")
+                icon.configure(fg="#1b2036")
 
         # Coverage rows for up to five commodities.
         coverage_data = []
@@ -7477,7 +7477,7 @@ class App(tk.Tk):
             else:
                 name_var.set("")
                 days_var.set("")
-                dot.configure(fg="#0b1728")
+                dot.configure(fg="#1b2036")
 
         # Recent contract activity, newest logical date first.
         realised_map = {}
@@ -7549,7 +7549,7 @@ class App(tk.Tk):
         p.rowconfigure(1, weight=1)
 
         # ── ROW 0: market ticker bar ─────────────────────────────────────
-        price_bar = tk.Frame(p, bg="#07111f", height=38)
+        price_bar = tk.Frame(p, bg="#1b2036", height=38)
         price_bar.grid(row=0, column=0, sticky="ew")
         price_bar.grid_propagate(False)
         for i in range(18):
@@ -7559,17 +7559,17 @@ class App(tk.Tk):
         self._pb_labels = {}
         self._pb_prev_prices = {}
 
-        tk.Label(price_bar, text="LIVE MARKET", bg="#07111f", fg="#7dd3fc",
+        tk.Label(price_bar, text="LIVE MARKET", bg="#1b2036", fg="#7dd3fc",
                  font=("Segoe UI", 9, "bold")).grid(row=0, column=0, sticky="w", padx=(14, 8), pady=9)
 
         def _pb_item(parent, name, col):
             base = 1 + col * 3
-            tk.Label(parent, text=name, bg="#07111f", fg="#9db4cb",
+            tk.Label(parent, text=name, bg="#1b2036", fg="#9db4cb",
                      font=("Segoe UI", 9, "bold")).grid(row=0, column=base, sticky="e", padx=(10, 3), pady=8)
-            p_lbl = tk.Label(parent, text="—", bg="#07111f", fg="#e5f2ff",
+            p_lbl = tk.Label(parent, text="—", bg="#1b2036", fg="#e5f2ff",
                              font=("Segoe UI", 9, "bold"))
             p_lbl.grid(row=0, column=base + 1, sticky="w", padx=(0, 2))
-            d_lbl = tk.Label(parent, text="", bg="#07111f", fg="#94a3b8",
+            d_lbl = tk.Label(parent, text="", bg="#1b2036", fg="#94a3b8",
                              font=("Segoe UI", 9))
             d_lbl.grid(row=0, column=base + 2, sticky="w", padx=(0, 8))
             self._pb_labels[name] = (p_lbl, d_lbl)
@@ -7582,7 +7582,7 @@ class App(tk.Tk):
 
         self._pb_ts_var = tk.StringVar(value="")
         tk.Label(price_bar, textvariable=self._pb_ts_var,
-                 bg="#07111f", fg="#9db4cb",
+                 bg="#1b2036", fg="#9db4cb",
                  font=("Segoe UI", 9)).grid(row=0, column=15, sticky="e", padx=8)
         tk.Button(price_bar, text="⟳ Fetch Live",
                   command=self._pb_fetch_all,
@@ -22489,19 +22489,19 @@ class App(tk.Tk):
                             highlightbackground=CLR["border"], padx=pad, pady=pad)
 
         # ── Hero header ───────────────────────────────────────────────
-        hero = tk.Frame(p, bg="#0b1f3a", padx=18, pady=14)
+        hero = tk.Frame(p, bg="#1b2036", padx=18, pady=14)
         hero.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         hero.columnconfigure(0, weight=1)
-        title_box = tk.Frame(hero, bg="#0b1f3a")
+        title_box = tk.Frame(hero, bg="#1b2036")
         title_box.grid(row=0, column=0, sticky="w")
-        tk.Label(title_box, text="Basis Intelligence", bg="#0b1f3a", fg="#ffffff",
+        tk.Label(title_box, text="Basis Intelligence", bg="#1b2036", fg="#ffffff",
                  font=(FONT_FAMILY, FS_TITLE, "bold")).pack(anchor="w")
         tk.Label(
             title_box,
             text="Compare contracts, local market quotations, and actual local purchases on one auditable basis timeline.",
-            bg="#0b1f3a", fg="#b9c9dc", font=(FONT_FAMILY, FS_BODY),
+            bg="#1b2036", fg="#b9c9dc", font=(FONT_FAMILY, FS_BODY),
             justify="left", wraplength=920).pack(anchor="w", pady=(3, 0))
-        hero_badges = tk.Frame(hero, bg="#0b1f3a")
+        hero_badges = tk.Frame(hero, bg="#1b2036")
         hero_badges.grid(row=0, column=1, sticky="e", padx=(14, 0))
         for text, bg, fg in (
             ("CONTRACT + MARKET + PURCHASE", "#16345d", "#dbeafe"),
@@ -27259,14 +27259,14 @@ class App(tk.Tk):
         win.title("Compare Two Contracts")
         win.geometry("1120x760")
         win.minsize(900, 620)
-        win.configure(bg="#07111f")
+        win.configure(bg="#1b2036")
         win.transient(self)
         win.columnconfigure(0, weight=1); win.rowconfigure(2, weight=1)
 
-        hero = tk.Frame(win, bg="#0b1f3a", highlightthickness=1, highlightbackground="#183b66")
+        hero = tk.Frame(win, bg="#1b2036", highlightthickness=1, highlightbackground="#2e3550")
         hero.grid(row=0, column=0, sticky="ew")
-        tk.Label(hero, text="Contract Comparison", bg="#0b1f3a", fg="white", font=(FONT_FAMILY, 18, "bold")).pack(anchor="w", padx=18, pady=(14, 2))
-        tk.Label(hero, text="Compare two contracts side by side using the same saved pricing, cost and local-market logic.", bg="#0b1f3a", fg="#a9c2de", font=(FONT_FAMILY, FS_BODY)).pack(anchor="w", padx=18, pady=(0, 14))
+        tk.Label(hero, text="Contract Comparison", bg="#1b2036", fg="white", font=(FONT_FAMILY, 18, "bold")).pack(anchor="w", padx=18, pady=(14, 2))
+        tk.Label(hero, text="Compare two contracts side by side using the same saved pricing, cost and local-market logic.", bg="#1b2036", fg="#a9c2de", font=(FONT_FAMILY, FS_BODY)).pack(anchor="w", padx=18, pady=(0, 14))
 
         picker = ttk.Frame(win, padding=12)
         picker.grid(row=1, column=0, sticky="ew")
@@ -27291,7 +27291,7 @@ class App(tk.Tk):
             tv.heading(col, text=col); tv.column(col, width=width, anchor=anchor)
         tv.grid(row=0, column=0, sticky="nsew")
         sb = ttk.Scrollbar(table_wrap, orient="vertical", command=tv.yview); sb.grid(row=0, column=1, sticky="ns"); tv.configure(yscrollcommand=sb.set)
-        tv.tag_configure("section", background="#dbeafe", foreground="#0b1f3a", font=(FONT_FAMILY, FS_BODY, "bold"))
+        tv.tag_configure("section", background="#dbeafe", foreground="#1b2036", font=(FONT_FAMILY, FS_BODY, "bold"))
         tv.tag_configure("warn", background="#fff7ed")
 
         current = {"a": "", "b": ""}
