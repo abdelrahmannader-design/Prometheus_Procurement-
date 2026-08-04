@@ -3466,11 +3466,23 @@ class App(tk.Tk):
     def _build_pill_switcher(self, parent, items, extra=None):
         """Pill sub-tab row (mockup's Contracts/Analysis/Setup sub-navigation)
         wired to a _ScreenSwitcher content host. `items`: [(key, label), ...].
-        Returns (bar_frame, host_frame, screens_dict, select_fn) — bar_frame
-        and host_frame still need to be gridded/packed by the caller;
-        screens_dict[key] is that pill's content frame to build into.
+        Returns (bar_frame, host_frame, screens_dict, switcher, finalize) —
+        bar_frame and host_frame still need to be gridded/packed by the
+        caller; screens_dict[key] is that pill's content frame to build into.
         `extra` optionally packs extra widgets (e.g. search/actions) into the
-        same row as the pills, right-aligned."""
+        same row as the pills, right-aligned.
+
+        Call finalize() once ALL screens have their content built, if (and
+        only if) `parent` sits inside a bottom-up-sized scrollable wrapper
+        (_make_scrollable_tab) — e.g. Analysis/Setup & Data. Because the
+        screens are stacked via place() (needed to overlay/swap them), Tk
+        does not propagate their size to the switcher the way pack/grid
+        children normally would, so a switcher with no other size hint
+        collapses to ~0 height inside a wrapper that sizes itself from
+        content. finalize() fixes that by measuring the tallest screen and
+        setting the switcher's height explicitly. Not needed when `parent`
+        already has a real, window-derived size (e.g. Contracts, one of the
+        6 top-level screens placed directly against the main shell)."""
         bar = tk.Frame(parent, bg=CLR["bg"])
         pill_row = tk.Frame(bar, bg="#eeeae2")
         pill_row.pack(side="left", anchor="w", pady=4)
@@ -3507,7 +3519,16 @@ class App(tk.Tk):
             pill_labels[key] = lbl
 
         _select(items[0][0])
-        return bar, host, screens, switcher
+
+        def _finalize():
+            try:
+                switcher.update_idletasks()
+                max_h = max((s.winfo_reqheight() for s in screens.values()), default=1)
+                switcher.configure(height=max(max_h, 1))
+            except Exception:
+                pass
+
+        return bar, host, screens, switcher, _finalize
 
     # ------------------------------------------------------------------
     # AUTO-SAVE  — every 30 s, only if state was dirtied since last save
@@ -6616,7 +6637,7 @@ class App(tk.Tk):
         # pill sub-tabs matching the mockup's Import/Local/Slots pattern ──
         self.tab_contracts_group.columnconfigure(0, weight=1)
         self.tab_contracts_group.rowconfigure(1, weight=1)
-        _c_bar, _c_host, _c_screens, self._contracts_nb = self._build_pill_switcher(
+        _c_bar, _c_host, _c_screens, self._contracts_nb, _c_finalize = self._build_pill_switcher(
             self.tab_contracts_group,
             [("import", "Import Contracts"), ("local", "Local Purchases"), ("slots", "CBOT Slots")])
         _c_bar.grid(row=0, column=0, sticky="w", padx=12, pady=(10, 0))
@@ -12587,42 +12608,36 @@ class App(tk.Tk):
     def _build_analysis_tab(self):
         p = self.tab_analysis
         p.columnconfigure(0, weight=1)
-        p.rowconfigure(1, weight=1)
+        p.rowconfigure(2, weight=1)
 
         # ── Header ────────────────────────────────────────────────────
-        hf = ttk.Frame(p)
+        hf = tk.Frame(p, bg=CLR["bg"])
         hf.grid(row=0, column=0, sticky="ew", pady=(0, 4))
-        ttk.Label(hf, text="🔬  Contract Pricing Intelligence",
-                  font=("Segoe UI", 12, "bold"),
-                  foreground="#1a2d40").pack(side="left")
-        ttk.Label(hf,
-                  text="   CBOT timing  ·  FX impact  ·  margin of safety  "
-                       "·  supplier scorecard  ·  seasonality  ·  origin compare",
-                  font=("Segoe UI", 9), foreground="#666").pack(side="left")
+        tk.Label(hf, text="Contract Pricing Intelligence", bg=CLR["bg"], fg=CLR["text"],
+                 font=(FONT_FAMILY, FS_TITLE, "bold")).pack(anchor="w")
+        tk.Label(hf, text="CBOT timing · FX impact · margin of safety · supplier "
+                          "scorecard · seasonality · origin compare",
+                 bg=CLR["bg"], fg=CLR["muted"], font=(FONT_FAMILY, FS_BODY)).pack(anchor="w")
 
-        # ── Inner notebook: 4 analysis views ───────────────────────────
-        self._an_nb = ttk.Notebook(p)
-        self._an_nb.grid(row=1, column=0, sticky="nsew")
+        # ── Sub-navigation: 8 analysis views as pill tabs ──────────────
+        _a_bar, _a_host, _a_screens, self._an_nb, _a_finalize = self._build_pill_switcher(
+            p, [("perf", "Contract Performance"), ("detail", "Contract Detail"),
+                ("supplier", "Supplier Scorecard"), ("season", "Seasonality"),
+                ("origin", "Origin Compare"), ("savings", "Savings Tracker"),
+                ("basis", "Basis Tracker"), ("exposure", "Exposure & Risk")])
+        _a_bar.grid(row=1, column=0, sticky="w", pady=(0, 4))
+        _a_host.grid(row=2, column=0, sticky="nsew")
 
-        self.tab_performance      = ttk.Frame(self._an_nb, padding=10)
-        self.tab_an_contract      = ttk.Frame(self._an_nb, padding=6)
-        self.tab_an_supplier      = ttk.Frame(self._an_nb, padding=6)
-        self.tab_an_season        = ttk.Frame(self._an_nb, padding=6)
-        self.tab_origin_cmp_outer = ttk.Frame(self._an_nb)
-        self.tab_savings_outer    = ttk.Frame(self._an_nb)
+        self.tab_performance      = _a_screens["perf"]
+        self.tab_an_contract      = _a_screens["detail"]
+        self.tab_an_supplier      = _a_screens["supplier"]
+        self.tab_an_season        = _a_screens["season"]
+        self.tab_origin_cmp_outer = _a_screens["origin"]
+        self.tab_savings_outer    = _a_screens["savings"]
         self.tab_origin_cmp = self._make_scrollable_tab(self.tab_origin_cmp_outer, padding=10)
         self.tab_savings    = self._make_scrollable_tab(self.tab_savings_outer, padding=10)
-
-        self._an_nb.add(self.tab_performance,      text="Contract Performance")
-        self._an_nb.add(self.tab_an_contract,      text="Contract Detail")
-        self._an_nb.add(self.tab_an_supplier,      text="Supplier Scorecard")
-        self._an_nb.add(self.tab_an_season,        text="Seasonality")
-        self._an_nb.add(self.tab_origin_cmp_outer, text="Origin Compare")
-        self._an_nb.add(self.tab_savings_outer,    text="Savings Tracker")
-        self.tab_basis    = ttk.Frame(self._an_nb, padding=10)
-        self.tab_exposure = ttk.Frame(self._an_nb, padding=10)
-        self._an_nb.add(self.tab_basis,    text="Basis Tracker")
-        self._an_nb.add(self.tab_exposure, text="Exposure & Risk")
+        self.tab_basis    = _a_screens["basis"]
+        self.tab_exposure = _a_screens["exposure"]
 
         self._build_performance()
         self._build_an_contract_subtab()
@@ -12634,6 +12649,7 @@ class App(tk.Tk):
         self._build_savings_tracker()
         self._build_basis_tracker()
         self._build_exposure_risk()
+        _a_finalize()
 
     def _build_an_contract_subtab(self):
         p = self.tab_an_contract
