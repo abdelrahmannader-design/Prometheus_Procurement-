@@ -11599,21 +11599,35 @@ class App(tk.Tk):
                   foreground=CLR["muted"]).grid(row=6, column=3, columnspan=2,
                                                 sticky="w", padx=(8, 0), pady=(4, 0))
 
+        ttk.Label(settings, text="Alert: supplier concentration ≥ (% of open MT)").grid(
+            row=7, column=0, sticky="w", pady=(4, 0), padx=(0, 8))
+        self._al_supconc_var = tk.StringVar(
+            value=str(self.state_obj.get("ui", {}).get("alert_supplier_concentration_pct", 40.0)))
+        ttk.Entry(settings, textvariable=self._al_supconc_var, width=10).grid(
+            row=7, column=1, sticky="w", pady=(4, 0))
+        ttk.Label(settings,
+                  text="Flags when one supplier holds this share (or more) of total open MT.",
+                  foreground=CLR["muted"]).grid(row=7, column=3, columnspan=2,
+                                                sticky="w", padx=(8, 0), pady=(4, 0))
+
         def _save_alert_thr():
             ui = self.state_obj.setdefault("ui", {})
             v1 = to_float(self._al_cbot_var.get(), None)
             v2 = to_float(self._al_days_var.get(), None)
             v3 = to_float(self._al_fxgap_var.get(), None)
+            v4 = to_float(self._al_supconc_var.get(), None)
             if v1 is not None and v1 > 0:
                 ui["alert_cbot_move_pct"] = round(v1, 2)
             if v2 is not None and v2 > 0:
                 ui["alert_near_delivery_days"] = int(v2)
             if v3 is not None and v3 > 0:
                 ui["alert_fx_pricing_gap_pct"] = round(v3, 2)
+            if v4 is not None and v4 > 0:
+                ui["alert_supplier_concentration_pct"] = round(v4, 2)
             save_state(self.state_obj)
             messagebox.showinfo(APP_NAME, "Alert thresholds saved.")
         ttk.Button(settings, text="Save Alert Thresholds",
-                   command=_save_alert_thr).grid(row=6, column=2, sticky="w",
+                   command=_save_alert_thr).grid(row=7, column=2, sticky="w",
                                                  pady=(4, 0))
 
         ttk.Label(settings, text="Font size (visibility)").grid(
@@ -19906,13 +19920,15 @@ class App(tk.Tk):
           fx_unsecured_usd          USD without a Form 4 (bank FX not yet
                                     allocated) — genuine currency exposure
           buckets                   days-to-delivery risk ladder
+          by_supplier / top_supplier  concentration of open MT by supplier
         """
         today = dt.date.today()
         out = {"open_mt": 0.0, "open_usd": 0.0, "priced_mt": 0.0,
                "unpriced_mt": 0.0, "fx_unsecured_usd": 0.0,
                "fx_unsecured_mt": 0.0, "contracts": 0,
                "buckets": {"<7d": [], "7-30d": [], ">30d": [], "no date": []},
-               "unpriced_near": [], "wavg_premium": None}
+               "unpriced_near": [], "wavg_premium": None,
+               "by_supplier": {}, "top_supplier": None}
         prem_num = prem_den = 0.0
         for cid, c in (self.state_obj.get("contracts", {}) or {}).items():
             if (c.get("status") or "Open").strip().lower() != "open":
@@ -19944,9 +19960,93 @@ class App(tk.Tk):
                 out["buckets"][key].append((label, qty))
                 if not priced and days <= self._alert_near_days():
                     out["unpriced_near"].append((label, qty, days))
+            supplier = (c.get("supplier") or "").strip() or "(no supplier)"
+            sup_rec = out["by_supplier"].setdefault(supplier, {"mt": 0.0, "usd": 0.0})
+            sup_rec["mt"] += qty
+            sup_rec["usd"] += usd
         if prem_den:
             out["wavg_premium"] = prem_num / prem_den
+        if out["open_mt"] and out["by_supplier"]:
+            top_name, top_rec = max(out["by_supplier"].items(),
+                                     key=lambda kv: kv[1]["mt"])
+            out["top_supplier"] = {
+                "name": top_name, "mt": top_rec["mt"],
+                "usd": top_rec["usd"],
+                "pct": top_rec["mt"] / out["open_mt"] * 100.0,
+            }
         return out
+
+    def portfolio_stress_test(self, fx_shock_pct, cbot_shock_pct):
+        """First-order shock across the whole open book, combining an FX
+        move and a CBOT move simultaneously — the portfolio-level view that
+        the per-contract Scenario/What-If tab doesn't give.
+
+        - FX shock applies to FX-unsecured USD exposure only (contracts with
+          no Form 4 FX yet): a fx_shock_pct move in USD/EGP changes their
+          landed EGP cost by usd_exposure * fx_now * fx_shock_pct/100.
+        - CBOT shock applies to unpriced MT only (contracts with no CBOT/
+          premium locked yet), grouped by commodity, using each commodity's
+          latest CBOT print and its cents/bu -> USD/MT conversion factor.
+        Both are linear/first-order approximations, not a full curve
+        re-price — good enough to flag "how big could this book move."
+        """
+        s = self.state_obj
+        fxh = sorted(((e.get("date", ""), to_float(e.get("rate"), None))
+                      for e in s.get("fx_history", []) or []), key=lambda t: t[0])
+        fx_now = fxh[-1][1] if fxh else None
+
+        cbot_rows = {}
+        for e in s.get("cbot_history", []) or []:
+            comm = (e.get("commodity") or "").upper()
+            px = to_float(e.get("close", e.get("price")), None)
+            if comm and px is not None and e.get("date"):
+                cbot_rows.setdefault(comm, []).append((e["date"], px))
+        latest_cbot = {c: sorted(rows)[-1][1] for c, rows in cbot_rows.items() if rows}
+
+        fx_exposed_usd = 0.0
+        unpriced_by_comm = {}
+        for cid, c in (s.get("contracts", {}) or {}).items():
+            if (c.get("status") or "Open").strip().lower() != "open":
+                continue
+            qty = to_float(c.get("qty_mt"), 0) or 0.0
+            cif = to_float(c.get("cif_usd_mt"), None)
+            usd = (qty * cif) if cif is not None else 0.0
+            if not to_float(c.get("form4_fx"), None):
+                fx_exposed_usd += usd
+            priced = bool(c.get("priced", True)) and cif is not None
+            if not priced:
+                base = (c.get("commodity") or "").upper().split("-")[0]
+                unpriced_by_comm[base] = unpriced_by_comm.get(base, 0.0) + qty
+
+        fx_impact_egp = (fx_exposed_usd * (fx_shock_pct / 100.0) * fx_now
+                          if fx_now is not None else None)
+
+        cbot_impact_egp = 0.0
+        cbot_impact_known = False
+        cbot_gaps = []
+        for comm, qty in unpriced_by_comm.items():
+            px = latest_cbot.get(comm)
+            try:
+                factor = cbot_conv_factor(comm, strict=False)
+            except Exception:
+                factor = None
+            if px is None or not factor or fx_now is None:
+                cbot_gaps.append(comm)
+                continue
+            cbot_impact_known = True
+            move_usd_mt = px * (cbot_shock_pct / 100.0) * factor
+            cbot_impact_egp += move_usd_mt * qty * fx_now
+
+        total_impact_egp = (fx_impact_egp or 0.0) + (cbot_impact_egp if cbot_impact_known else 0.0)
+        return {
+            "fx_now": fx_now,
+            "fx_exposed_usd": fx_exposed_usd,
+            "fx_impact_egp": fx_impact_egp,
+            "unpriced_by_comm": unpriced_by_comm,
+            "cbot_impact_egp": cbot_impact_egp if cbot_impact_known else None,
+            "cbot_gaps": cbot_gaps,
+            "total_impact_egp": total_impact_egp,
+        }
 
     # ══════════════════════════════════════════════════════════════════
     #  BASIS SERIES — physical premium vs CBOT over time.
@@ -23388,6 +23488,10 @@ class App(tk.Tk):
     def _alert_fx_pricing_gap_pct(self):
         return to_float(self.state_obj.get("ui", {}).get("alert_fx_pricing_gap_pct"), 2.0) or 2.0
 
+    def _alert_supplier_concentration_pct(self):
+        return to_float(self.state_obj.get("ui", {}).get(
+            "alert_supplier_concentration_pct"), 40.0) or 40.0
+
     def _resolve_pricing_fx(self, c):
         """Best-available FX 'at pricing time' for one contract: the
         qty-weighted FX across its pricing lots, falling back to an explicit
@@ -23524,6 +23628,18 @@ class App(tk.Tk):
                              f"{gap_pct:+.1f}% BELOW pricing-date FX {fmt_num(pfx,2)}"
                              f"{impact_txt} — FX timing gain locked in",
                     "action": "No action needed — landed cost came in under the pricing-date plan."})
+
+        # 5. Supplier concentration — too much open exposure with one supplier
+        sup_thr = self._alert_supplier_concentration_pct()
+        ex = self.portfolio_exposure()
+        top = ex.get("top_supplier")
+        if top and top["pct"] >= sup_thr:
+            alerts.append({"priority": "Medium",
+                "issue": f"Supplier concentration: {top['name']} holds "
+                         f"{top['pct']:.0f}% of open MT ({top['mt']:,.0f} / "
+                         f"{ex['open_mt']:,.0f} MT, ~${top['usd']:,.0f})",
+                "action": "Diversify sourcing or confirm this supplier's "
+                          "delivery/credit risk is acceptable at this size."})
         return alerts
 
     def refresh_risk_alerts(self):
@@ -23758,15 +23874,15 @@ class App(tk.Tk):
     def _build_exposure_risk(self):
         p = self.tab_exposure
         p.columnconfigure(0, weight=1)
-        p.rowconfigure(3, weight=1)
+        p.rowconfigure(4, weight=1)
         ttk.Label(p, text="Exposure & Risk — portfolio snapshot (open contracts)",
                   font=(FONT_FAMILY, 12, "bold"),
                   foreground="#1a4fa0").grid(row=0, column=0, sticky="w")
         bar = ttk.Frame(p); bar.grid(row=1, column=0, sticky="w", pady=(4, 6))
         ttk.Button(bar, text="▶ Refresh", command=self.refresh_exposure_risk
                    ).pack(side="left", padx=(0, 12))
-        ttk.Label(bar, text="Alert thresholds (CBOT move %, near-delivery days) "
-                            "are editable in Setup & Data → Data Management.",
+        ttk.Label(bar, text="Alert thresholds (CBOT move %, near-delivery days, FX/supplier "
+                            "gaps) are editable in Setup & Data → Data Management.",
                   foreground=CLR["muted"]).pack(side="left")
 
         cards = ttk.Frame(p); cards.grid(row=2, column=0, sticky="ew", pady=(0, 8))
@@ -23777,7 +23893,8 @@ class App(tk.Tk):
                 ("priced", "Priced vs Unpriced MT"),
                 ("fx_unsec", "USD without Form 4 (FX risk)"),
                 ("wprem", "W.avg premium ¢/bu"),
-                ("near", "Delivery <7d / 7-30d / >30d")]):
+                ("near", "Delivery <7d / 7-30d / >30d"),
+                ("top_supplier", "Top supplier share of open MT")]):
             card = tk.Frame(cards, bg="#ffffff", highlightthickness=1,
                             highlightbackground=CLR["border"])
             card.grid(row=0, column=i, sticky="ew", padx=(0, 8))
@@ -23791,6 +23908,29 @@ class App(tk.Tk):
                                                               padx=8, pady=(0, 6))
             self._exp_vars[key] = v
 
+        stress = ttk.LabelFrame(p, text="Portfolio Stress Test — shock the whole open book",
+                                padding=8)
+        stress.grid(row=3, column=0, sticky="ew", pady=(0, 8))
+        ttk.Label(stress, text="EGP/USD shock (%)").grid(row=0, column=0, sticky="w",
+                                                          padx=(0, 6))
+        self._stress_fx_var = tk.StringVar(value="10")
+        ttk.Entry(stress, textvariable=self._stress_fx_var, width=8).grid(
+            row=0, column=1, sticky="w", padx=(0, 16))
+        ttk.Label(stress, text="CBOT shock (%)").grid(row=0, column=2, sticky="w",
+                                                       padx=(0, 6))
+        self._stress_cbot_var = tk.StringVar(value="-5")
+        ttk.Entry(stress, textvariable=self._stress_cbot_var, width=8).grid(
+            row=0, column=3, sticky="w", padx=(0, 16))
+        ttk.Button(stress, text="Run Stress Test",
+                   command=self._run_exposure_stress_test).grid(row=0, column=4, sticky="w")
+        self._stress_result_var = tk.StringVar(
+            value="Positive shocks = EGP devaluation / higher CBOT. "
+                  "Enter both and click Run.")
+        ttk.Label(stress, textvariable=self._stress_result_var,
+                  foreground=CLR["muted"], wraplength=1150,
+                  justify="left").grid(row=1, column=0, columnspan=5, sticky="w",
+                                       pady=(6, 0))
+
         cols = [("Priority", 70), ("Issue", 560), ("Action", 420)]
         self.exp_alert_tree = ttk.Treeview(p, columns=[c for c, _ in cols],
                                            show="headings", height=12)
@@ -23800,11 +23940,38 @@ class App(tk.Tk):
         self.exp_alert_tree.tag_configure("High", foreground="#b00020")
         self.exp_alert_tree.tag_configure("Medium", foreground="#b45309")
         self.exp_alert_tree.tag_configure("Low", foreground="#15803d")
-        self.exp_alert_tree.grid(row=3, column=0, sticky="nsew")
+        self.exp_alert_tree.grid(row=4, column=0, sticky="nsew")
         ysb = ttk.Scrollbar(p, orient="vertical",
                             command=self.exp_alert_tree.yview)
         self.exp_alert_tree.configure(yscrollcommand=ysb.set)
-        ysb.grid(row=3, column=1, sticky="ns")
+        ysb.grid(row=4, column=1, sticky="ns")
+
+    def _run_exposure_stress_test(self):
+        try:
+            fx_shock = to_float(self._stress_fx_var.get(), None)
+            cbot_shock = to_float(self._stress_cbot_var.get(), None)
+            if fx_shock is None or cbot_shock is None:
+                self._stress_result_var.set("Enter numeric shocks for both FX and CBOT (e.g. 10 and -5).")
+                return
+            st = self.portfolio_stress_test(fx_shock, cbot_shock)
+            if st["fx_now"] is None:
+                self._stress_result_var.set("No FX history saved — can't run the stress test yet.")
+                return
+            parts = [f"FX {fx_shock:+.1f}% on ${st['fx_exposed_usd']:,.0f} FX-unsecured "
+                     f"exposure: {st['fx_impact_egp']:+,.0f} EGP"]
+            if st["cbot_impact_egp"] is not None:
+                comms = ", ".join(f"{c} {q:,.0f}MT" for c, q in st["unpriced_by_comm"].items()
+                                  if c not in st["cbot_gaps"])
+                parts.append(f"CBOT {cbot_shock:+.1f}% on unpriced ({comms or 'none'}): "
+                             f"{st['cbot_impact_egp']:+,.0f} EGP")
+            elif st["unpriced_by_comm"]:
+                parts.append("CBOT impact unavailable — missing CBOT history for the unpriced commodities.")
+            if st["cbot_gaps"]:
+                parts.append(f"(no CBOT price on file for: {', '.join(st['cbot_gaps'])})")
+            parts.append(f"Combined landed-cost impact: {st['total_impact_egp']:+,.0f} EGP")
+            self._stress_result_var.set("   ·   ".join(parts))
+        except Exception as e:
+            self._surface_error("_run_exposure_stress_test", e, show=True)
 
     def refresh_exposure_risk(self):
         try:
@@ -23823,6 +23990,10 @@ class App(tk.Tk):
                 f"{sum(q for _, q in b['<7d']):,.0f} / "
                 f"{sum(q for _, q in b['7-30d']):,.0f} / "
                 f"{sum(q for _, q in b['>30d']):,.0f} MT")
+            top = ex.get("top_supplier")
+            self._exp_vars["top_supplier"].set(
+                f"{top['pct']:.0f}%  {top['name']} ({top['mt']:,.0f} MT)"
+                if top else "—")
             alerts = self.refresh_risk_alerts()
             tv = self.exp_alert_tree
             for i in tv.get_children():
