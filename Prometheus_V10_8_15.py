@@ -11587,18 +11587,33 @@ class App(tk.Tk):
         ttk.Entry(settings, textvariable=self._al_days_var, width=10).grid(
             row=4, column=1, sticky="w", pady=(4, 0))
 
+        ttk.Label(settings, text="Alert: Form 4 vs pricing FX gap ≥ (%)").grid(
+            row=6, column=0, sticky="w", pady=(4, 0), padx=(0, 8))
+        self._al_fxgap_var = tk.StringVar(
+            value=str(self.state_obj.get("ui", {}).get("alert_fx_pricing_gap_pct", 2.0)))
+        ttk.Entry(settings, textvariable=self._al_fxgap_var, width=10).grid(
+            row=6, column=1, sticky="w", pady=(4, 0))
+        ttk.Label(settings,
+                  text="Compares the bank's Form 4 FX to the weighted FX across pricing "
+                       "lots — flags the gap whichever way it moved.",
+                  foreground=CLR["muted"]).grid(row=6, column=3, columnspan=2,
+                                                sticky="w", padx=(8, 0), pady=(4, 0))
+
         def _save_alert_thr():
             ui = self.state_obj.setdefault("ui", {})
             v1 = to_float(self._al_cbot_var.get(), None)
             v2 = to_float(self._al_days_var.get(), None)
+            v3 = to_float(self._al_fxgap_var.get(), None)
             if v1 is not None and v1 > 0:
                 ui["alert_cbot_move_pct"] = round(v1, 2)
             if v2 is not None and v2 > 0:
                 ui["alert_near_delivery_days"] = int(v2)
+            if v3 is not None and v3 > 0:
+                ui["alert_fx_pricing_gap_pct"] = round(v3, 2)
             save_state(self.state_obj)
             messagebox.showinfo(APP_NAME, "Alert thresholds saved.")
         ttk.Button(settings, text="Save Alert Thresholds",
-                   command=_save_alert_thr).grid(row=4, column=2, sticky="w",
+                   command=_save_alert_thr).grid(row=6, column=2, sticky="w",
                                                  pady=(4, 0))
 
         ttk.Label(settings, text="Font size (visibility)").grid(
@@ -23370,6 +23385,23 @@ class App(tk.Tk):
         v = to_float(self.state_obj.get("ui", {}).get("alert_near_delivery_days"), 21)
         return int(v) if v else 21
 
+    def _alert_fx_pricing_gap_pct(self):
+        return to_float(self.state_obj.get("ui", {}).get("alert_fx_pricing_gap_pct"), 2.0) or 2.0
+
+    def _resolve_pricing_fx(self, c):
+        """Best-available FX 'at pricing time' for one contract: the
+        qty-weighted FX across its pricing lots, falling back to an explicit
+        contract-level pricing/contract FX field. Mirrors the priority used
+        by the Basis Tracker's PRICING-mode FX resolver."""
+        lots_fx = self._weighted_pricing_lot_value(c, "fx")
+        if lots_fx is not None and lots_fx > 0:
+            return lots_fx, "weighted pricing lots"
+        for key in ("pricing_fx", "contract_fx", "fx_rate"):
+            fx = to_float((c or {}).get(key), None)
+            if fx is not None and fx > 0:
+                return fx, f"contract {key}"
+        return None, ""
+
     def evaluate_alerts(self):
         """Return list of dicts {priority, issue, action} for the Action
         Center + the Exposure & Risk tab."""
@@ -23463,6 +23495,35 @@ class App(tk.Tk):
                     alerts.append({"priority": "Medium",
                         "issue": f"{c.get('name', cid)}: no Form 4 FX, delivery in {days}d",
                         "action": "Bank FX not secured — issue Form 4 / confirm allocation."})
+
+        # 4. Form 4 FX vs pricing-date FX — flags the cash-cost gap either way
+        gap_thr = self._alert_fx_pricing_gap_pct()
+        for cid, c in (s.get("contracts", {}) or {}).items():
+            f4 = to_float(c.get("form4_fx"), None)
+            if f4 is None:
+                continue
+            pfx, _src = self._resolve_pricing_fx(c)
+            if not pfx:
+                continue
+            gap_pct = (f4 - pfx) / pfx * 100.0
+            if abs(gap_pct) < gap_thr:
+                continue
+            cif = to_float(c.get("cif_usd_mt"), None)
+            impact = (f4 - pfx) * cif if cif is not None else None
+            impact_txt = (f" (~{impact:+,.0f} EGP/MT vs the pricing-date plan)"
+                          if impact is not None else "")
+            if gap_pct > 0:
+                alerts.append({"priority": "Medium",
+                    "issue": f"{c.get('name', cid)}: Form 4 FX {fmt_num(f4,2)} is "
+                             f"{gap_pct:+.1f}% ABOVE pricing-date FX {fmt_num(pfx,2)}"
+                             f"{impact_txt} — cash cost overran the plan",
+                    "action": "Review the budgeted landed cost against the actual bank rate."})
+            else:
+                alerts.append({"priority": "Low",
+                    "issue": f"{c.get('name', cid)}: Form 4 FX {fmt_num(f4,2)} is "
+                             f"{gap_pct:+.1f}% BELOW pricing-date FX {fmt_num(pfx,2)}"
+                             f"{impact_txt} — FX timing gain locked in",
+                    "action": "No action needed — landed cost came in under the pricing-date plan."})
         return alerts
 
     def refresh_risk_alerts(self):
@@ -23738,6 +23799,7 @@ class App(tk.Tk):
             self.exp_alert_tree.column(c, width=w, anchor="w")
         self.exp_alert_tree.tag_configure("High", foreground="#b00020")
         self.exp_alert_tree.tag_configure("Medium", foreground="#b45309")
+        self.exp_alert_tree.tag_configure("Low", foreground="#15803d")
         self.exp_alert_tree.grid(row=3, column=0, sticky="nsew")
         ysb = ttk.Scrollbar(p, orient="vertical",
                             command=self.exp_alert_tree.yview)
@@ -27028,6 +27090,26 @@ class App(tk.Tk):
                      f"on landed cost)")
         return line + "\n"
 
+    def _fx_move_line_pricing(self, c):
+        """One-line insight: how much the EGP moved between the pricing-date
+        FX assumption (qty-weighted across pricing lots) and the bank
+        allocating the currency at Form 4 — the actual FX timing gain/loss
+        against the deal's original pricing-date plan."""
+        f4 = to_float(c.get("form4_fx"), None)
+        pfx, src = self._resolve_pricing_fx(c)
+        if f4 is None or not pfx:
+            return ""
+        delta = f4 - pfx
+        line = (f"FX move Pricing → Form 4: {'+' if delta >= 0 else ''}"
+                f"{fmt_num(delta, 4)}  ({src})")
+        cif = to_float(c.get("cif_usd_mt"), None)
+        if cif is not None:
+            impact = delta * cif
+            verdict = "cost overrun" if impact > 0 else "timing gain" if impact < 0 else "flat"
+            line += (f"  ({'+' if impact >= 0 else ''}{fmt_num(impact, 0)} EGP/MT "
+                     f"vs the pricing-date plan — {verdict})")
+        return line + "\n"
+
     def update_contract_detail_panel(self):
         if not hasattr(self, "contract_details_text"):
             return
@@ -27060,6 +27142,7 @@ class App(tk.Tk):
             f"FX at Form 4: {fmt_num(to_float(c.get('form4_fx'), None), 4)}\n"
             f"FX at Delivery: {fmt_num(to_float(c.get('delivery_fx'), None), 4)}\n"
             f"{self._fx_move_line(c)}"
+            f"{self._fx_move_line_pricing(c)}"
             f"Estimated Remaining MT: {fmt_num(to_float(bal.get('RemainingMT'), None), 0)}\n"
             f"Estimated Finish Date: {bal.get('EstFinishDate','-')}\n"
             f"Balance Status: {bal.get('Status','-')}\n"
