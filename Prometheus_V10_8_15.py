@@ -6764,9 +6764,13 @@ class App(tk.Tk):
         """Return (priced_mt, unpriced_mt) for one open contract.
 
         Pricing lots take precedence because CORN/SOYBEAN contracts can be
-        fixed in several lots on different dates. A final-priced contract with
-        no lots is treated as fully priced; otherwise the remaining quantity is
-        exposed.
+        fixed in several lots on different dates. Without lots: a CBOT
+        contract is only priced once a premium has actually been agreed
+        (premium_cents set) — a CIF that only exists because "Push to
+        Calculate" ran against a live/floating CBOT quote is a preview, not
+        a locked price, so it must not silently count as priced. Non-CBOT
+        (flat-price) contracts have no premium step, so a stored CIF is
+        the final price and counts as fully priced.
         """
         qty = to_float(contract.get("remaining_mt") or contract.get("qty_mt"), 0.0) or 0.0
         lots = []
@@ -6778,6 +6782,11 @@ class App(tk.Tk):
             priced_qty = sum(to_float(lot.get("qty_mt"), 0.0) or 0.0 for lot in lots)
             priced_qty = min(max(priced_qty, 0.0), qty)
             return priced_qty, max(qty - priced_qty, 0.0)
+        comm = (contract.get("commodity") or "").strip().upper()
+        comm_meta = self.state_obj.get("commodities", {}).get(comm, {}) or {}
+        if (comm_meta.get("type") or "").upper() == "CBOT":
+            is_priced = to_float(contract.get("premium_cents"), None) is not None
+            return (qty, 0.0) if is_priced else (0.0, qty)
         final_cif = None
         try:
             final_cif = self._contract_cif_usd(contract)
@@ -26907,12 +26916,23 @@ class App(tk.Tk):
         return self._sorted_contract_items(contracts)
 
     def _contract_priced_and_unpriced_qty(self, c):
+        # Same "priced" definition as _home_contract_pricing_split(): without
+        # pricing lots, a CBOT contract needs an agreed premium_cents to
+        # count as priced (a CIF from a live/floating CBOT preview is not a
+        # locked price); a non-CBOT contract has no premium step, so a
+        # stored CIF is the final price.
         qty = to_float((c or {}).get("qty_mt"), None)
         lots = self._contract_pricing_lots(c or {})
         priced_qty = sum((to_float(lot.get("qty_mt"), 0) or 0)
                          for lot in lots if isinstance(lot, dict))
-        if not lots and self._contract_cif_usd(c or {}) is not None and qty is not None:
-            priced_qty = qty
+        if not lots and qty is not None:
+            comm = ((c or {}).get("commodity") or "").strip().upper()
+            comm_meta = self.state_obj.get("commodities", {}).get(comm, {}) or {}
+            if (comm_meta.get("type") or "").upper() == "CBOT":
+                if to_float((c or {}).get("premium_cents"), None) is not None:
+                    priced_qty = qty
+            elif self._contract_cif_usd(c or {}) is not None:
+                priced_qty = qty
         if qty is None:
             return priced_qty or None, None
         return min(priced_qty, qty), max(qty - priced_qty, 0.0)
