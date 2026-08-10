@@ -7543,6 +7543,183 @@ class App(tk.Tk):
             self._hd_modern_quality_lbl.configure(fg="#fb7185")
             self._hd_modern_quality_note.set(f"{gaps} data gaps materially reduce dashboard confidence.")
 
+    def _price_range_stats(self, records, date_key, value_key, days=90,
+                            commodity=None, commodity_key="commodity",
+                            live_current=None):
+        """Min/max/current over a trailing window for one series — the shared
+        engine behind the Home "3-Month Price Range" watch (CBOT, FX, local
+        prices all use the same logic). `records` is a list of dicts with a
+        date field and a numeric value field; pass `commodity` to filter to
+        one base commodity (matched against the record's base, e.g. CORN-BRZ
+        matches commodity="CORN"). `live_current` lets a fresher live quote
+        (not yet archived into history) override the last stored point and
+        widen the range if it's a new extreme. Returns None if there's no
+        data in the window at all."""
+        cutoff = dt.date.today() - dt.timedelta(days=days)
+        pts = []
+        for r in records or []:
+            if commodity is not None:
+                rc = (r.get(commodity_key) or "").strip().upper().split("-")[0]
+                if rc != commodity.upper():
+                    continue
+            d = parse_date_flex(r.get(date_key))
+            v = to_float(r.get(value_key), None)
+            if d is None or v is None or d < cutoff:
+                continue
+            pts.append((d, v))
+        live_v = to_float(live_current, None)
+        if live_v is not None:
+            pts.append((dt.date.today(), live_v))
+        if not pts:
+            return None
+        pts.sort(key=lambda t: t[0])
+        current_d, current_v = pts[-1]
+        low_d, low_v = min(pts, key=lambda t: t[1])
+        high_d, high_v = max(pts, key=lambda t: t[1])
+        span = high_v - low_v
+        pct = (current_v - low_v) / span if span else 0.5
+        return {
+            "current": current_v, "current_date": current_d,
+            "low": low_v, "low_date": low_d,
+            "high": high_v, "high_date": high_d,
+            "pct_of_range": pct,
+            "at_high": pct >= 0.97,
+            "at_low": pct <= 0.03,
+            "n": len(pts),
+        }
+
+    def _build_home_range_watch(self, parent):
+        """3-Month Price Range card: for each tracked CBOT commodity, FX and
+        local price series, show current vs trailing-90-day low/high with a
+        position bar — flags when a price sits at/near its 3-month extreme,
+        which is exactly the "is this a good time to buy" signal a 3-month
+        high/low badge is meant to give."""
+        card, body = self._card(parent, title="3-Month Price Range",
+                                subtitle="Current price vs its trailing 90-day low/high — CBOT, FX and local")
+        self._range_watch_rows = {}
+
+        def _row(key, label):
+            row = tk.Frame(body, bg=CLR["surface"])
+            row.pack(fill="x", pady=5)
+            name = tk.Label(row, text=label, bg=CLR["surface"], fg=CLR["text"],
+                            font=(FONT_FAMILY, FS_BODY, "bold"), width=14, anchor="w")
+            name.pack(side="left")
+            lo_lbl = tk.Label(row, bg=CLR["surface"], fg=CLR["muted"],
+                              font=(FONT_MONO, 9), width=10, anchor="e")
+            lo_lbl.pack(side="left", padx=(4, 6))
+            bar = tk.Canvas(row, width=160, height=14, bg=CLR["surface"], highlightthickness=0)
+            bar.pack(side="left")
+            hi_lbl = tk.Label(row, bg=CLR["surface"], fg=CLR["muted"],
+                              font=(FONT_MONO, 9), width=10, anchor="w")
+            hi_lbl.pack(side="left", padx=(6, 10))
+            badge = tk.Label(row, bg=CLR["surface"], font=(FONT_FAMILY, 9, "bold"), anchor="w")
+            badge.pack(side="left")
+            self._range_watch_rows[key] = {"lo": lo_lbl, "bar": bar, "hi": hi_lbl, "badge": badge}
+
+        for key, label in (("CORN", "Corn CBOT"), ("SOYBEAN", "Soybean CBOT"),
+                            ("WHEAT", "Wheat CBOT"), ("SBM", "SBM CBOT"),
+                            ("FX", "USD/EGP")):
+            _row(key, label)
+        tk.Frame(body, bg=CLR["border"], height=1).pack(fill="x", pady=(4, 8))
+        self._range_watch_local_body = body
+        self._refresh_home_range_watch()
+        return card
+
+    def _refresh_home_range_watch(self):
+        try:
+            rows = getattr(self, "_range_watch_rows", None)
+            if not rows:
+                return
+            md = self.state_obj.get("market_data", {}) or {}
+            cbot_q = md.get("cbot_quotes", {}) or {}
+
+            def _qprice(comm):
+                val = cbot_q.get(comm)
+                return to_float(val.get("price"), None) if isinstance(val, dict) else to_float(val, None)
+
+            cbot_hist = self.state_obj.get("cbot_history", []) or []
+            fx_hist = self.state_obj.get("fx_history", []) or []
+            fx_live = to_float((md.get("fx", {}) or {}).get("price"), None)
+
+            specs = [
+                ("CORN", cbot_hist, "date", "price", "CORN", "commodity", _qprice("CORN")),
+                ("SOYBEAN", cbot_hist, "date", "price", "SOYBEAN", "commodity", _qprice("SOYBEAN")),
+                ("WHEAT", cbot_hist, "date", "price", "WHEAT", "commodity", _qprice("WHEAT")),
+                ("SBM", cbot_hist, "date", "price", "SBM", "commodity", _qprice("SBM")),
+                ("FX", fx_hist, "date", "rate", None, "commodity", fx_live),
+            ]
+            for key, records, date_key, value_key, comm, comm_key, live in specs:
+                w = rows.get(key)
+                if not w:
+                    continue
+                stats = self._price_range_stats(records, date_key, value_key,
+                                                days=90, commodity=comm,
+                                                commodity_key=comm_key, live_current=live)
+                w["bar"].delete("all")
+                if not stats:
+                    w["lo"].configure(text="—")
+                    w["hi"].configure(text="—")
+                    w["badge"].configure(text="No 90-day history yet", fg=CLR["muted"])
+                    w["bar"].create_rectangle(0, 5, 160, 9, fill="#eeeae2", outline="")
+                    continue
+                fmt = (lambda v: f"{v:,.2f}") if key != "FX" else (lambda v: f"{v:,.4f}")
+                w["lo"].configure(text=fmt(stats["low"]))
+                w["hi"].configure(text=fmt(stats["high"]))
+                w["bar"].create_rectangle(0, 5, 160, 9, fill="#eeeae2", outline="")
+                x = 4 + stats["pct_of_range"] * 152
+                marker_color = CLR["success"] if stats["at_low"] else CLR["danger"] if stats["at_high"] else CLR["primary"]
+                w["bar"].create_rectangle(x - 2, 2, x + 2, 12, fill=marker_color, outline="")
+                if stats["at_low"]:
+                    w["badge"].configure(text=f"↓ 3-MO LOW ({fmt(stats['current'])}) — favorable", fg=CLR["success_text"])
+                elif stats["at_high"]:
+                    w["badge"].configure(text=f"↑ 3-MO HIGH ({fmt(stats['current'])}) — unfavorable", fg=CLR["danger"])
+                else:
+                    w["badge"].configure(
+                        text=f"{fmt(stats['current'])} · {stats['pct_of_range']*100:,.0f}% of 90-day range",
+                        fg=CLR["muted"])
+
+            # Local prices: one row per commodity with any history in the window,
+            # rebuilt each refresh since the tracked set can change over time.
+            local_body = getattr(self, "_range_watch_local_body", None)
+            if local_body is not None:
+                for w in local_body.pack_slaves():
+                    if getattr(w, "_is_local_range_row", False):
+                        w.destroy()
+                local_hist = self.state_obj.get("local_prices", []) or []
+                comms = sorted({(r.get("commodity") or "").strip().upper()
+                                for r in local_hist if r.get("commodity")})
+                for comm in comms:
+                    stats = self._price_range_stats(local_hist, "date", "price_egp_mt",
+                                                     days=90, commodity=comm,
+                                                     commodity_key="commodity")
+                    if not stats:
+                        continue
+                    row = tk.Frame(local_body, bg=CLR["surface"])
+                    row._is_local_range_row = True
+                    row.pack(fill="x", pady=5)
+                    tk.Label(row, text=f"{comm} (local)", bg=CLR["surface"], fg=CLR["text"],
+                             font=(FONT_FAMILY, FS_BODY, "bold"), width=14, anchor="w").pack(side="left")
+                    tk.Label(row, text=f"{stats['low']:,.0f}", bg=CLR["surface"], fg=CLR["muted"],
+                             font=(FONT_MONO, 9), width=10, anchor="e").pack(side="left", padx=(4, 6))
+                    bar = tk.Canvas(row, width=160, height=14, bg=CLR["surface"], highlightthickness=0)
+                    bar.pack(side="left")
+                    bar.create_rectangle(0, 5, 160, 9, fill="#eeeae2", outline="")
+                    x = 4 + stats["pct_of_range"] * 152
+                    marker_color = CLR["success"] if stats["at_low"] else CLR["danger"] if stats["at_high"] else CLR["primary"]
+                    bar.create_rectangle(x - 2, 2, x + 2, 12, fill=marker_color, outline="")
+                    tk.Label(row, text=f"{stats['high']:,.0f}", bg=CLR["surface"], fg=CLR["muted"],
+                             font=(FONT_MONO, 9), width=10, anchor="w").pack(side="left", padx=(6, 10))
+                    if stats["at_low"]:
+                        badge_txt, badge_fg = f"↓ 3-MO LOW ({stats['current']:,.0f}) — favorable", CLR["success_text"]
+                    elif stats["at_high"]:
+                        badge_txt, badge_fg = f"↑ 3-MO HIGH ({stats['current']:,.0f}) — unfavorable", CLR["danger"]
+                    else:
+                        badge_txt, badge_fg = f"{stats['current']:,.0f} · {stats['pct_of_range']*100:,.0f}% of 90-day range", CLR["muted"]
+                    tk.Label(row, text=badge_txt, bg=CLR["surface"], fg=badge_fg,
+                             font=(FONT_FAMILY, 9, "bold"), anchor="w").pack(side="left")
+        except Exception as e:
+            log_exception(e, "_refresh_home_range_watch")
+
     def _build_home_dashboard(self):
         """Build a premium Home tab command center.
 
@@ -8095,6 +8272,9 @@ class App(tk.Tk):
         self.hd_recent_contracts_tree.tag_configure("pending", foreground=CLR["warning_text"])
         self.hd_recent_contracts_tree.tag_configure("closed", foreground=CLR["muted"])
         self._refresh_hd_recent_contracts()
+
+        range_card = self._build_home_range_watch(main)
+        range_card.grid(row=10, column=0, sticky="ew", pady=(0, 12))
 
     def _hd_make_tree(self, parent, cols, height=5, row=0):
         """Create a Treeview with both scrollbars inside parent."""
@@ -8779,6 +8959,7 @@ class App(tk.Tk):
             self._refresh_hd_provenance()
             self._refresh_hd_buy_signal()
             self._refresh_hd_recent_contracts()
+            self._refresh_home_range_watch()
         except Exception as e:
             log_exception(e, "refresh_home_dashboard")
 
