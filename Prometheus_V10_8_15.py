@@ -3218,6 +3218,136 @@ def export_snapshot_pdf(fp, a, b=None):
     c.save()
     return True
 
+
+def export_executive_summary_pdf(fp, ctx):
+    """One-click management-ready PDF: KPI summary, 3-month price range
+    status, per-commodity breakdown and open action items. `ctx` is a plain
+    dict built by App._build_executive_summary_ctx() so this function has
+    no Tk/state dependency of its own (same separation as export_snapshot_pdf)."""
+    if not _need_reportlab():
+        return False
+
+    c = canvas.Canvas(fp, pagesize=A4)
+    w, h = A4
+    M_LEFT = 1.5 * cm
+    M_RIGHT = 1.5 * cm
+    M_TOP = 1.8 * cm
+    M_BOTTOM = 1.8 * cm
+
+    def _truncate(s, max_chars=70):
+        s = "" if s is None else str(s)
+        s = s.replace("\n", " ").strip()
+        return s if len(s) <= max_chars else (s[: max_chars - 1] + "…")
+
+    def header(subtitle):
+        c.setFont("Helvetica-Bold", 14)
+        c.drawString(M_LEFT, h - M_TOP, "Prometheus Procurement — Executive Summary")
+        c.setFont("Helvetica", 8.5)
+        c.drawString(M_LEFT, h - M_TOP - 0.55 * cm,
+                     f"Generated: {now_ts()}  ·  {subtitle}")
+        c.line(M_LEFT, h - M_TOP - 0.75 * cm, w - M_RIGHT, h - M_TOP - 0.75 * cm)
+
+    def new_page(subtitle):
+        c.showPage()
+        header(subtitle)
+        return h - M_TOP - 1.3 * cm
+
+    def ensure_room(y, needed=0.7 * cm, subtitle=""):
+        if y < M_BOTTOM + needed:
+            return new_page(subtitle)
+        return y
+
+    def section(y, title):
+        y = ensure_room(y, 1.0 * cm)
+        c.setFont("Helvetica-Bold", 11.5)
+        c.setFillColor(colors.black)
+        c.drawString(M_LEFT, y, title)
+        y -= 0.15 * cm
+        c.setStrokeColor(colors.lightgrey)
+        c.line(M_LEFT, y, w - M_RIGHT, y)
+        return y - 0.55 * cm
+
+    def kpi_row(y, label, value):
+        y = ensure_room(y)
+        c.setFont("Helvetica", 9.5)
+        c.drawString(M_LEFT, y, _truncate(label, 40))
+        c.setFont("Helvetica-Bold", 9.5)
+        c.drawRightString(w - M_RIGHT, y, _truncate(str(value), 40))
+        return y - 0.5 * cm
+
+    def range_row(y, label, current, low, high, status):
+        y = ensure_room(y)
+        c.setFont("Helvetica", 9.5)
+        c.drawString(M_LEFT, y, _truncate(label, 22))
+        c.drawString(M_LEFT + 3.6 * cm, y, _truncate(current, 16))
+        c.drawString(M_LEFT + 6.8 * cm, y, _truncate(f"{low} – {high}", 22))
+        c.setFont("Helvetica-Bold", 9.5)
+        color = (colors.HexColor("#15803d") if "LOW" in status
+                 else colors.HexColor("#b00020") if "HIGH" in status else colors.grey)
+        c.setFillColor(color)
+        c.drawString(M_LEFT + 11.6 * cm, y, _truncate(status, 26))
+        c.setFillColor(colors.black)
+        return y - 0.5 * cm
+
+    header(ctx.get("scope_label", ""))
+    y = h - M_TOP - 1.3 * cm
+
+    y = section(y, "Portfolio KPIs")
+    for label, value in ctx.get("kpis", []):
+        y = kpi_row(y, label, value)
+    y -= 0.2 * cm
+
+    y = section(y, "3-Month Price Range — CBOT, FX & Local")
+    c.setFont("Helvetica-Bold", 8.5)
+    c.setFillColor(colors.grey)
+    c.drawString(M_LEFT, y, "Series")
+    c.drawString(M_LEFT + 3.6 * cm, y, "Current")
+    c.drawString(M_LEFT + 6.8 * cm, y, "90-day range")
+    c.drawString(M_LEFT + 11.6 * cm, y, "Status")
+    c.setFillColor(colors.black)
+    y -= 0.5 * cm
+    ranges = ctx.get("ranges", [])
+    if ranges:
+        for label, current, low, high, status in ranges:
+            y = range_row(y, label, current, low, high, status)
+    else:
+        c.setFont("Helvetica", 9.5)
+        c.drawString(M_LEFT, y, "No 90-day price history logged yet.")
+        y -= 0.5 * cm
+    y -= 0.2 * cm
+
+    y = section(y, "By Commodity")
+    for label, value in ctx.get("by_commodity", []):
+        y = kpi_row(y, label, value)
+    y -= 0.2 * cm
+
+    y = section(y, "Action Items")
+    items = ctx.get("action_items", [])
+    if items:
+        for priority, issue, action in items:
+            y = ensure_room(y, 0.9 * cm)
+            c.setFont("Helvetica-Bold", 9)
+            color = colors.HexColor("#b00020") if priority == "High" else colors.HexColor("#b45309") if priority == "Medium" else colors.grey
+            c.setFillColor(color)
+            c.drawString(M_LEFT, y, _truncate(priority, 8))
+            c.setFillColor(colors.black)
+            c.setFont("Helvetica", 9)
+            c.drawString(M_LEFT + 1.8 * cm, y, _truncate(issue, 58))
+            y -= 0.42 * cm
+            c.setFont("Helvetica-Oblique", 8)
+            c.setFillColor(colors.grey)
+            c.drawString(M_LEFT + 1.8 * cm, y, _truncate(action, 70))
+            c.setFillColor(colors.black)
+            y -= 0.5 * cm
+    else:
+        c.setFont("Helvetica", 9.5)
+        c.drawString(M_LEFT, y, "No open action items.")
+        y -= 0.5 * cm
+
+    c.save()
+    return True
+
+
 def validate_single_inputs(comm_meta, inputs):
     """Compatibility delegate to shared validation used by UI and future API."""
     return _core_validate_single_inputs(comm_meta, inputs)
@@ -7720,6 +7850,109 @@ class App(tk.Tk):
         except Exception as e:
             log_exception(e, "_refresh_home_range_watch")
 
+    def _build_executive_summary_ctx(self):
+        """Gather everything export_executive_summary_pdf() needs into one
+        plain dict, reusing the same computations Home already shows (KPIs,
+        3-month range, per-commodity, action items) instead of recomputing
+        anything from scratch."""
+        metrics = self._home_exec_metrics("ALL")
+        today_label = dt.date.today().strftime("%b %d, %Y")
+        kpis = [
+            ("Realised savings (closed only)", self._home_compact_money(metrics["realized_saving"])),
+            ("Saving / MT (realised)",
+             f"EGP {metrics['realized_per_mt']:+,.0f}" if metrics["realized_per_mt"] is not None else "—"),
+            ("Closed quantity", f"{metrics['closed_qty']:,.0f} MT · {metrics['closed_count']} contracts"),
+            ("Open exposure (own-after value)", self._home_compact_money(metrics["open_value"])),
+            ("Open quantity", f"{metrics['open_qty']:,.0f} MT · {metrics['open_count']} contracts"),
+            ("Unpriced quantity", f"{metrics['unpriced_qty']:,.0f} MT"),
+            ("Data gaps", str(metrics["data_gaps"])),
+        ]
+
+        ranges = []
+        md = self.state_obj.get("market_data", {}) or {}
+        cbot_q = md.get("cbot_quotes", {}) or {}
+
+        def _qprice(comm):
+            val = cbot_q.get(comm)
+            return to_float(val.get("price"), None) if isinstance(val, dict) else to_float(val, None)
+
+        cbot_hist = self.state_obj.get("cbot_history", []) or []
+        fx_hist = self.state_obj.get("fx_history", []) or []
+        fx_live = to_float((md.get("fx", {}) or {}).get("price"), None)
+        specs = [
+            ("Corn CBOT", cbot_hist, "date", "price", "CORN", _qprice("CORN"), "{:,.2f}"),
+            ("Soybean CBOT", cbot_hist, "date", "price", "SOYBEAN", _qprice("SOYBEAN"), "{:,.2f}"),
+            ("Wheat CBOT", cbot_hist, "date", "price", "WHEAT", _qprice("WHEAT"), "{:,.2f}"),
+            ("SBM CBOT", cbot_hist, "date", "price", "SBM", _qprice("SBM"), "{:,.2f}"),
+            ("USD/EGP", fx_hist, "date", "rate", None, fx_live, "{:,.4f}"),
+        ]
+        for label, records, date_key, value_key, comm, live, fmt in specs:
+            stats = self._price_range_stats(records, date_key, value_key, days=90,
+                                            commodity=comm, live_current=live)
+            if not stats:
+                continue
+            status = ("3-MO LOW" if stats["at_low"] else
+                     "3-MO HIGH" if stats["at_high"] else
+                     f"{stats['pct_of_range']*100:.0f}% of range")
+            ranges.append((label, fmt.format(stats["current"]), fmt.format(stats["low"]),
+                           fmt.format(stats["high"]), status))
+        local_hist = self.state_obj.get("local_prices", []) or []
+        local_comms = sorted({(r.get("commodity") or "").strip().upper()
+                              for r in local_hist if r.get("commodity")})
+        for comm in local_comms:
+            stats = self._price_range_stats(local_hist, "date", "price_egp_mt",
+                                            days=90, commodity=comm)
+            if not stats:
+                continue
+            status = ("3-MO LOW" if stats["at_low"] else
+                     "3-MO HIGH" if stats["at_high"] else
+                     f"{stats['pct_of_range']*100:.0f}% of range")
+            ranges.append((f"{comm} (local)", f"{stats['current']:,.0f}", f"{stats['low']:,.0f}",
+                           f"{stats['high']:,.0f}", status))
+
+        by_commodity = []
+        for comm in self._home_commodity_options():
+            m = self._home_exec_metrics(comm)
+            if not m["open_count"] and not m["closed_count"]:
+                continue
+            by_commodity.append((f"{comm} — realised", self._home_compact_money(m["realized_saving"])))
+            by_commodity.append((f"{comm} — open ({m['open_count']} contracts)", f"{m['open_qty']:,.0f} MT"))
+
+        action_items = []
+        tv = getattr(self, "hd_action_tree", None)
+        if tv is not None:
+            for iid in tv.get_children():
+                vals = tv.item(iid, "values")
+                if len(vals) >= 3:
+                    action_items.append((str(vals[0]), str(vals[1]), str(vals[2])))
+
+        return {
+            "scope_label": f"As of {today_label} · all commodities",
+            "kpis": kpis,
+            "ranges": ranges,
+            "by_commodity": by_commodity,
+            "action_items": action_items,
+        }
+
+    def export_executive_summary_report(self):
+        try:
+            ctx = self._build_executive_summary_ctx()
+        except Exception as e:
+            log_exception(e, "export_executive_summary_report:build_ctx")
+            messagebox.showerror(APP_NAME, f"Could not build the report: {e}")
+            return
+        fp = filedialog.asksaveasfilename(
+            initialdir=get_default_export_dir(), defaultextension=".pdf",
+            filetypes=[("PDF", "*.pdf")], title="Save Executive Summary Report",
+            initialfile=f"Prometheus_Summary_{dt.date.today().isoformat()}.pdf")
+        if not fp:
+            return
+        ok = export_executive_summary_pdf(fp, ctx)
+        if ok:
+            messagebox.showinfo(APP_NAME, f"Saved Executive Summary Report:\n{fp}")
+            if messagebox.askyesno(APP_NAME, "Open export folder?"):
+                open_folder(os.path.dirname(fp))
+
     def _build_home_dashboard(self):
         """Build a premium Home tab command center.
 
@@ -7893,11 +8126,16 @@ class App(tk.Tk):
         tk.Label(hero, textvariable=self.hd_market_status_var,
                  bg=CLR["sidebar_bg"], fg=CLR["sidebar_text_dim"],
                  font=(FONT_FAMILY, FS_BODY)).grid(row=3, column=0, sticky="w", padx=16, pady=(0, 14))
-        tk.Button(hero, text="🔄 Refresh Everything",
+        hero_btns = tk.Frame(hero, bg=CLR["sidebar_bg"])
+        hero_btns.grid(row=0, column=1, rowspan=4, sticky="e", padx=16, pady=16)
+        tk.Button(hero_btns, text="📄 Export Summary Report",
+                  command=self.export_executive_summary_report,
+                  bg=CLR["sidebar_hover"], fg="white", relief="flat", cursor="hand2",
+                  font=(FONT_FAMILY, FS_BODY, "bold"), padx=16, pady=8).pack(side="left", padx=(0, 8))
+        tk.Button(hero_btns, text="🔄 Refresh Everything",
                   command=lambda: self.refresh_all(fetch_market=True),
                   bg=CLR["primary"], fg="white", relief="flat", cursor="hand2",
-                  font=(FONT_FAMILY, FS_BODY, "bold"), padx=16, pady=8).grid(
-                      row=0, column=1, rowspan=4, sticky="e", padx=16, pady=16)
+                  font=(FONT_FAMILY, FS_BODY, "bold"), padx=16, pady=8).pack(side="left")
 
         # KPI cards: visually separated open MTM and realized numbers.
         kpi_frame = tk.Frame(main, bg=CLR["bg"])
