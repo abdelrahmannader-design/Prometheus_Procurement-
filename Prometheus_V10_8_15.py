@@ -62,26 +62,94 @@ try:
 except Exception:
     HAS_MPL = False
 
-FONT_FAMILY = "Segoe UI"
+# ══════════════════════════════════════════════════════════════════════
+# Bundled fonts (Inter / IBM Plex Mono, both SIL OFL) — loaded privately
+# for this process only so the app doesn't depend on the fonts being
+# installed on the user's Windows machine. FONT_FAMILY/FONT_MONO start as
+# safe system-font fallbacks and are upgraded in place (global rebind) by
+# _resolve_fonts() once a Tk root exists and can query font.families().
+# ══════════════════════════════════════════════════════════════════════
+_BUNDLED_FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
+
+
+def _load_bundled_fonts():
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        FR_PRIVATE = 0x10
+        for sub in ("Inter", "IBM_Plex_Mono"):
+            d = os.path.join(_BUNDLED_FONT_DIR, sub)
+            if not os.path.isdir(d):
+                continue
+            for fn in os.listdir(d):
+                if fn.lower().endswith((".ttf", ".otf")):
+                    try:
+                        ctypes.windll.gdi32.AddFontResourceExW(
+                            os.path.join(d, fn), FR_PRIVATE, 0)
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+
+
+_load_bundled_fonts()
+
+FONT_FAMILY = "Segoe UI"   # resolved to "Inter" by _resolve_fonts() when available
+FONT_MONO   = "Consolas"   # resolved to "IBM Plex Mono" by _resolve_fonts() when available
 FS_BODY  = 9    # default body / labels / table text
 FS_EMPH  = 10   # emphasized rows, section labels
 FS_KPI   = 13   # KPI card values
 FS_TITLE = 16   # page / hero titles
 
+
+def _resolve_fonts(root):
+    """Upgrade FONT_FAMILY/FONT_MONO to the bundled fonts once a Tk root
+    exists to query them; call from App.__init__ before any widget is built."""
+    global FONT_FAMILY, FONT_MONO
+    try:
+        import tkinter.font as _tkfont
+        available = set(_tkfont.families(root))
+        if "Inter" in available:
+            FONT_FAMILY = "Inter"
+        if "IBM Plex Mono" in available:
+            FONT_MONO = "IBM Plex Mono"
+    except Exception:
+        pass
+
+
+# ══════════════════════════════════════════════════════════════════════
+# DESIGN TOKENS — single source of truth for the app's color system,
+# matching the Prometheus web mockup (oklch values converted to hex,
+# since Tk has no oklch()/CSS-grid/border-radius support).
+# Rule: no UI text below FS_BODY (9pt); muted text no lighter than
+# CLR["muted"] on light backgrounds (WCAG AA at small sizes).
+# ══════════════════════════════════════════════════════════════════════
 CLR = {
-    "bg":       "#f4f7fb",   # app background
-    "surface":  "#ffffff",   # cards
-    "border":   "#d7e0ea",   # card / table borders
-    "text":     "#0f172a",   # primary text
-    "muted":    "#5f6b7a",   # secondary text on light bg
-    "muted_dk": "#9db4cb",   # secondary text on dark bg
-    "primary":  "#2563eb",   # primary action
-    "success":  "#15803d",
-    "warning":  "#b45309",
-    "danger":   "#b00020",
-    "accent":   "#0ea5e9",
-    "dark":     "#0f172a",   # dark rail
-    "dark2":    "#111c31",   # dark card
+    "bg":            "#f5f2ed",   # app background (warm off-white)
+    "surface":       "#fdfcfb",   # cards
+    "border":        "#dedad2",   # card / table borders
+    "text":          "#211e1a",   # primary text
+    "muted":         "#6b6459",   # secondary text on light bg
+    "muted_dk":      "#9db4cb",   # secondary text on dark bg
+    "primary":       "#2563eb",   # primary action / accent blue
+    "primary_hover": "#1d4ed8",
+    "success":       "#15803d",
+    "success_bg":    "#dbf3de",
+    "success_text":  "#1f6b2e",
+    "warning":       "#b45309",
+    "warning_bg":    "#f5e6ce",
+    "warning_text":  "#8a5a16",
+    "danger":        "#b00020",
+    "accent":        "#0ea5e9",
+    "accent_gold":   "#c99a4b",   # secondary chart line / avatar accent
+    "dark":          "#211e1a",   # dark rail
+    "dark2":         "#111c31",   # dark card
+    "sidebar_bg":       "#1b2036",   # left nav background
+    "sidebar_hover":    "#28304c",
+    "sidebar_border":   "#2e3550",
+    "sidebar_text":     "#d9dbe8",   # default nav item text
+    "sidebar_text_dim": "#8d90a8",   # muted nav sub-text
 }
 
 DATE_ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -3150,13 +3218,186 @@ def export_snapshot_pdf(fp, a, b=None):
     c.save()
     return True
 
+
+def export_executive_summary_pdf(fp, ctx):
+    """One-click management-ready PDF: KPI summary, 3-month price range
+    status, per-commodity breakdown and open action items. `ctx` is a plain
+    dict built by App._build_executive_summary_ctx() so this function has
+    no Tk/state dependency of its own (same separation as export_snapshot_pdf)."""
+    if not _need_reportlab():
+        return False
+
+    c = canvas.Canvas(fp, pagesize=A4)
+    w, h = A4
+    M_LEFT = 1.5 * cm
+    M_RIGHT = 1.5 * cm
+    M_TOP = 1.8 * cm
+    M_BOTTOM = 1.8 * cm
+
+    def _truncate(s, max_chars=70):
+        s = "" if s is None else str(s)
+        s = s.replace("\n", " ").strip()
+        return s if len(s) <= max_chars else (s[: max_chars - 1] + "…")
+
+    def header(subtitle):
+        c.setFont("Helvetica-Bold", 14)
+        c.drawString(M_LEFT, h - M_TOP, "Prometheus Procurement — Executive Summary")
+        c.setFont("Helvetica", 8.5)
+        c.drawString(M_LEFT, h - M_TOP - 0.55 * cm,
+                     f"Generated: {now_ts()}  ·  {subtitle}")
+        c.line(M_LEFT, h - M_TOP - 0.75 * cm, w - M_RIGHT, h - M_TOP - 0.75 * cm)
+
+    def new_page(subtitle):
+        c.showPage()
+        header(subtitle)
+        return h - M_TOP - 1.3 * cm
+
+    def ensure_room(y, needed=0.7 * cm, subtitle=""):
+        if y < M_BOTTOM + needed:
+            return new_page(subtitle)
+        return y
+
+    def section(y, title):
+        y = ensure_room(y, 1.0 * cm)
+        c.setFont("Helvetica-Bold", 11.5)
+        c.setFillColor(colors.black)
+        c.drawString(M_LEFT, y, title)
+        y -= 0.15 * cm
+        c.setStrokeColor(colors.lightgrey)
+        c.line(M_LEFT, y, w - M_RIGHT, y)
+        return y - 0.55 * cm
+
+    def kpi_row(y, label, value):
+        y = ensure_room(y)
+        c.setFont("Helvetica", 9.5)
+        c.drawString(M_LEFT, y, _truncate(label, 40))
+        c.setFont("Helvetica-Bold", 9.5)
+        c.drawRightString(w - M_RIGHT, y, _truncate(str(value), 40))
+        return y - 0.5 * cm
+
+    def range_row(y, label, current, low, high, status):
+        y = ensure_room(y)
+        c.setFont("Helvetica", 9.5)
+        c.drawString(M_LEFT, y, _truncate(label, 22))
+        c.drawString(M_LEFT + 3.6 * cm, y, _truncate(current, 16))
+        c.drawString(M_LEFT + 6.8 * cm, y, _truncate(f"{low} – {high}", 22))
+        c.setFont("Helvetica-Bold", 9.5)
+        color = (colors.HexColor("#15803d") if "LOW" in status
+                 else colors.HexColor("#b00020") if "HIGH" in status else colors.grey)
+        c.setFillColor(color)
+        c.drawString(M_LEFT + 11.6 * cm, y, _truncate(status, 26))
+        c.setFillColor(colors.black)
+        return y - 0.5 * cm
+
+    header(ctx.get("scope_label", ""))
+    y = h - M_TOP - 1.3 * cm
+
+    y = section(y, "Portfolio KPIs")
+    for label, value in ctx.get("kpis", []):
+        y = kpi_row(y, label, value)
+    y -= 0.2 * cm
+
+    y = section(y, "3-Month Price Range — CBOT, FX & Local")
+    c.setFont("Helvetica-Bold", 8.5)
+    c.setFillColor(colors.grey)
+    c.drawString(M_LEFT, y, "Series")
+    c.drawString(M_LEFT + 3.6 * cm, y, "Current")
+    c.drawString(M_LEFT + 6.8 * cm, y, "90-day range")
+    c.drawString(M_LEFT + 11.6 * cm, y, "Status")
+    c.setFillColor(colors.black)
+    y -= 0.5 * cm
+    ranges = ctx.get("ranges", [])
+    if ranges:
+        for label, current, low, high, status in ranges:
+            y = range_row(y, label, current, low, high, status)
+    else:
+        c.setFont("Helvetica", 9.5)
+        c.drawString(M_LEFT, y, "No 90-day price history logged yet.")
+        y -= 0.5 * cm
+    y -= 0.2 * cm
+
+    y = section(y, "By Commodity")
+    for label, value in ctx.get("by_commodity", []):
+        y = kpi_row(y, label, value)
+    y -= 0.2 * cm
+
+    y = section(y, "Action Items")
+    items = ctx.get("action_items", [])
+    if items:
+        for priority, issue, action in items:
+            y = ensure_room(y, 0.9 * cm)
+            c.setFont("Helvetica-Bold", 9)
+            color = colors.HexColor("#b00020") if priority == "High" else colors.HexColor("#b45309") if priority == "Medium" else colors.grey
+            c.setFillColor(color)
+            c.drawString(M_LEFT, y, _truncate(priority, 8))
+            c.setFillColor(colors.black)
+            c.setFont("Helvetica", 9)
+            c.drawString(M_LEFT + 1.8 * cm, y, _truncate(issue, 58))
+            y -= 0.42 * cm
+            c.setFont("Helvetica-Oblique", 8)
+            c.setFillColor(colors.grey)
+            c.drawString(M_LEFT + 1.8 * cm, y, _truncate(action, 70))
+            c.setFillColor(colors.black)
+            y -= 0.5 * cm
+    else:
+        c.setFont("Helvetica", 9.5)
+        c.drawString(M_LEFT, y, "No open action items.")
+        y -= 0.5 * cm
+
+    c.save()
+    return True
+
+
 def validate_single_inputs(comm_meta, inputs):
     """Compatibility delegate to shared validation used by UI and future API."""
     return _core_validate_single_inputs(comm_meta, inputs)
 
+
+class _ScreenSwitcher(tk.Frame):
+    """Drop-in replacement for a ttk.Notebook, driven by an external pill/
+    sidebar nav instead of a tab strip. Screens are overlaid via
+    place()+tkraise() and swapped with .select(frame) — the same call
+    signature ttk.Notebook has (self.nb.select(self.tab_x)), so call sites
+    elsewhere in the file don't need to change. .select() with no args
+    returns the current screen's widget path (like ttk.Notebook.select())
+    for the self.nb.nametowidget(...) lazy-refresh pattern;
+    .bind("<<NotebookTabChanged>>", cb) is honored too. `on_select(tab)` is
+    an optional extra hook (e.g. to restyle the nav that drives this
+    switcher) fired before the NotebookTabChanged callback."""
+
+    def __init__(self, master, app, on_select=None, **kw):
+        super().__init__(master, **kw)
+        self._app = app
+        self._current = None
+        self._on_change_cb = None
+        self._on_select_hook = on_select
+
+    def select(self, tab=None):
+        if tab is None:
+            return str(self._current) if self._current is not None else ""
+        if tab is self._current:
+            return
+        self._current = tab
+        tab.tkraise()
+        if self._on_select_hook:
+            self._on_select_hook(tab)
+        if self._on_change_cb:
+            try:
+                self._on_change_cb()
+            except Exception:
+                pass
+
+    def bind(self, sequence=None, func=None, add=None):
+        if sequence == "<<NotebookTabChanged>>":
+            self._on_change_cb = func
+            return
+        return super().bind(sequence, func, add)
+
+
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
+        _resolve_fonts(self)
         self.title(APP_NAME)
         self.geometry("1450x900")
         # Allow smaller/laptop screens; large tabs now scroll instead of hiding sections.
@@ -3258,22 +3499,166 @@ class App(tk.Tk):
             pass
 
     def _apply_global_style(self):
-        """V8 design tokens applied once, app-wide: one base font, readable
+        """Design tokens applied once, app-wide: one base font, readable
         trees, consistent notebook chrome. Individual screens must not
         override these except through the token constants."""
         try:
             style = ttk.Style(self)
-            style.configure(".", font=(FONT_FAMILY, FS_BODY))
+            try:
+                style.theme_use("clam")
+            except Exception:
+                pass
+            style.configure(".", font=(FONT_FAMILY, FS_BODY),
+                             background=CLR["bg"], foreground=CLR["text"])
+            style.configure("TFrame", background=CLR["bg"])
+            style.configure("TLabel", background=CLR["bg"], foreground=CLR["text"])
             style.configure("Treeview",
-                            rowheight=max(22, round(24 * getattr(self, "_font_scale", 1.0))),
-                            font=(FONT_FAMILY, FS_BODY))
-            style.configure("Treeview.Heading", font=(FONT_FAMILY, FS_BODY, "bold"))
-            style.configure("TNotebook.Tab", font=(FONT_FAMILY, FS_BODY), padding=(12, 5))
+                             rowheight=max(22, round(26 * getattr(self, "_font_scale", 1.0))),
+                             font=(FONT_FAMILY, FS_BODY),
+                             background=CLR["surface"], fieldbackground=CLR["surface"],
+                             foreground=CLR["text"], borderwidth=0)
+            style.map("Treeview",
+                      background=[("selected", CLR["primary"])],
+                      foreground=[("selected", "#ffffff")])
+            style.configure("Treeview.Heading", font=(FONT_FAMILY, FS_BODY, "bold"),
+                             background="#efebe3", foreground=CLR["muted"],
+                             relief="flat", borderwidth=0)
+            style.map("Treeview.Heading", background=[("active", "#efebe3")])
+            style.configure("TNotebook", background=CLR["bg"], borderwidth=0)
+            style.configure("TNotebook.Tab", font=(FONT_FAMILY, FS_BODY), padding=(12, 5),
+                             background=CLR["bg"], foreground=CLR["muted"])
+            style.map("TNotebook.Tab",
+                      background=[("selected", CLR["surface"])],
+                      foreground=[("selected", CLR["text"])])
+            style.configure("TLabelframe", background=CLR["bg"], borderwidth=1,
+                             relief="solid", bordercolor=CLR["border"])
             style.configure("TLabelframe.Label", font=(FONT_FAMILY, FS_BODY, "bold"),
-                            foreground="#1a4fa0")
-            style.configure("TButton", font=(FONT_FAMILY, FS_BODY))
+                             background=CLR["bg"], foreground=CLR["primary"])
+            style.configure("TButton", font=(FONT_FAMILY, FS_BODY), padding=(10, 6))
+            style.configure("TEntry", fieldbackground=CLR["surface"],
+                             bordercolor=CLR["border"])
+            style.configure("TCombobox", fieldbackground=CLR["surface"],
+                             bordercolor=CLR["border"])
         except Exception as e:
             log_exception(e, "_apply_global_style")
+
+    # ------------------------------------------------------------------
+    # SHARED CARD-BASED WIDGET HELPERS — reused across every screen so the
+    # web-mockup look (bordered card, KPI tile, pill sub-tabs) is built once.
+    # ------------------------------------------------------------------
+    def _card(self, parent, title=None, subtitle=None, action_text=None,
+              action_command=None, dark=False):
+        """Bordered card matching the mockup. Returns (card_frame, body_frame);
+        callers pack their content into body_frame."""
+        bg = CLR["dark2"] if dark else CLR["surface"]
+        border = CLR["sidebar_border"] if dark else CLR["border"]
+        fg = "#ffffff" if dark else CLR["text"]
+        muted = CLR["sidebar_text_dim"] if dark else CLR["muted"]
+        card = tk.Frame(parent, bg=bg, highlightthickness=1, highlightbackground=border)
+        if title:
+            head = tk.Frame(card, bg=bg)
+            head.pack(fill="x", padx=16, pady=(14, 2 if subtitle else 8))
+            tk.Label(head, text=title, bg=bg, fg=fg,
+                     font=(FONT_FAMILY, FS_EMPH, "bold")).pack(side="left")
+            if action_text:
+                act = tk.Label(head, text=action_text, bg=bg, fg=CLR["primary"],
+                               font=(FONT_FAMILY, FS_BODY, "bold"), cursor="hand2")
+                act.pack(side="right")
+                if action_command:
+                    act.bind("<Button-1>", lambda e: action_command())
+            if subtitle:
+                tk.Label(card, text=subtitle, bg=bg, fg=muted,
+                         font=(FONT_FAMILY, FS_BODY)).pack(anchor="w", padx=16, pady=(0, 8))
+        body = tk.Frame(card, bg=bg)
+        body.pack(fill="both", expand=True, padx=16, pady=(0 if title else 16, 16))
+        return card, body
+
+    def _kpi_card(self, parent, label, value, trend="", trend_color=None, dot=None):
+        """KPI tile: uppercase label (+ optional dot), big mono value, trend line.
+        `value`/`trend` may be a plain string or a tk.StringVar (kept live-bound
+        for screens that refresh these numbers after building the card)."""
+        bg = CLR["surface"]
+        card = tk.Frame(parent, bg=bg, highlightthickness=1, highlightbackground=CLR["border"])
+        top = tk.Frame(card, bg=bg)
+        top.pack(fill="x", padx=14, pady=(12, 0))
+        tk.Label(top, text=label.upper(), bg=bg, fg=CLR["muted"],
+                 font=(FONT_FAMILY, 8, "bold")).pack(side="left")
+        if dot:
+            tk.Frame(top, bg=dot, width=8, height=8).pack(side="right", pady=2)
+        value_kw = {"textvariable": value} if isinstance(value, tk.Variable) else {"text": value}
+        tk.Label(card, bg=bg, fg=CLR["text"],
+                 font=(FONT_MONO, FS_KPI, "bold"), **value_kw).pack(anchor="w", padx=14, pady=(4, 0))
+        trend_kw = {"textvariable": trend} if isinstance(trend, tk.Variable) else {"text": trend or " "}
+        tk.Label(card, bg=bg, fg=(trend_color or CLR["muted"]),
+                 font=(FONT_FAMILY, 9, "bold"), **trend_kw).pack(anchor="w", padx=14, pady=(4, 12))
+        return card
+
+    def _build_pill_switcher(self, parent, items, extra=None):
+        """Pill sub-tab row (mockup's Contracts/Analysis/Setup sub-navigation)
+        wired to a _ScreenSwitcher content host. `items`: [(key, label), ...].
+        Returns (bar_frame, host_frame, screens_dict, switcher, finalize) —
+        bar_frame and host_frame still need to be gridded/packed by the
+        caller; screens_dict[key] is that pill's content frame to build into.
+        `extra` optionally packs extra widgets (e.g. search/actions) into the
+        same row as the pills, right-aligned.
+
+        Call finalize() once ALL screens have their content built, if (and
+        only if) `parent` sits inside a bottom-up-sized scrollable wrapper
+        (_make_scrollable_tab) — e.g. Analysis/Setup & Data. Because the
+        screens are stacked via place() (needed to overlay/swap them), Tk
+        does not propagate their size to the switcher the way pack/grid
+        children normally would, so a switcher with no other size hint
+        collapses to ~0 height inside a wrapper that sizes itself from
+        content. finalize() fixes that by measuring the tallest screen and
+        setting the switcher's height explicitly. Not needed when `parent`
+        already has a real, window-derived size (e.g. Contracts, one of the
+        6 top-level screens placed directly against the main shell)."""
+        bar = tk.Frame(parent, bg=CLR["bg"])
+        pill_row = tk.Frame(bar, bg="#eeeae2")
+        pill_row.pack(side="left", anchor="w", pady=4)
+        if extra:
+            extra_row = tk.Frame(bar, bg=CLR["bg"])
+            extra_row.pack(side="right", anchor="e")
+            extra(extra_row)
+
+        host = tk.Frame(parent, bg=CLR["bg"])
+        screens = {}
+        pill_labels = {}
+
+        def _select(key):
+            switcher.select(screens[key])
+
+        def _on_switch(_tab):
+            for k, w in pill_labels.items():
+                active = (screens[k] is _tab)
+                w.configure(bg=("#ffffff" if active else "#eeeae2"),
+                           fg=(CLR["text"] if active else CLR["muted"]),
+                           font=(FONT_FAMILY, FS_BODY, "bold" if active else "normal"))
+
+        switcher = _ScreenSwitcher(host, self, on_select=_on_switch, bg=CLR["bg"])
+        switcher.pack(fill="both", expand=True)
+
+        for key, label in items:
+            frame = tk.Frame(switcher, bg=CLR["bg"])
+            frame.place(in_=switcher, x=0, y=0, relwidth=1, relheight=1)
+            screens[key] = frame
+            lbl = tk.Label(pill_row, text=label, bg="#eeeae2", fg=CLR["muted"],
+                           font=(FONT_FAMILY, FS_BODY), padx=16, pady=8, cursor="hand2")
+            lbl.pack(side="left", padx=2, pady=2)
+            lbl.bind("<Button-1>", lambda e, k=key: _select(k))
+            pill_labels[key] = lbl
+
+        _select(items[0][0])
+
+        def _finalize():
+            try:
+                switcher.update_idletasks()
+                max_h = max((s.winfo_reqheight() for s in screens.values()), default=1)
+                switcher.configure(height=max(max_h, 1))
+            except Exception:
+                pass
+
+        return bar, host, screens, switcher, _finalize
 
     # ------------------------------------------------------------------
     # AUTO-SAVE  — every 30 s, only if state was dirtied since last save
@@ -3607,6 +3992,9 @@ class App(tk.Tk):
             self._sb_fx_var.set(
                 f"FX: {fx_price:.4f}  ({fx_ts[:10] if fx_ts else '—'})"
                 if fx_price else "FX: —")
+            if hasattr(self, "_topbar_fx_var"):
+                self._topbar_fx_var.set(
+                    f"USD/EGP {fx_price:.2f}" if fx_price else "USD/EGP —")
             cbot_d     = md.get("cbot_quotes", {}) or {}
             cbot_corn  = to_float(cbot_d.get("CORN"), None)
             cbot_ts    = md.get("cbot_ts", "")
@@ -3811,24 +4199,117 @@ class App(tk.Tk):
         save_state(self.state_obj)
         self.on_select_contract()
 
-    def _build_top_bar(self):
-        bar = ttk.Frame(self, padding=(10,6))
-        bar.pack(fill="x")
+    # Sidebar nav key -> (page title, subtitle) shown in the top bar,
+    # mirroring the web mockup's per-screen header.
+    _SCREEN_META = {
+        "home":        ("Home", "Market overview and portfolio at a glance"),
+        "contracts":   ("Contracts", "Import contracts, local purchases and CBOT slots"),
+        "calculate":   ("Calculate", "Deal Evaluator — landed cost vs local benchmark"),
+        "analysis":    ("Analysis", "Performance, basis tracking and exposure"),
+        "consumption": ("Consumption", "Stock levels, burn rate and coverage"),
+        "setup":       ("Setup & Data", "Suppliers, freight rates and market data feeds"),
+    }
+    _NAV_ITEMS = (
+        ("home", "Home"), ("contracts", "Contracts"), ("calculate", "Calculate"),
+        ("analysis", "Analysis"), ("consumption", "Consumption"), ("setup", "Setup & Data"),
+    )
 
-        ttk.Label(bar, text="Selected Contract:").pack(side="left")
+    def _build_top_bar(self):
+        """Builds the whole app shell: dark left sidebar (nav) + a right
+        column holding the top bar, the relocated global contract-picker
+        utility strip, and a content host that _build_tabs() fills. Kept
+        under this method name (called first from __init__) so the sidebar
+        exists before _build_tabs() populates the content host."""
+        shell = tk.Frame(self, bg=CLR["bg"])
+        shell.pack(fill="both", expand=True)
+
+        # ── Sidebar ──────────────────────────────────────────────────
+        sidebar = tk.Frame(shell, bg=CLR["sidebar_bg"], width=232)
+        sidebar.pack(side="left", fill="y")
+        sidebar.pack_propagate(False)
+
+        brand = tk.Frame(sidebar, bg=CLR["sidebar_bg"])
+        brand.pack(fill="x", padx=14, pady=(20, 22))
+        tk.Frame(brand, bg=CLR["primary"], width=30, height=30).pack(side="left")
+        brand_txt = tk.Frame(brand, bg=CLR["sidebar_bg"])
+        brand_txt.pack(side="left", padx=(10, 0))
+        tk.Label(brand_txt, text="Prometheus", bg=CLR["sidebar_bg"], fg="#ffffff",
+                 font=(FONT_FAMILY, 12, "bold")).pack(anchor="w")
+        tk.Label(brand_txt, text="Procurement · CPG", bg=CLR["sidebar_bg"],
+                 fg=CLR["sidebar_text_dim"], font=(FONT_FAMILY, 8)).pack(anchor="w")
+
+        nav_wrap = tk.Frame(sidebar, bg=CLR["sidebar_bg"])
+        nav_wrap.pack(fill="x", padx=10)
+        self._sidebar_nav_widgets = {}
+        for key, label in self._NAV_ITEMS:
+            row = tk.Label(nav_wrap, text="  " + label, bg=CLR["sidebar_bg"],
+                           fg=CLR["sidebar_text"], font=(FONT_FAMILY, FS_BODY),
+                           anchor="w", padx=8, pady=9, cursor="hand2")
+            row.pack(fill="x", pady=1)
+            row.bind("<Button-1>", lambda e, k=key: self._select_screen(k))
+            self._sidebar_nav_widgets[key] = row
+
+        footer = tk.Frame(sidebar, bg=CLR["sidebar_bg"])
+        footer.pack(side="bottom", fill="x", padx=14, pady=14)
+        tk.Frame(footer, bg=CLR["sidebar_border"], height=1).pack(fill="x", pady=(0, 10))
+        tk.Label(footer, text=APP_BUILD, bg=CLR["sidebar_bg"], fg=CLR["sidebar_text_dim"],
+                 font=(FONT_FAMILY, 8), wraplength=190, justify="left").pack(anchor="w")
+
+        # ── Right column: top bar + utility strip + content host ──────
+        right = tk.Frame(shell, bg=CLR["bg"])
+        right.pack(side="left", fill="both", expand=True)
+        self._right_col = right
+
+        topbar = tk.Frame(right, bg=CLR["surface"], height=64,
+                          highlightthickness=1, highlightbackground=CLR["border"])
+        topbar.pack(fill="x")
+        topbar.pack_propagate(False)
+
+        title_box = tk.Frame(topbar, bg=CLR["surface"])
+        title_box.pack(side="left", padx=28)
+        self._topbar_title_var = tk.StringVar(value="Home")
+        self._topbar_subtitle_var = tk.StringVar(value="")
+        tk.Label(title_box, textvariable=self._topbar_title_var, bg=CLR["surface"],
+                 fg=CLR["text"], font=(FONT_FAMILY, 15, "bold")).pack(anchor="w", pady=(14, 0))
+        tk.Label(title_box, textvariable=self._topbar_subtitle_var, bg=CLR["surface"],
+                 fg=CLR["muted"], font=(FONT_FAMILY, FS_BODY)).pack(anchor="w")
+
+        meta_box = tk.Frame(topbar, bg=CLR["surface"])
+        meta_box.pack(side="right", padx=28)
+        self._topbar_fx_var = tk.StringVar(value="USD/EGP —")
+        fx_pill = tk.Frame(meta_box, bg="#f7f4ee", highlightthickness=1,
+                           highlightbackground=CLR["border"])
+        fx_pill.pack(side="left")
+        tk.Frame(fx_pill, bg=CLR["success"], width=6, height=6
+                 ).pack(side="left", padx=(10, 6), pady=8)
+        tk.Label(fx_pill, textvariable=self._topbar_fx_var, bg="#f7f4ee", fg=CLR["muted"],
+                 font=(FONT_MONO, 9)).pack(side="left", padx=(0, 10), pady=6)
+        tk.Frame(meta_box, bg=CLR["border"], width=1, height=24).pack(side="left", padx=16)
+        _today = dt.date.today()
+        self._topbar_date_var = tk.StringVar(
+            value=f"{_today:%b} {_today.day}, {_today:%Y}")
+        tk.Label(meta_box, textvariable=self._topbar_date_var, bg=CLR["surface"],
+                 fg=CLR["muted"], font=(FONT_MONO, 10)).pack(side="left")
+
+        # ── Utility strip: relocated global contract picker + actions.
+        # No equivalent in the mockup (no auth/global-picker concept there);
+        # kept as a slim bar so the functionality survives the redesign.
+        util = ttk.Frame(right, padding=(14, 6))
+        util.pack(fill="x")
+        ttk.Label(util, text="Selected Contract:").pack(side="left")
         self.contract_filter_var = tk.StringVar(
             value=contract_label(
                 self.state_obj,
                 self.state_obj["ui"].get("selected_contract_id", "ALL")))
         self.contract_filter_combo = ttk.Combobox(
-            bar, textvariable=self.contract_filter_var, values=[], width=52,
+            util, textvariable=self.contract_filter_var, values=[], width=44,
             state="normal")
         self.contract_filter_combo.pack(side="left", padx=(8, 6))
         self.contract_filter_open_var = tk.BooleanVar(
             value=bool(self.state_obj.setdefault("ui", {}).get(
                 "top_contract_open_only", True)))
         ttk.Checkbutton(
-            bar, text="Open only", variable=self.contract_filter_open_var,
+            util, text="Open only", variable=self.contract_filter_open_var,
             command=self._on_top_contract_open_only_change).pack(
                 side="left", padx=(0, 12))
         self._wire_contract_typeahead(
@@ -3838,16 +4319,38 @@ class App(tk.Tk):
                 query=q, include_all=True),
             on_commit=self.on_select_contract)
 
-        ttk.Button(bar, text="Refresh", command=lambda: self.refresh_all(fetch_market=True)).pack(side="left", padx=(0,8))
-        ttk.Button(bar, text="Glossary", command=self._show_glossary).pack(
+        ttk.Button(util, text="Refresh", command=lambda: self.refresh_all(fetch_market=True)).pack(side="left", padx=(0,8))
+        ttk.Button(util, text="Glossary", command=self._show_glossary).pack(
             side="left", padx=(0, 8))
         # Backup / Load / Reset intentionally NOT here: destructive and
         # data-management actions live in  Setup & Data → Data Management.
-        ttk.Label(bar, text="Backup · restore · reset →  ⚙ Setup & Data",
+        ttk.Label(util, text="Backup · restore · reset →  Setup & Data",
                   font=(FONT_FAMILY, FS_BODY), foreground=CLR["muted"]).pack(side="left")
 
         self.status_var = tk.StringVar(value="")
-        ttk.Label(bar, textvariable=self.status_var).pack(side="right")
+        ttk.Label(util, textvariable=self.status_var).pack(side="right")
+
+        self._content_host = tk.Frame(right, bg=CLR["bg"])
+        self._content_host.pack(fill="both", expand=True)
+
+    def _select_screen(self, key):
+        frame = getattr(self, "_screen_frames", {}).get(key)
+        if frame is not None:
+            self.nb.select(frame)
+
+    def _on_sidebar_screen_changed(self, frame):
+        key = getattr(self, "_frame_to_key", {}).get(frame)
+        if key is None:
+            return
+        self._active_screen_key = key
+        title, subtitle = self._SCREEN_META.get(key, (key, ""))
+        self._topbar_title_var.set(title)
+        self._topbar_subtitle_var.set(subtitle)
+        for k, w in self._sidebar_nav_widgets.items():
+            active = (k == key)
+            w.configure(bg=(CLR["sidebar_hover"] if active else CLR["sidebar_bg"]),
+                       fg=("#ffffff" if active else CLR["sidebar_text"]),
+                       font=(FONT_FAMILY, FS_BODY, "bold" if active else "normal"))
 
     # ══════════════════════════════════════════════════════════════════
     #  ORIGIN COMPARE  — BRZ vs UKR quality-adjusted decision tool
@@ -6043,7 +6546,7 @@ class App(tk.Tk):
     # completion state of initial setup and disappears once done.
     # ------------------------------------------------------------------
     def _build_onboarding_strip(self):
-        self._onb_frame = ttk.Frame(self, padding=(10, 4))
+        self._onb_frame = ttk.Frame(self._right_col, padding=(10, 4))
         self.nb.bind("<<NotebookTabChanged>>", self._on_tab_change)
         self._refresh_onboarding_strip()
 
@@ -6080,7 +6583,7 @@ class App(tk.Tk):
                       font=(FONT_FAMILY, FS_BODY),
                       foreground=CLR["muted"]).pack(side="left", padx=(6, 0))
             if not self._onb_frame.winfo_ismapped():
-                self._onb_frame.pack(fill="x", before=self.nb)
+                self._onb_frame.pack(fill="x", before=self._content_host)
         except Exception as e:
             log_exception(e, "_refresh_onboarding_strip")
 
@@ -6232,44 +6735,46 @@ class App(tk.Tk):
         return None
 
     def _build_tabs(self):
-        self.nb = ttk.Notebook(self)
+        # ── Main navigation: 6 destinations, driven by the sidebar built in
+        # _build_top_bar() rather than a tab strip.
+        #   Home          status: ticker, KPIs, alerts, open MTM
+        #   Contracts     transactions: imports · local purchases · CBOT slots
+        #   Calculate     deal evaluator · scenario what-if
+        #   Analysis      performance · scorecards · seasonality · origin · savings
+        #   Consumption   stock, burn rate, coverage
+        #   Setup & Data  suppliers · commodities · market data · data mgmt
+        self.nb = _ScreenSwitcher(self._content_host, self,
+                                  on_select=self._on_sidebar_screen_changed, bg=CLR["bg"])
         self.nb.pack(fill="both", expand=True)
 
-        # ── Main navigation: 6 destinations (V8 information architecture) ─
-        #   🏠 Home          status: ticker, KPIs, alerts, open MTM
-        #   📋 Contracts     transactions: imports · local purchases · CBOT slots
-        #   🧮 Calculate     deal evaluator · scenario what-if
-        #   📊 Analysis      performance · scorecards · seasonality · origin · savings
-        #   🏭 Consumption   stock, burn rate, coverage
-        #   ⚙ Setup & Data   suppliers · commodities · market data · data mgmt
-        # Tab order mirrors the daily loop: see status → transact → decide
-        # → analyse → operate → configure.
+        self.tab_home              = tk.Frame(self.nb, bg=CLR["bg"])
+        self.tab_contracts_group   = tk.Frame(self.nb, bg=CLR["bg"])
+        self.tab_single_outer      = tk.Frame(self.nb, bg=CLR["bg"])
+        self.tab_analysis_outer    = tk.Frame(self.nb, bg=CLR["bg"])
+        self.tab_consumption_outer = tk.Frame(self.nb, bg=CLR["bg"])
+        self.tab_setup_outer       = tk.Frame(self.nb, bg=CLR["bg"])
 
-        self.tab_home              = ttk.Frame(self.nb)
-        self.tab_contracts_group   = ttk.Frame(self.nb)
-        self.tab_single_outer      = ttk.Frame(self.nb)
-        self.tab_analysis_outer    = ttk.Frame(self.nb)
-        self.tab_consumption_outer = ttk.Frame(self.nb)
-        self.tab_setup_outer       = ttk.Frame(self.nb)
+        self._screen_frames = {
+            "home": self.tab_home, "contracts": self.tab_contracts_group,
+            "calculate": self.tab_single_outer, "analysis": self.tab_analysis_outer,
+            "consumption": self.tab_consumption_outer, "setup": self.tab_setup_outer,
+        }
+        self._frame_to_key = {v: k for k, v in self._screen_frames.items()}
+        for _frame in self._screen_frames.values():
+            _frame.place(in_=self.nb, x=0, y=0, relwidth=1, relheight=1)
 
-        self.nb.add(self.tab_home,              text="🏠 Home")
-        self.nb.add(self.tab_contracts_group,   text="📋 Contracts")
-        self.nb.add(self.tab_single_outer,      text="🧮 Calculate")
-        self.nb.add(self.tab_analysis_outer,    text="📊 Analysis")
-        self.nb.add(self.tab_consumption_outer, text="🏭 Consumption")
-        self.nb.add(self.tab_setup_outer,       text="⚙ Setup & Data")
-
-        # ── Contracts group: everything transactional in one place ───────
+        # ── Contracts group: everything transactional in one place, as
+        # pill sub-tabs matching the mockup's Import/Local/Slots pattern ──
         self.tab_contracts_group.columnconfigure(0, weight=1)
-        self.tab_contracts_group.rowconfigure(0, weight=1)
-        self._contracts_nb = ttk.Notebook(self.tab_contracts_group)
-        self._contracts_nb.grid(row=0, column=0, sticky="nsew")
-        self.tab_contracts_outer       = ttk.Frame(self._contracts_nb)
-        self.tab_local_purchases_outer = ttk.Frame(self._contracts_nb)
-        self.tab_slots_outer           = ttk.Frame(self._contracts_nb)
-        self._contracts_nb.add(self.tab_contracts_outer,       text="Import Contracts")
-        self._contracts_nb.add(self.tab_local_purchases_outer, text="Local Purchases")
-        self._contracts_nb.add(self.tab_slots_outer,           text="CBOT Slots")
+        self.tab_contracts_group.rowconfigure(1, weight=1)
+        _c_bar, _c_host, _c_screens, self._contracts_nb, _c_finalize = self._build_pill_switcher(
+            self.tab_contracts_group,
+            [("import", "Import Contracts"), ("local", "Local Purchases"), ("slots", "CBOT Slots")])
+        _c_bar.grid(row=0, column=0, sticky="w", padx=12, pady=(10, 0))
+        _c_host.grid(row=1, column=0, sticky="nsew")
+        self.tab_contracts_outer       = _c_screens["import"]
+        self.tab_local_purchases_outer = _c_screens["local"]
+        self.tab_slots_outer           = _c_screens["slots"]
 
         # ── Scrollable inner frames (existing builders keep their names) ─
         self.tab_contracts       = self._make_scrollable_tab(self.tab_contracts_outer, padding=10)
@@ -6321,6 +6826,7 @@ class App(tk.Tk):
         self._build_analysis_tab()
 
         self._build_onboarding_strip()
+        self.nb.select(self.tab_home)
 
 
     # ------------------------------------------------------------------
@@ -6388,9 +6894,13 @@ class App(tk.Tk):
         """Return (priced_mt, unpriced_mt) for one open contract.
 
         Pricing lots take precedence because CORN/SOYBEAN contracts can be
-        fixed in several lots on different dates. A final-priced contract with
-        no lots is treated as fully priced; otherwise the remaining quantity is
-        exposed.
+        fixed in several lots on different dates. Without lots: a CBOT
+        contract is only priced once a premium has actually been agreed
+        (premium_cents set) — a CIF that only exists because "Push to
+        Calculate" ran against a live/floating CBOT quote is a preview, not
+        a locked price, so it must not silently count as priced. Non-CBOT
+        (flat-price) contracts have no premium step, so a stored CIF is
+        the final price and counts as fully priced.
         """
         qty = to_float(contract.get("remaining_mt") or contract.get("qty_mt"), 0.0) or 0.0
         lots = []
@@ -6402,6 +6912,11 @@ class App(tk.Tk):
             priced_qty = sum(to_float(lot.get("qty_mt"), 0.0) or 0.0 for lot in lots)
             priced_qty = min(max(priced_qty, 0.0), qty)
             return priced_qty, max(qty - priced_qty, 0.0)
+        comm = (contract.get("commodity") or "").strip().upper()
+        comm_meta = self.state_obj.get("commodities", {}).get(comm, {}) or {}
+        if (comm_meta.get("type") or "").upper() == "CBOT":
+            is_priced = to_float(contract.get("premium_cents"), None) is not None
+            return (qty, 0.0) if is_priced else (0.0, qty)
         final_cif = None
         try:
             final_cif = self._contract_cif_usd(contract)
@@ -6625,14 +7140,14 @@ class App(tk.Tk):
             frame.columnconfigure(col, weight=1, uniform="home-commodity")
         for index, comm in enumerate(options):
             row, col = divmod(index, columns)
-            card = tk.Frame(frame, bg="#0b1728", highlightthickness=1,
-                            highlightbackground="#1f3550", cursor="hand2")
+            card = tk.Frame(frame, bg="#1b2036", highlightthickness=1,
+                            highlightbackground="#2e3550", cursor="hand2")
             card.grid(row=row, column=col, sticky="nsew",
                       padx=(0, 8), pady=(0, 8), ipady=2)
             accent = tk.Frame(card, bg="#64748b", height=4)
             accent.pack(fill="x", side="top")
             tk.Label(card, text=comm, font=("Segoe UI", 11, "bold"),
-                     bg="#0b1728", fg="#f8fafc").pack(anchor="w", padx=10, pady=(7, 2))
+                     bg="#1b2036", fg="#f8fafc").pack(anchor="w", padx=10, pady=(7, 2))
             line_specs = [
                 ("realized", "Realised —", ("Segoe UI", 9, "bold"), "#72e39a"),
                 ("saving_mt", "Saving/MT —", ("Segoe UI", 9), "#dbeafe"),
@@ -6648,11 +7163,11 @@ class App(tk.Tk):
             for key, default, font, fg in line_specs:
                 var = tk.StringVar(value=default)
                 lbl = tk.Label(card, textvariable=var, font=font,
-                               bg="#0b1728", fg=fg)
+                               bg="#1b2036", fg=fg)
                 lbl.pack(anchor="w", padx=10, pady=(0, 1))
                 vars_[key] = var
                 vars_[key + "_label"] = lbl
-            tk.Frame(card, bg="#0b1728", height=4).pack(fill="x")
+            tk.Frame(card, bg="#1b2036", height=4).pack(fill="x")
             for widget in (card, *card.winfo_children()):
                 widget.bind("<Button-1>", lambda _e, c=comm: self._home_select_commodity(c))
             self._hd_comm_kpi_vars[comm] = vars_
@@ -6754,14 +7269,14 @@ class App(tk.Tk):
     @staticmethod
     def _home_dark_panel(parent, title, subtitle="", columnspan=1):
         """Create one reusable dark dashboard panel."""
-        panel = tk.Frame(parent, bg="#0b1728", highlightthickness=1,
-                         highlightbackground="#1f3550")
+        panel = tk.Frame(parent, bg="#1b2036", highlightthickness=1,
+                         highlightbackground="#2e3550")
         panel.columnconfigure(0, weight=1)
-        tk.Label(panel, text=title, bg="#0b1728", fg="#f8fafc",
+        tk.Label(panel, text=title, bg="#1b2036", fg="#f8fafc",
                  font=("Segoe UI", 10, "bold")).grid(
                      row=0, column=0, sticky="w", padx=12, pady=(10, 0))
         if subtitle:
-            tk.Label(panel, text=subtitle, bg="#0b1728", fg="#7890a8",
+            tk.Label(panel, text=subtitle, bg="#1b2036", fg="#7890a8",
                      font=("Segoe UI", 8)).grid(
                          row=1, column=0, sticky="w", padx=12, pady=(0, 4))
         return panel
@@ -6867,7 +7382,7 @@ class App(tk.Tk):
 
     def _build_home_modern_overview(self, parent):
         """Build the dark executive section shown above operational detail."""
-        bg = "#07111f"
+        bg = "#1b2036"
         parent.configure(bg=bg)
         parent.columnconfigure(0, weight=1)
 
@@ -6900,30 +7415,30 @@ class App(tk.Tk):
         trend.grid(row=0, column=0, columnspan=2, sticky="nsew", padx=(0, 8), pady=(0, 8))
         self._hd_modern_trend_title = tk.StringVar(value="Realised savings by period")
         tk.Label(trend, textvariable=self._hd_modern_trend_title,
-                 bg="#0b1728", fg="#60a5fa", font=("Segoe UI", 8, "bold")).grid(
+                 bg="#1b2036", fg="#60a5fa", font=("Segoe UI", 8, "bold")).grid(
                      row=2, column=0, sticky="w", padx=12, pady=(0, 2))
         self._hd_modern_trend_canvas = tk.Canvas(trend, width=560, height=155,
-                                                 bg="#0b1728", highlightthickness=0)
+                                                 bg="#1b2036", highlightthickness=0)
         self._hd_modern_trend_canvas.grid(row=3, column=0, sticky="ew", padx=4, pady=(0, 4))
 
         exposure = self._home_dark_panel(overview, "Open Exposure by Commodity", "Current own-after value")
         exposure.grid(row=0, column=2, sticky="nsew", padx=(0, 8), pady=(0, 8))
         self._hd_modern_exposure_canvas = tk.Canvas(exposure, width=330, height=165,
-                                                    bg="#0b1728", highlightthickness=0)
+                                                    bg="#1b2036", highlightthickness=0)
         self._hd_modern_exposure_canvas.grid(row=2, column=0, sticky="ew", padx=4, pady=(2, 4))
 
         actions = self._home_dark_panel(overview, "Action Centre", "Highest-priority management issues")
         actions.grid(row=0, column=3, sticky="nsew", pady=(0, 8))
         self._hd_modern_action_rows = []
         for idx in range(4):
-            row = tk.Frame(actions, bg="#0b1728")
+            row = tk.Frame(actions, bg="#1b2036")
             row.grid(row=2+idx, column=0, sticky="ew", padx=10, pady=2)
             row.columnconfigure(1, weight=1)
-            icon = tk.Label(row, text="●", bg="#0b1728", fg="#f59e0b",
+            icon = tk.Label(row, text="●", bg="#1b2036", fg="#f59e0b",
                             font=("Segoe UI", 9, "bold"))
             icon.grid(row=0, column=0, sticky="n", padx=(0, 7))
             var = tk.StringVar(value="Refresh to load actions")
-            lbl = tk.Label(row, textvariable=var, bg="#0b1728", fg="#cbd5e1",
+            lbl = tk.Label(row, textvariable=var, bg="#1b2036", fg="#cbd5e1",
                            font=("Segoe UI", 8), justify="left", wraplength=220)
             lbl.grid(row=0, column=1, sticky="w")
             badge = tk.Label(row, text="", bg="#10243c", fg="#93c5fd",
@@ -6933,12 +7448,12 @@ class App(tk.Tk):
 
         recent = self._home_dark_panel(overview, "Top Contracts / Recent Decisions", "Latest contract activity")
         recent.grid(row=1, column=0, columnspan=2, sticky="nsew", padx=(0, 8), pady=(0, 8))
-        hdr = tk.Frame(recent, bg="#0b1728")
+        hdr = tk.Frame(recent, bg="#1b2036")
         hdr.grid(row=2, column=0, sticky="ew", padx=12, pady=(3, 2))
         widths = (("Contract", 16), ("Commodity", 12), ("Supplier", 18), ("Qty", 12), ("Status", 12))
         for col, (name, width) in enumerate(widths):
             hdr.columnconfigure(col, weight=1 if col == 2 else 0)
-            tk.Label(hdr, text=name, width=width, anchor="w", bg="#0b1728", fg="#7890a8",
+            tk.Label(hdr, text=name, width=width, anchor="w", bg="#1b2036", fg="#7890a8",
                      font=("Segoe UI", 7, "bold")).grid(row=0, column=col, sticky="w")
         self._hd_modern_recent_rows = []
         for idx in range(4):
@@ -6958,17 +7473,17 @@ class App(tk.Tk):
         coverage.grid(row=1, column=2, sticky="nsew", padx=(0, 8), pady=(0, 8))
         self._hd_modern_coverage_rows = []
         for idx in range(5):
-            row = tk.Frame(coverage, bg="#0b1728")
+            row = tk.Frame(coverage, bg="#1b2036")
             row.grid(row=2+idx, column=0, sticky="ew", padx=12, pady=2)
             row.columnconfigure(0, weight=1)
             name = tk.StringVar(value="—")
             days = tk.StringVar(value="—")
-            dot = tk.Label(row, text="●", bg="#0b1728", fg="#64748b",
+            dot = tk.Label(row, text="●", bg="#1b2036", fg="#64748b",
                            font=("Segoe UI", 8))
             dot.grid(row=0, column=0, sticky="w")
-            tk.Label(row, textvariable=name, bg="#0b1728", fg="#cbd5e1",
+            tk.Label(row, textvariable=name, bg="#1b2036", fg="#cbd5e1",
                      font=("Segoe UI", 8, "bold")).grid(row=0, column=0, sticky="w", padx=(15, 0))
-            dl = tk.Label(row, textvariable=days, bg="#0b1728", fg="#f8fafc",
+            dl = tk.Label(row, textvariable=days, bg="#1b2036", fg="#f8fafc",
                           font=("Segoe UI", 8, "bold"))
             dl.grid(row=0, column=1, sticky="e")
             self._hd_modern_coverage_rows.append((dot, name, days, dl))
@@ -6978,15 +7493,15 @@ class App(tk.Tk):
         self._hd_modern_quality_var = tk.StringVar(value="Refresh to assess")
         self._hd_modern_quality_lbl = tk.Label(
             quality, textvariable=self._hd_modern_quality_var,
-            bg="#0b1728", fg="#72e39a", font=("Segoe UI", 12, "bold"),
+            bg="#1b2036", fg="#72e39a", font=("Segoe UI", 12, "bold"),
             justify="left")
         self._hd_modern_quality_lbl.grid(row=2, column=0, sticky="w", padx=12, pady=(6, 2))
         self._hd_modern_quality_note = tk.StringVar(value="")
         tk.Label(quality, textvariable=self._hd_modern_quality_note,
-                 bg="#0b1728", fg="#7890a8", font=("Segoe UI", 8),
+                 bg="#1b2036", fg="#7890a8", font=("Segoe UI", 8),
                  wraplength=240, justify="left").grid(row=3, column=0, sticky="w",
                                                        padx=12, pady=(0, 8))
-        links = tk.Frame(quality, bg="#0b1728")
+        links = tk.Frame(quality, bg="#1b2036")
         links.grid(row=4, column=0, sticky="ew", padx=10, pady=(0, 10))
         for col in range(2):
             links.columnconfigure(col, weight=1)
@@ -7072,7 +7587,7 @@ class App(tk.Tk):
             else:
                 var.set("")
                 badge.configure(text="")
-                icon.configure(fg="#0b1728")
+                icon.configure(fg="#1b2036")
 
         # Coverage rows for up to five commodities.
         coverage_data = []
@@ -7101,7 +7616,7 @@ class App(tk.Tk):
             else:
                 name_var.set("")
                 days_var.set("")
-                dot.configure(fg="#0b1728")
+                dot.configure(fg="#1b2036")
 
         # Recent contract activity, newest logical date first.
         realised_map = {}
@@ -7158,6 +7673,286 @@ class App(tk.Tk):
             self._hd_modern_quality_lbl.configure(fg="#fb7185")
             self._hd_modern_quality_note.set(f"{gaps} data gaps materially reduce dashboard confidence.")
 
+    def _price_range_stats(self, records, date_key, value_key, days=90,
+                            commodity=None, commodity_key="commodity",
+                            live_current=None):
+        """Min/max/current over a trailing window for one series — the shared
+        engine behind the Home "3-Month Price Range" watch (CBOT, FX, local
+        prices all use the same logic). `records` is a list of dicts with a
+        date field and a numeric value field; pass `commodity` to filter to
+        one base commodity (matched against the record's base, e.g. CORN-BRZ
+        matches commodity="CORN"). `live_current` lets a fresher live quote
+        (not yet archived into history) override the last stored point and
+        widen the range if it's a new extreme. Returns None if there's no
+        data in the window at all."""
+        cutoff = dt.date.today() - dt.timedelta(days=days)
+        pts = []
+        for r in records or []:
+            if commodity is not None:
+                rc = (r.get(commodity_key) or "").strip().upper().split("-")[0]
+                if rc != commodity.upper():
+                    continue
+            d = parse_date_flex(r.get(date_key))
+            v = to_float(r.get(value_key), None)
+            if d is None or v is None or d < cutoff:
+                continue
+            pts.append((d, v))
+        live_v = to_float(live_current, None)
+        if live_v is not None:
+            pts.append((dt.date.today(), live_v))
+        if not pts:
+            return None
+        pts.sort(key=lambda t: t[0])
+        current_d, current_v = pts[-1]
+        low_d, low_v = min(pts, key=lambda t: t[1])
+        high_d, high_v = max(pts, key=lambda t: t[1])
+        span = high_v - low_v
+        pct = (current_v - low_v) / span if span else 0.5
+        return {
+            "current": current_v, "current_date": current_d,
+            "low": low_v, "low_date": low_d,
+            "high": high_v, "high_date": high_d,
+            "pct_of_range": pct,
+            "at_high": pct >= 0.97,
+            "at_low": pct <= 0.03,
+            "n": len(pts),
+        }
+
+    def _build_home_range_watch(self, parent):
+        """3-Month Price Range card: for each tracked CBOT commodity, FX and
+        local price series, show current vs trailing-90-day low/high with a
+        position bar — flags when a price sits at/near its 3-month extreme,
+        which is exactly the "is this a good time to buy" signal a 3-month
+        high/low badge is meant to give."""
+        card, body = self._card(parent, title="3-Month Price Range",
+                                subtitle="Current price vs its trailing 90-day low/high — CBOT, FX and local")
+        self._range_watch_rows = {}
+
+        def _row(key, label):
+            row = tk.Frame(body, bg=CLR["surface"])
+            row.pack(fill="x", pady=5)
+            name = tk.Label(row, text=label, bg=CLR["surface"], fg=CLR["text"],
+                            font=(FONT_FAMILY, FS_BODY, "bold"), width=14, anchor="w")
+            name.pack(side="left")
+            lo_lbl = tk.Label(row, bg=CLR["surface"], fg=CLR["muted"],
+                              font=(FONT_MONO, 9), width=10, anchor="e")
+            lo_lbl.pack(side="left", padx=(4, 6))
+            bar = tk.Canvas(row, width=160, height=14, bg=CLR["surface"], highlightthickness=0)
+            bar.pack(side="left")
+            hi_lbl = tk.Label(row, bg=CLR["surface"], fg=CLR["muted"],
+                              font=(FONT_MONO, 9), width=10, anchor="w")
+            hi_lbl.pack(side="left", padx=(6, 10))
+            badge = tk.Label(row, bg=CLR["surface"], font=(FONT_FAMILY, 9, "bold"), anchor="w")
+            badge.pack(side="left")
+            self._range_watch_rows[key] = {"lo": lo_lbl, "bar": bar, "hi": hi_lbl, "badge": badge}
+
+        for key, label in (("CORN", "Corn CBOT"), ("SOYBEAN", "Soybean CBOT"),
+                            ("WHEAT", "Wheat CBOT"), ("SBM", "SBM CBOT"),
+                            ("FX", "USD/EGP")):
+            _row(key, label)
+        tk.Frame(body, bg=CLR["border"], height=1).pack(fill="x", pady=(4, 8))
+        self._range_watch_local_body = body
+        self._refresh_home_range_watch()
+        return card
+
+    def _refresh_home_range_watch(self):
+        try:
+            rows = getattr(self, "_range_watch_rows", None)
+            if not rows:
+                return
+            md = self.state_obj.get("market_data", {}) or {}
+            cbot_q = md.get("cbot_quotes", {}) or {}
+
+            def _qprice(comm):
+                val = cbot_q.get(comm)
+                return to_float(val.get("price"), None) if isinstance(val, dict) else to_float(val, None)
+
+            cbot_hist = self.state_obj.get("cbot_history", []) or []
+            fx_hist = self.state_obj.get("fx_history", []) or []
+            fx_live = to_float((md.get("fx", {}) or {}).get("price"), None)
+
+            specs = [
+                ("CORN", cbot_hist, "date", "price", "CORN", "commodity", _qprice("CORN")),
+                ("SOYBEAN", cbot_hist, "date", "price", "SOYBEAN", "commodity", _qprice("SOYBEAN")),
+                ("WHEAT", cbot_hist, "date", "price", "WHEAT", "commodity", _qprice("WHEAT")),
+                ("SBM", cbot_hist, "date", "price", "SBM", "commodity", _qprice("SBM")),
+                ("FX", fx_hist, "date", "rate", None, "commodity", fx_live),
+            ]
+            for key, records, date_key, value_key, comm, comm_key, live in specs:
+                w = rows.get(key)
+                if not w:
+                    continue
+                stats = self._price_range_stats(records, date_key, value_key,
+                                                days=90, commodity=comm,
+                                                commodity_key=comm_key, live_current=live)
+                w["bar"].delete("all")
+                if not stats:
+                    w["lo"].configure(text="—")
+                    w["hi"].configure(text="—")
+                    w["badge"].configure(text="No 90-day history yet", fg=CLR["muted"])
+                    w["bar"].create_rectangle(0, 5, 160, 9, fill="#eeeae2", outline="")
+                    continue
+                fmt = (lambda v: f"{v:,.2f}") if key != "FX" else (lambda v: f"{v:,.4f}")
+                w["lo"].configure(text=fmt(stats["low"]))
+                w["hi"].configure(text=fmt(stats["high"]))
+                w["bar"].create_rectangle(0, 5, 160, 9, fill="#eeeae2", outline="")
+                x = 4 + stats["pct_of_range"] * 152
+                marker_color = CLR["success"] if stats["at_low"] else CLR["danger"] if stats["at_high"] else CLR["primary"]
+                w["bar"].create_rectangle(x - 2, 2, x + 2, 12, fill=marker_color, outline="")
+                if stats["at_low"]:
+                    w["badge"].configure(text=f"↓ 3-MO LOW ({fmt(stats['current'])}) — favorable", fg=CLR["success_text"])
+                elif stats["at_high"]:
+                    w["badge"].configure(text=f"↑ 3-MO HIGH ({fmt(stats['current'])}) — unfavorable", fg=CLR["danger"])
+                else:
+                    w["badge"].configure(
+                        text=f"{fmt(stats['current'])} · {stats['pct_of_range']*100:,.0f}% of 90-day range",
+                        fg=CLR["muted"])
+
+            # Local prices: one row per commodity with any history in the window,
+            # rebuilt each refresh since the tracked set can change over time.
+            local_body = getattr(self, "_range_watch_local_body", None)
+            if local_body is not None:
+                for w in local_body.pack_slaves():
+                    if getattr(w, "_is_local_range_row", False):
+                        w.destroy()
+                local_hist = self.state_obj.get("local_prices", []) or []
+                comms = sorted({(r.get("commodity") or "").strip().upper()
+                                for r in local_hist if r.get("commodity")})
+                for comm in comms:
+                    stats = self._price_range_stats(local_hist, "date", "price_egp_mt",
+                                                     days=90, commodity=comm,
+                                                     commodity_key="commodity")
+                    if not stats:
+                        continue
+                    row = tk.Frame(local_body, bg=CLR["surface"])
+                    row._is_local_range_row = True
+                    row.pack(fill="x", pady=5)
+                    tk.Label(row, text=f"{comm} (local)", bg=CLR["surface"], fg=CLR["text"],
+                             font=(FONT_FAMILY, FS_BODY, "bold"), width=14, anchor="w").pack(side="left")
+                    tk.Label(row, text=f"{stats['low']:,.0f}", bg=CLR["surface"], fg=CLR["muted"],
+                             font=(FONT_MONO, 9), width=10, anchor="e").pack(side="left", padx=(4, 6))
+                    bar = tk.Canvas(row, width=160, height=14, bg=CLR["surface"], highlightthickness=0)
+                    bar.pack(side="left")
+                    bar.create_rectangle(0, 5, 160, 9, fill="#eeeae2", outline="")
+                    x = 4 + stats["pct_of_range"] * 152
+                    marker_color = CLR["success"] if stats["at_low"] else CLR["danger"] if stats["at_high"] else CLR["primary"]
+                    bar.create_rectangle(x - 2, 2, x + 2, 12, fill=marker_color, outline="")
+                    tk.Label(row, text=f"{stats['high']:,.0f}", bg=CLR["surface"], fg=CLR["muted"],
+                             font=(FONT_MONO, 9), width=10, anchor="w").pack(side="left", padx=(6, 10))
+                    if stats["at_low"]:
+                        badge_txt, badge_fg = f"↓ 3-MO LOW ({stats['current']:,.0f}) — favorable", CLR["success_text"]
+                    elif stats["at_high"]:
+                        badge_txt, badge_fg = f"↑ 3-MO HIGH ({stats['current']:,.0f}) — unfavorable", CLR["danger"]
+                    else:
+                        badge_txt, badge_fg = f"{stats['current']:,.0f} · {stats['pct_of_range']*100:,.0f}% of 90-day range", CLR["muted"]
+                    tk.Label(row, text=badge_txt, bg=CLR["surface"], fg=badge_fg,
+                             font=(FONT_FAMILY, 9, "bold"), anchor="w").pack(side="left")
+        except Exception as e:
+            log_exception(e, "_refresh_home_range_watch")
+
+    def _build_executive_summary_ctx(self):
+        """Gather everything export_executive_summary_pdf() needs into one
+        plain dict, reusing the same computations Home already shows (KPIs,
+        3-month range, per-commodity, action items) instead of recomputing
+        anything from scratch."""
+        metrics = self._home_exec_metrics("ALL")
+        today_label = dt.date.today().strftime("%b %d, %Y")
+        kpis = [
+            ("Realised savings (closed only)", self._home_compact_money(metrics["realized_saving"])),
+            ("Saving / MT (realised)",
+             f"EGP {metrics['realized_per_mt']:+,.0f}" if metrics["realized_per_mt"] is not None else "—"),
+            ("Closed quantity", f"{metrics['closed_qty']:,.0f} MT · {metrics['closed_count']} contracts"),
+            ("Open exposure (own-after value)", self._home_compact_money(metrics["open_value"])),
+            ("Open quantity", f"{metrics['open_qty']:,.0f} MT · {metrics['open_count']} contracts"),
+            ("Unpriced quantity", f"{metrics['unpriced_qty']:,.0f} MT"),
+            ("Data gaps", str(metrics["data_gaps"])),
+        ]
+
+        ranges = []
+        md = self.state_obj.get("market_data", {}) or {}
+        cbot_q = md.get("cbot_quotes", {}) or {}
+
+        def _qprice(comm):
+            val = cbot_q.get(comm)
+            return to_float(val.get("price"), None) if isinstance(val, dict) else to_float(val, None)
+
+        cbot_hist = self.state_obj.get("cbot_history", []) or []
+        fx_hist = self.state_obj.get("fx_history", []) or []
+        fx_live = to_float((md.get("fx", {}) or {}).get("price"), None)
+        specs = [
+            ("Corn CBOT", cbot_hist, "date", "price", "CORN", _qprice("CORN"), "{:,.2f}"),
+            ("Soybean CBOT", cbot_hist, "date", "price", "SOYBEAN", _qprice("SOYBEAN"), "{:,.2f}"),
+            ("Wheat CBOT", cbot_hist, "date", "price", "WHEAT", _qprice("WHEAT"), "{:,.2f}"),
+            ("SBM CBOT", cbot_hist, "date", "price", "SBM", _qprice("SBM"), "{:,.2f}"),
+            ("USD/EGP", fx_hist, "date", "rate", None, fx_live, "{:,.4f}"),
+        ]
+        for label, records, date_key, value_key, comm, live, fmt in specs:
+            stats = self._price_range_stats(records, date_key, value_key, days=90,
+                                            commodity=comm, live_current=live)
+            if not stats:
+                continue
+            status = ("3-MO LOW" if stats["at_low"] else
+                     "3-MO HIGH" if stats["at_high"] else
+                     f"{stats['pct_of_range']*100:.0f}% of range")
+            ranges.append((label, fmt.format(stats["current"]), fmt.format(stats["low"]),
+                           fmt.format(stats["high"]), status))
+        local_hist = self.state_obj.get("local_prices", []) or []
+        local_comms = sorted({(r.get("commodity") or "").strip().upper()
+                              for r in local_hist if r.get("commodity")})
+        for comm in local_comms:
+            stats = self._price_range_stats(local_hist, "date", "price_egp_mt",
+                                            days=90, commodity=comm)
+            if not stats:
+                continue
+            status = ("3-MO LOW" if stats["at_low"] else
+                     "3-MO HIGH" if stats["at_high"] else
+                     f"{stats['pct_of_range']*100:.0f}% of range")
+            ranges.append((f"{comm} (local)", f"{stats['current']:,.0f}", f"{stats['low']:,.0f}",
+                           f"{stats['high']:,.0f}", status))
+
+        by_commodity = []
+        for comm in self._home_commodity_options():
+            m = self._home_exec_metrics(comm)
+            if not m["open_count"] and not m["closed_count"]:
+                continue
+            by_commodity.append((f"{comm} — realised", self._home_compact_money(m["realized_saving"])))
+            by_commodity.append((f"{comm} — open ({m['open_count']} contracts)", f"{m['open_qty']:,.0f} MT"))
+
+        action_items = []
+        tv = getattr(self, "hd_action_tree", None)
+        if tv is not None:
+            for iid in tv.get_children():
+                vals = tv.item(iid, "values")
+                if len(vals) >= 3:
+                    action_items.append((str(vals[0]), str(vals[1]), str(vals[2])))
+
+        return {
+            "scope_label": f"As of {today_label} · all commodities",
+            "kpis": kpis,
+            "ranges": ranges,
+            "by_commodity": by_commodity,
+            "action_items": action_items,
+        }
+
+    def export_executive_summary_report(self):
+        try:
+            ctx = self._build_executive_summary_ctx()
+        except Exception as e:
+            log_exception(e, "export_executive_summary_report:build_ctx")
+            messagebox.showerror(APP_NAME, f"Could not build the report: {e}")
+            return
+        fp = filedialog.asksaveasfilename(
+            initialdir=get_default_export_dir(), defaultextension=".pdf",
+            filetypes=[("PDF", "*.pdf")], title="Save Executive Summary Report",
+            initialfile=f"Prometheus_Summary_{dt.date.today().isoformat()}.pdf")
+        if not fp:
+            return
+        ok = export_executive_summary_pdf(fp, ctx)
+        if ok:
+            messagebox.showinfo(APP_NAME, f"Saved Executive Summary Report:\n{fp}")
+            if messagebox.askyesno(APP_NAME, "Open export folder?"):
+                open_folder(os.path.dirname(fp))
+
     def _build_home_dashboard(self):
         """Build a premium Home tab command center.
 
@@ -7173,7 +7968,7 @@ class App(tk.Tk):
         p.rowconfigure(1, weight=1)
 
         # ── ROW 0: market ticker bar ─────────────────────────────────────
-        price_bar = tk.Frame(p, bg="#07111f", height=38)
+        price_bar = tk.Frame(p, bg="#1b2036", height=38)
         price_bar.grid(row=0, column=0, sticky="ew")
         price_bar.grid_propagate(False)
         for i in range(18):
@@ -7183,17 +7978,17 @@ class App(tk.Tk):
         self._pb_labels = {}
         self._pb_prev_prices = {}
 
-        tk.Label(price_bar, text="LIVE MARKET", bg="#07111f", fg="#7dd3fc",
+        tk.Label(price_bar, text="LIVE MARKET", bg="#1b2036", fg="#7dd3fc",
                  font=("Segoe UI", 9, "bold")).grid(row=0, column=0, sticky="w", padx=(14, 8), pady=9)
 
         def _pb_item(parent, name, col):
             base = 1 + col * 3
-            tk.Label(parent, text=name, bg="#07111f", fg="#9db4cb",
+            tk.Label(parent, text=name, bg="#1b2036", fg="#9db4cb",
                      font=("Segoe UI", 9, "bold")).grid(row=0, column=base, sticky="e", padx=(10, 3), pady=8)
-            p_lbl = tk.Label(parent, text="—", bg="#07111f", fg="#e5f2ff",
+            p_lbl = tk.Label(parent, text="—", bg="#1b2036", fg="#e5f2ff",
                              font=("Segoe UI", 9, "bold"))
             p_lbl.grid(row=0, column=base + 1, sticky="w", padx=(0, 2))
-            d_lbl = tk.Label(parent, text="", bg="#07111f", fg="#94a3b8",
+            d_lbl = tk.Label(parent, text="", bg="#1b2036", fg="#94a3b8",
                              font=("Segoe UI", 9))
             d_lbl.grid(row=0, column=base + 2, sticky="w", padx=(0, 8))
             self._pb_labels[name] = (p_lbl, d_lbl)
@@ -7206,7 +8001,7 @@ class App(tk.Tk):
 
         self._pb_ts_var = tk.StringVar(value="")
         tk.Label(price_bar, textvariable=self._pb_ts_var,
-                 bg="#07111f", fg="#9db4cb",
+                 bg="#1b2036", fg="#9db4cb",
                  font=("Segoe UI", 9)).grid(row=0, column=15, sticky="e", padx=8)
         tk.Button(price_bar, text="⟳ Fetch Live",
                   command=self._pb_fetch_all,
@@ -7216,7 +8011,7 @@ class App(tk.Tk):
                   pady=2, padx=10).grid(row=0, column=16, sticky="e", padx=(4, 14), pady=5)
 
         # ── ROW 1: scrollable body ───────────────────────────────────────
-        canvas = tk.Canvas(p, highlightthickness=0, borderwidth=0, bg="#06101d")
+        canvas = tk.Canvas(p, highlightthickness=0, borderwidth=0, bg=CLR["bg"])
         ysb = ttk.Scrollbar(p, orient="vertical", command=canvas.yview)
         xsb = ttk.Scrollbar(p, orient="horizontal", command=canvas.xview)
         canvas.configure(yscrollcommand=ysb.set, xscrollcommand=xsb.set)
@@ -7224,7 +8019,7 @@ class App(tk.Tk):
         ysb.grid(row=1, column=1, sticky="ns")
         xsb.grid(row=2, column=0, sticky="ew")
 
-        body = tk.Frame(canvas, bg="#06101d")
+        body = tk.Frame(canvas, bg=CLR["bg"])
         body_id = canvas.create_window((0, 0), window=body, anchor="nw")
 
         def _sync_scroll_region(event=None):
@@ -7247,71 +8042,37 @@ class App(tk.Tk):
         body.columnconfigure(1, weight=1)
         body.rowconfigure(0, weight=1)
 
-        # ── LEFT: dark operations rail ───────────────────────────────────
-        left = tk.Frame(body, bg="#0f172a", highlightthickness=1, highlightbackground="#1e293b")
+        # ── LEFT: quick market-entry rail (nav removed — the app sidebar
+        # now owns navigation; this rail keeps only the FX/local-price
+        # quick-entry that has no equivalent elsewhere in the app) ───────
+        left = tk.Frame(body, bg=CLR["bg"])
         left.grid(row=0, column=0, sticky="nsw", padx=(12, 10), pady=12)
         left.columnconfigure(0, weight=1)
         left.grid_propagate(False)
         left.configure(width=260)
 
-        tk.Label(left, text="◆  PROMETHEUS", bg="#0f172a", fg="#f8fafc",
-                 font=("Segoe UI", 14, "bold")).grid(row=0, column=0, sticky="w", padx=14, pady=(15, 0))
-        tk.Label(left, text="PROCUREMENT INTELLIGENCE", bg="#0f172a", fg="#60a5fa",
-                 font=("Segoe UI", 8, "bold")).grid(row=1, column=0, sticky="w", padx=14, pady=(0, 4))
-        tk.Label(left, text=dt.date.today().strftime("%A, %d %b %Y"), bg="#0f172a", fg="#38bdf8",
-                 font=("Segoe UI", 9, "bold")).grid(row=2, column=0, sticky="w", padx=14, pady=(0, 10))
-
-        nav_card = tk.Frame(left, bg="#0f172a")
-        nav_card.grid(row=3, column=0, sticky="ew", padx=10, pady=(0, 9))
-        nav_card.columnconfigure(0, weight=1)
-        nav_specs = [
-            ("⌂  Home", lambda: self.nb.select(self.tab_home), True),
-            ("▤  Contracts", lambda: self.nb.select(self.tab_contracts_group), False),
-            ("◫  Analysis", lambda: self.nb.select(self.tab_analysis_outer), False),
-            ("◈  Consumption", lambda: self.nb.select(self.tab_consumption_outer), False),
-            ("⚙  Setup & Data", lambda: self.nb.select(self.tab_setup_outer), False),
-        ]
-        for idx, (label, command, active) in enumerate(nav_specs):
-            tk.Button(nav_card, text=label, command=command, anchor="w",
-                      bg="#1d4ed8" if active else "#0f172a",
-                      fg="white" if active else "#cbd5e1",
-                      activebackground="#2563eb", activeforeground="white",
-                      relief="flat", cursor="hand2", padx=10, pady=5,
-                      font=("Segoe UI", 9, "bold" if active else "normal")).grid(
-                          row=idx, column=0, sticky="ew", pady=1)
-
-        input_card = tk.Frame(left, bg="#111c31", highlightthickness=1, highlightbackground="#24344f")
-        input_card.grid(row=4, column=0, sticky="ew", padx=12, pady=(0, 10))
-        input_card.columnconfigure(0, weight=1)
-        tk.Label(input_card, text="USD / EGP TODAY", bg="#111c31", fg="#93c5fd",
-                 font=("Segoe UI", 9, "bold")).grid(row=0, column=0, sticky="w", padx=10, pady=(10, 2))
+        input_card, input_body = self._card(left, title="USD / EGP TODAY")
+        input_card.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         self.hd_fx_var = tk.StringVar(value="")
-        ttk.Entry(input_card, textvariable=self.hd_fx_var, width=22).grid(
-            row=1, column=0, sticky="ew", padx=10, pady=(0, 10))
+        ttk.Entry(input_body, textvariable=self.hd_fx_var, width=22).pack(fill="x")
 
-        local_card = tk.Frame(left, bg="#111c31", highlightthickness=1, highlightbackground="#24344f")
-        local_card.grid(row=5, column=0, sticky="ew", padx=12, pady=(0, 10))
-        local_card.columnconfigure(1, weight=1)
-        tk.Label(local_card, text="LOCAL PRICES  EGP/MT", bg="#111c31", fg="#93c5fd",
-                 font=("Segoe UI", 9, "bold")).grid(row=0, column=0, columnspan=2, sticky="w", padx=10, pady=(10, 6))
+        local_card, local_body = self._card(left, title="LOCAL PRICES  EGP/MT")
+        local_card.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        local_body.columnconfigure(1, weight=1)
         self._hd_local_vars = {}
-        row = 1
+        row = 0
         for comm in ["CORN", "CORN-BRZ", "CORN-UKR", "CORN-ARG", "SBM", "SOYBEAN", "DDGS", "SFM"]:
-            tk.Label(local_card, text=comm, bg="#111c31", fg="#cbd5e1",
-                     font=("Segoe UI", 9)).grid(row=row, column=0, sticky="w", padx=(10, 8), pady=2)
+            tk.Label(local_body, text=comm, bg=CLR["surface"], fg=CLR["muted"],
+                     font=(FONT_FAMILY, FS_BODY)).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=2)
             v = tk.StringVar(value="")
-            ttk.Entry(local_card, textvariable=v, width=13).grid(row=row, column=1, sticky="ew", padx=(0, 10), pady=2)
+            ttk.Entry(local_body, textvariable=v, width=13).grid(row=row, column=1, sticky="ew", pady=2)
             self._hd_local_vars[comm] = v
             row += 1
 
-        btn_card = tk.Frame(left, bg="#0f172a")
-        btn_card.grid(row=6, column=0, sticky="ew", padx=12, pady=(0, 8))
+        btn_card = tk.Frame(left, bg=CLR["bg"])
+        btn_card.grid(row=2, column=0, sticky="ew", pady=(0, 8))
         btn_card.columnconfigure(0, weight=1)
-        tk.Label(btn_card, text="→ saves into Setup → Local Prices & FX History\n(same data — this is just the fast way in)",
-                 bg="#111c31", fg="#94a3b8", justify="left",
-                 font=(FONT_FAMILY, FS_BODY)).grid(row=9, column=0,
-                                                   sticky="w", pady=(4, 0))
-        # Entry ease: Enter in any Home-rail field = Log Market + Refresh
+        # Entry ease: Enter in any quick-entry field = Log Market + Refresh
         def _rail_return(_e=None):
             try:
                 self._hd_log_market_and_refresh()
@@ -7326,21 +8087,19 @@ class App(tk.Tk):
         _bind_rail(left)
         tk.Button(btn_card, text="💾 Log Market + Refresh",
                   command=self._hd_log_market_and_refresh,
-                  bg="#2563eb", fg="white", relief="flat", cursor="hand2",
-                  font=("Segoe UI", 9, "bold"), pady=6).grid(row=0, column=0, sticky="ew", pady=(0, 6))
-        # (Removed duplicate "Fetch Live Prices" button — live fetch lives
-        #  once, in the market ticker bar above.)
+                  bg=CLR["primary"], fg="white", relief="flat", cursor="hand2",
+                  font=(FONT_FAMILY, FS_BODY, "bold"), pady=6).grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        tk.Label(btn_card, text="Saves into Setup → Local Prices & FX History\n(same data — this is just the fast way in)",
+                 bg=CLR["bg"], fg=CLR["muted"], justify="left",
+                 font=(FONT_FAMILY, 8)).grid(row=1, column=0, sticky="w", pady=(6, 0))
 
         self.hd_saved_var = tk.StringVar(value="")
-        tk.Label(left, textvariable=self.hd_saved_var, bg="#0f172a", fg="#94a3b8",
-                 font=("Segoe UI", 9), wraplength=225, justify="left").grid(
-                     row=7, column=0, sticky="w", padx=14, pady=(0, 10))
-
-        # (Removed "QUICK OPEN" navigation card: it duplicated the tab bar
-        #  40px above it and relied on hardcoded, breakable tab indices.)
+        tk.Label(left, textvariable=self.hd_saved_var, bg=CLR["bg"], fg=CLR["muted"],
+                 font=(FONT_FAMILY, 8), wraplength=225, justify="left").grid(
+                     row=3, column=0, sticky="w", pady=(6, 10))
 
         # ── RIGHT: executive cockpit ─────────────────────────────────────
-        main = tk.Frame(body, bg="#06101d")
+        main = tk.Frame(body, bg=CLR["bg"])
         main.grid(row=0, column=1, sticky="nsew", padx=(0, 12), pady=12)
         main.columnconfigure(0, weight=1)
         main.rowconfigure(6, weight=1)
@@ -7351,26 +8110,35 @@ class App(tk.Tk):
         self.hd_formula_rule_var = tk.StringVar(value="Open CORN MTM CIF = (Latest CBOT + Contract Premium) × 0.3937 · cash landed basis, excl. finance carry (Finance-sheet convention)")
         self.hd_decision_line_var = tk.StringVar(value="Refresh to load current open exposure and realized savings.")
 
-        hero = tk.Frame(main, bg="#07111f", highlightthickness=1, highlightbackground="#1f3550")
+        hero = tk.Frame(main, bg=CLR["sidebar_bg"], highlightthickness=1,
+                        highlightbackground=CLR["sidebar_border"])
         hero.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         hero.columnconfigure(0, weight=1)
         hero.columnconfigure(1, weight=0)
-        tk.Label(hero, text="CEO Dashboard", bg="#07111f", fg="#f8fafc",
-                 font=("Segoe UI", 18, "bold")).grid(row=0, column=0, sticky="w", padx=16, pady=(14, 0))
+        tk.Label(hero, text="CEO Dashboard", bg=CLR["sidebar_bg"], fg="#ffffff",
+                 font=(FONT_FAMILY, 18, "bold")).grid(row=0, column=0, sticky="w", padx=16, pady=(14, 0))
         tk.Label(hero, text="Executive overview of procurement performance",
-                 bg="#07111f", fg="#7890a8", font=("Segoe UI", 9)).grid(row=1, column=0, sticky="w", padx=16, pady=(0, 3))
+                 bg=CLR["sidebar_bg"], fg=CLR["sidebar_text_dim"],
+                 font=(FONT_FAMILY, FS_BODY)).grid(row=1, column=0, sticky="w", padx=16, pady=(0, 3))
         tk.Label(hero, textvariable=self.hd_formula_rule_var,
-                 bg="#07111f", fg="#60a5fa", font=("Segoe UI", 9, "bold")).grid(row=2, column=0, sticky="w", padx=16, pady=(0, 4))
+                 bg=CLR["sidebar_bg"], fg="#7ea2f7",
+                 font=(FONT_FAMILY, FS_BODY, "bold")).grid(row=2, column=0, sticky="w", padx=16, pady=(0, 4))
         tk.Label(hero, textvariable=self.hd_market_status_var,
-                 bg="#07111f", fg="#9fb3c8", font=("Segoe UI", 9)).grid(row=3, column=0, sticky="w", padx=16, pady=(0, 14))
-        tk.Button(hero, text="🔄 Refresh Everything",
+                 bg=CLR["sidebar_bg"], fg=CLR["sidebar_text_dim"],
+                 font=(FONT_FAMILY, FS_BODY)).grid(row=3, column=0, sticky="w", padx=16, pady=(0, 14))
+        hero_btns = tk.Frame(hero, bg=CLR["sidebar_bg"])
+        hero_btns.grid(row=0, column=1, rowspan=4, sticky="e", padx=16, pady=16)
+        tk.Button(hero_btns, text="📄 Export Summary Report",
+                  command=self.export_executive_summary_report,
+                  bg=CLR["sidebar_hover"], fg="white", relief="flat", cursor="hand2",
+                  font=(FONT_FAMILY, FS_BODY, "bold"), padx=16, pady=8).pack(side="left", padx=(0, 8))
+        tk.Button(hero_btns, text="🔄 Refresh Everything",
                   command=lambda: self.refresh_all(fetch_market=True),
-                  bg="#2563eb", fg="white", relief="flat", cursor="hand2",
-                  font=("Segoe UI", 9, "bold"), padx=16, pady=8).grid(
-                      row=0, column=1, rowspan=4, sticky="e", padx=16, pady=16)
+                  bg=CLR["primary"], fg="white", relief="flat", cursor="hand2",
+                  font=(FONT_FAMILY, FS_BODY, "bold"), padx=16, pady=8).pack(side="left")
 
         # KPI cards: visually separated open MTM and realized numbers.
-        kpi_frame = tk.Frame(main, bg="#06101d")
+        kpi_frame = tk.Frame(main, bg=CLR["bg"])
         kpi_frame.grid(row=1, column=0, sticky="ew", pady=(0, 10))
         for i in range(4):
             kpi_frame.columnconfigure(i, weight=1)
@@ -7392,44 +8160,32 @@ class App(tk.Tk):
         self.hd_kpi_coverage       = tk.StringVar(value="-")
         self.hd_kpi_data_gaps      = tk.StringVar(value="-")
         self.hd_kpi_scope_var      = tk.StringVar(value="EXECUTIVE SCOPE · ALL COMMODITIES")
-        tk.Label(kpi_frame, textvariable=self.hd_kpi_scope_var, bg="#06101d", fg="#7890a8",
+        tk.Label(kpi_frame, textvariable=self.hd_kpi_scope_var, bg=CLR["bg"], fg=CLR["muted"],
                  font=("Segoe UI", 9, "bold")).grid(
                      row=0, column=0, columnspan=4, sticky="w", pady=(0, 5))
 
-        def _metric_card(row, col, title, var, subtitle, bg, accent="#38bdf8"):
-            card_bg = "#0b1728"
-            box = tk.Frame(kpi_frame, bg=card_bg, highlightthickness=1,
-                           highlightbackground="#1f3550")
-            box.grid(row=row, column=col, sticky="nsew", padx=(0, 8), pady=(0, 8))
-            tk.Label(box, text=title, bg=card_bg, fg="#9fb3c8",
-                     font=("Segoe UI", 8, "bold")).pack(anchor="w", padx=11, pady=(9, 1))
-            tk.Label(box, textvariable=var, bg=card_bg, fg="#f8fafc",
-                     font=("Segoe UI", 14, "bold")).pack(anchor="w", padx=11, pady=(0, 1))
-            tk.Label(box, text=subtitle, bg=card_bg, fg="#647f9a",
-                     font=("Segoe UI", 8)).pack(anchor="w", padx=11, pady=(0, 8))
-            spark = tk.Canvas(box, height=18, bg=card_bg, highlightthickness=0)
-            spark.pack(fill="x", padx=10, pady=(0, 4))
-            spark.create_line(0, 14, 24, 11, 48, 12, 72, 7, 96, 9, 122, 3,
-                              fill=accent, width=2, smooth=True)
+        def _metric_card(row, col, title, var, subtitle, accent=CLR["primary"]):
+            card = self._kpi_card(kpi_frame, title, var, subtitle, dot=accent)
+            card.grid(row=row, column=col, sticky="nsew", padx=(0, 8), pady=(0, 8))
 
-        _metric_card(1, 0, "Realised Savings", self.hd_kpi_prev,          "closed contracts only", "#f0fdf4", "#16a34a")
-        _metric_card(1, 1, "Saving / MT",      self.hd_kpi_realized_mt,  "weighted realised efficiency", "#f0fdf4", "#22c55e")
-        _metric_card(1, 2, "Closed Quantity",  self.hd_kpi_closed_qty,   "MT · contract count", "#ffffff", "#16a34a")
-        _metric_card(1, 3, "MTD Realised",     self.hd_kpi_saving,       "current month closes", "#f0fdf4", "#22c55e")
-        _metric_card(2, 0, "Open Exposure",    self.hd_kpi_open_value,   "current own-after value", "#ffffff", "#0ea5e9")
-        _metric_card(2, 1, "Indicative Open",  self.hd_kpi_open_edge,    "open MTM vs local", "#fff7ed", "#f97316")
-        _metric_card(2, 2, "Open Quantity",    self.hd_kpi_open_qty,     "MT · contract count", "#ffffff", "#38bdf8")
-        _metric_card(2, 3, "Unpriced Quantity",self.hd_kpi_unpriced_qty, "CBOT price risk still open", "#fff7ed", "#f59e0b")
-        _metric_card(3, 0, "Avg Contract Cost",self.hd_kpi_avg_contract, "weighted delivered EGP/MT", "#ffffff", "#2563eb")
-        _metric_card(3, 1, "Avg Local Market", self.hd_kpi_avg_local,    "same comparable rows", "#ffffff", "#2563eb")
-        _metric_card(3, 2, "Lowest Coverage",  self.hd_kpi_coverage,     "stock + open inbound", "#ffffff", "#7c3aed")
-        _metric_card(3, 3, "Data Gaps",        self.hd_kpi_data_gaps,    "contracts excluded / incomplete", "#fff7ed", "#dc2626")
+        _metric_card(1, 0, "Realised Savings", self.hd_kpi_prev,          "closed contracts only", CLR["success"])
+        _metric_card(1, 1, "Saving / MT",      self.hd_kpi_realized_mt,  "weighted realised efficiency", CLR["success"])
+        _metric_card(1, 2, "Closed Quantity",  self.hd_kpi_closed_qty,   "MT · contract count", CLR["success"])
+        _metric_card(1, 3, "MTD Realised",     self.hd_kpi_saving,       "current month closes", CLR["success"])
+        _metric_card(2, 0, "Open Exposure",    self.hd_kpi_open_value,   "current own-after value", CLR["primary"])
+        _metric_card(2, 1, "Indicative Open",  self.hd_kpi_open_edge,    "open MTM vs local", CLR["warning"])
+        _metric_card(2, 2, "Open Quantity",    self.hd_kpi_open_qty,     "MT · contract count", CLR["accent"])
+        _metric_card(2, 3, "Unpriced Quantity",self.hd_kpi_unpriced_qty, "CBOT price risk still open", CLR["warning"])
+        _metric_card(3, 0, "Avg Contract Cost",self.hd_kpi_avg_contract, "weighted delivered EGP/MT", CLR["primary"])
+        _metric_card(3, 1, "Avg Local Market", self.hd_kpi_avg_local,    "same comparable rows", CLR["primary"])
+        _metric_card(3, 2, "Lowest Coverage",  self.hd_kpi_coverage,     "stock + open inbound", "#7c3aed")
+        _metric_card(3, 3, "Data Gaps",        self.hd_kpi_data_gaps,    "contracts excluded / incomplete", CLR["danger"])
 
         # Commodity portfolio cards belong near the top of Home so directors
         # can see every commodity without scrolling into the closed-savings
         # section. Clicking a card filters the realized scorecard below.
-        comm_portfolio = tk.Frame(main, bg="#07111f", highlightthickness=1,
-                                  highlightbackground="#1f3550", padx=10, pady=8)
+        comm_portfolio = tk.Frame(main, bg=CLR["sidebar_bg"], highlightthickness=1,
+                                  highlightbackground=CLR["sidebar_border"], padx=10, pady=8)
         comm_portfolio.grid(row=2, column=0, sticky="ew", pady=(0, 10))
         comm_portfolio.columnconfigure(0, weight=1)
         self._build_home_modern_overview(comm_portfolio)
@@ -7741,6 +8497,23 @@ class App(tk.Tk):
         self.hd_scenario_tree.bind("<<TreeviewSelect>>", self._hd_on_scenario_select)
         self._hd_overrides = {}
 
+        recent, recent_body = self._card(main, title="Recent contracts",
+                                         action_text="View all →",
+                                         action_command=lambda: self.nb.select(self.tab_contracts_group))
+        recent.grid(row=9, column=0, sticky="ew", pady=(0, 12))
+        rc_cols = [
+            ("ID", 90, "w"), ("Commodity", 100, "w"), ("Supplier", 180, "w"),
+            ("Origin", 110, "w"), ("Qty", 110, "e"), ("Status", 90, "w"),
+        ]
+        self.hd_recent_contracts_tree = self._hd_make_tree(recent_body, rc_cols, height=5, row=0)
+        self.hd_recent_contracts_tree.tag_configure("open", foreground=CLR["success_text"])
+        self.hd_recent_contracts_tree.tag_configure("pending", foreground=CLR["warning_text"])
+        self.hd_recent_contracts_tree.tag_configure("closed", foreground=CLR["muted"])
+        self._refresh_hd_recent_contracts()
+
+        range_card = self._build_home_range_watch(main)
+        range_card.grid(row=10, column=0, sticky="ew", pady=(0, 12))
+
     def _hd_make_tree(self, parent, cols, height=5, row=0):
         """Create a Treeview with both scrollbars inside parent."""
         frame = ttk.Frame(parent)
@@ -7759,6 +8532,31 @@ class App(tk.Tk):
         ysb.grid(row=0, column=1, sticky="ns")
         xsb.grid(row=1, column=0, sticky="ew")
         return tv
+
+    def _refresh_hd_recent_contracts(self):
+        try:
+            tv = getattr(self, "hd_recent_contracts_tree", None)
+            if tv is None:
+                return
+            tv.delete(*tv.get_children())
+            contracts = self.state_obj.get("contracts", {}) or {}
+
+            def _sort_key(item):
+                cid, c = item
+                return (c.get("delivery_date") or c.get("storage_start") or "", cid)
+
+            rows = sorted(contracts.items(), key=_sort_key, reverse=True)[:8]
+            for cid, c in rows:
+                status = (c.get("status") or "Open").strip()
+                tag = {"open": "open", "pending": "pending",
+                       "closed": "closed"}.get(status.lower(), "open")
+                qty = to_float(c.get("qty_mt"), None)
+                tv.insert("", "end", values=(
+                    cid, c.get("commodity", ""), c.get("supplier", ""),
+                    c.get("origin", ""), f"{qty:,.0f} MT" if qty else "—",
+                    status), tags=(tag,))
+        except Exception as e:
+            log_exception(e, "_refresh_hd_recent_contracts")
 
     # ── Home dashboard helpers ─────────────────────────────────────────────
 
@@ -8398,6 +9196,8 @@ class App(tk.Tk):
             self._pb_update_bar()
             self._refresh_hd_provenance()
             self._refresh_hd_buy_signal()
+            self._refresh_hd_recent_contracts()
+            self._refresh_home_range_watch()
         except Exception as e:
             log_exception(e, "refresh_home_dashboard")
 
@@ -11510,39 +12310,34 @@ class App(tk.Tk):
     # SETUP TAB  (merged: Suppliers + Commodities + Local Prices)
     # ------------------------------------------------------------------
     def _build_setup_tab(self):
-        """Create an inner notebook inside tab_setup holding the three setup sub-tabs."""
+        """Create the Setup & Data sub-screens as pill tabs inside tab_setup."""
         self.tab_setup.columnconfigure(0, weight=1)
-        self.tab_setup.rowconfigure(1, weight=1)
+        self.tab_setup.rowconfigure(2, weight=1)
 
-        banner = ttk.Frame(self.tab_setup, padding=(0, 0, 0, 6))
-        banner.grid(row=0, column=0, sticky="ew")
-        ttk.Label(
-            banner,
-            text="Setup & Data  —  suppliers & commodities (one-time)  ·  "
-                 "market data logs (ongoing)  ·  backup, restore & reset.",
-            font=(FONT_FAMILY, FS_EMPH, "bold"),
-            foreground="#1a6ebd",
-        ).pack(anchor="w")
+        header = tk.Frame(self.tab_setup, bg=CLR["bg"])
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 4))
+        tk.Label(header, text="Setup & Data", bg=CLR["bg"], fg=CLR["text"],
+                 font=(FONT_FAMILY, FS_TITLE, "bold")).pack(anchor="w")
+        tk.Label(header, text="Suppliers & commodities (one-time) · market data logs "
+                              "(ongoing) · backup, restore & reset",
+                 bg=CLR["bg"], fg=CLR["muted"], font=(FONT_FAMILY, FS_BODY)).pack(anchor="w")
 
-        inner_nb = ttk.Notebook(self.tab_setup)
-        inner_nb.grid(row=1, column=0, sticky="nsew")
+        _s_bar, _s_host, _s_screens, self._setup_nb, _s_finalize = self._build_pill_switcher(
+            self.tab_setup,
+            [("suppliers", "Suppliers"), ("commodities", "Commodities"),
+             ("local_prices", "Local Prices"), ("freight", "Freight Rates"),
+             ("fx_history", "FX & CBOT History"), ("datamgmt", "Data Management")])
+        _s_bar.grid(row=1, column=0, sticky="w", pady=(0, 4))
+        _s_host.grid(row=2, column=0, sticky="nsew")
+
         # Stored so other screens can open the exact Setup & Data record.
         # Basis Tracker uses this for direct access to the selected local-price row.
-        self._setup_nb = inner_nb
-
-        self.tab_suppliers    = ttk.Frame(inner_nb, padding=8)
-        self.tab_commodities  = ttk.Frame(inner_nb, padding=8)
-        self.tab_local_prices = ttk.Frame(inner_nb, padding=8)
-        self.tab_freight      = ttk.Frame(inner_nb, padding=8)
-        self.tab_fx_history   = ttk.Frame(inner_nb, padding=8)
-        self.tab_datamgmt     = ttk.Frame(inner_nb, padding=8)
-
-        inner_nb.add(self.tab_suppliers,    text="Suppliers")
-        inner_nb.add(self.tab_commodities,  text="Commodities")
-        inner_nb.add(self.tab_local_prices, text="Local Prices")
-        inner_nb.add(self.tab_freight,      text="Freight Rates")
-        inner_nb.add(self.tab_fx_history,   text="FX & CBOT History")
-        inner_nb.add(self.tab_datamgmt,     text="Data Management")
+        self.tab_suppliers    = _s_screens["suppliers"]
+        self.tab_commodities  = _s_screens["commodities"]
+        self.tab_local_prices = _s_screens["local_prices"]
+        self.tab_freight      = _s_screens["freight"]
+        self.tab_fx_history   = _s_screens["fx_history"]
+        self.tab_datamgmt     = _s_screens["datamgmt"]
 
         self._build_suppliers()
         self._build_commodities()
@@ -11550,6 +12345,7 @@ class App(tk.Tk):
         self._build_freight_tab()
         self._build_fx_history_tab()
         self._build_data_management()
+        _s_finalize()
 
     def _build_data_management(self):
         """Settings + backup/restore + the (now safely gated) reset action.
@@ -12265,42 +13061,36 @@ class App(tk.Tk):
     def _build_analysis_tab(self):
         p = self.tab_analysis
         p.columnconfigure(0, weight=1)
-        p.rowconfigure(1, weight=1)
+        p.rowconfigure(2, weight=1)
 
         # ── Header ────────────────────────────────────────────────────
-        hf = ttk.Frame(p)
+        hf = tk.Frame(p, bg=CLR["bg"])
         hf.grid(row=0, column=0, sticky="ew", pady=(0, 4))
-        ttk.Label(hf, text="🔬  Contract Pricing Intelligence",
-                  font=("Segoe UI", 12, "bold"),
-                  foreground="#1a2d40").pack(side="left")
-        ttk.Label(hf,
-                  text="   CBOT timing  ·  FX impact  ·  margin of safety  "
-                       "·  supplier scorecard  ·  seasonality  ·  origin compare",
-                  font=("Segoe UI", 9), foreground="#666").pack(side="left")
+        tk.Label(hf, text="Contract Pricing Intelligence", bg=CLR["bg"], fg=CLR["text"],
+                 font=(FONT_FAMILY, FS_TITLE, "bold")).pack(anchor="w")
+        tk.Label(hf, text="CBOT timing · FX impact · margin of safety · supplier "
+                          "scorecard · seasonality · origin compare",
+                 bg=CLR["bg"], fg=CLR["muted"], font=(FONT_FAMILY, FS_BODY)).pack(anchor="w")
 
-        # ── Inner notebook: 4 analysis views ───────────────────────────
-        self._an_nb = ttk.Notebook(p)
-        self._an_nb.grid(row=1, column=0, sticky="nsew")
+        # ── Sub-navigation: 8 analysis views as pill tabs ──────────────
+        _a_bar, _a_host, _a_screens, self._an_nb, _a_finalize = self._build_pill_switcher(
+            p, [("perf", "Contract Performance"), ("detail", "Contract Detail"),
+                ("supplier", "Supplier Scorecard"), ("season", "Seasonality"),
+                ("origin", "Origin Compare"), ("savings", "Savings Tracker"),
+                ("basis", "Basis Tracker"), ("exposure", "Exposure & Risk")])
+        _a_bar.grid(row=1, column=0, sticky="w", pady=(0, 4))
+        _a_host.grid(row=2, column=0, sticky="nsew")
 
-        self.tab_performance      = ttk.Frame(self._an_nb, padding=10)
-        self.tab_an_contract      = ttk.Frame(self._an_nb, padding=6)
-        self.tab_an_supplier      = ttk.Frame(self._an_nb, padding=6)
-        self.tab_an_season        = ttk.Frame(self._an_nb, padding=6)
-        self.tab_origin_cmp_outer = ttk.Frame(self._an_nb)
-        self.tab_savings_outer    = ttk.Frame(self._an_nb)
+        self.tab_performance      = _a_screens["perf"]
+        self.tab_an_contract      = _a_screens["detail"]
+        self.tab_an_supplier      = _a_screens["supplier"]
+        self.tab_an_season        = _a_screens["season"]
+        self.tab_origin_cmp_outer = _a_screens["origin"]
+        self.tab_savings_outer    = _a_screens["savings"]
         self.tab_origin_cmp = self._make_scrollable_tab(self.tab_origin_cmp_outer, padding=10)
         self.tab_savings    = self._make_scrollable_tab(self.tab_savings_outer, padding=10)
-
-        self._an_nb.add(self.tab_performance,      text="Contract Performance")
-        self._an_nb.add(self.tab_an_contract,      text="Contract Detail")
-        self._an_nb.add(self.tab_an_supplier,      text="Supplier Scorecard")
-        self._an_nb.add(self.tab_an_season,        text="Seasonality")
-        self._an_nb.add(self.tab_origin_cmp_outer, text="Origin Compare")
-        self._an_nb.add(self.tab_savings_outer,    text="Savings Tracker")
-        self.tab_basis    = ttk.Frame(self._an_nb, padding=10)
-        self.tab_exposure = ttk.Frame(self._an_nb, padding=10)
-        self._an_nb.add(self.tab_basis,    text="Basis Tracker")
-        self._an_nb.add(self.tab_exposure, text="Exposure & Risk")
+        self.tab_basis    = _a_screens["basis"]
+        self.tab_exposure = _a_screens["exposure"]
 
         self._build_performance()
         self._build_an_contract_subtab()
@@ -12312,6 +13102,7 @@ class App(tk.Tk):
         self._build_savings_tracker()
         self._build_basis_tracker()
         self._build_exposure_risk()
+        _a_finalize()
 
     def _build_an_contract_subtab(self):
         p = self.tab_an_contract
@@ -15942,31 +16733,31 @@ class App(tk.Tk):
         self.tab_contracts.columnconfigure(0, weight=1)
         style = ttk.Style(self)
         style.configure("Contracts.Treeview", rowheight=max(28, round(30 * getattr(self, "_font_scale", 1.0))),
-                        font=(FONT_FAMILY, FS_BODY), background="#ffffff", fieldbackground="#ffffff")
+                        font=(FONT_FAMILY, FS_BODY), background=CLR["surface"], fieldbackground=CLR["surface"])
         style.configure("Contracts.Treeview.Heading", font=(FONT_FAMILY, FS_BODY, "bold"),
-                        padding=(7, 7), foreground="#1e293b")
+                        padding=(7, 7), foreground=CLR["muted"])
         style.configure("Contracts.TNotebook.Tab", font=(FONT_FAMILY, FS_BODY, "bold"), padding=(14, 8))
         style.configure("Contracts.TLabelframe.Label", font=(FONT_FAMILY, FS_BODY, "bold"),
-                        foreground="#1d4ed8")
+                        foreground=CLR["primary"])
 
-        hero = tk.Frame(self.tab_contracts, bg="#0b1f3a",
-                        highlightthickness=1, highlightbackground="#183b66")
+        hero = tk.Frame(self.tab_contracts, bg=CLR["sidebar_bg"],
+                        highlightthickness=1, highlightbackground=CLR["sidebar_border"])
         hero.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         hero.columnconfigure(0, weight=1)
-        title_box = tk.Frame(hero, bg="#0b1f3a")
+        title_box = tk.Frame(hero, bg=CLR["sidebar_bg"])
         title_box.grid(row=0, column=0, sticky="w", padx=16, pady=13)
-        tk.Label(title_box, text="Contract Portfolio", bg="#0b1f3a", fg="#ffffff",
+        tk.Label(title_box, text="Contract Portfolio", bg=CLR["sidebar_bg"], fg="#ffffff",
                  font=(FONT_FAMILY, 18, "bold")).pack(anchor="w")
         tk.Label(title_box, text="Create, price, monitor and audit every import contract from one desk",
-                 bg="#0b1f3a", fg="#a9c2de", font=(FONT_FAMILY, FS_BODY)).pack(anchor="w")
-        actions = tk.Frame(hero, bg="#0b1f3a")
+                 bg=CLR["sidebar_bg"], fg=CLR["sidebar_text_dim"], font=(FONT_FAMILY, FS_BODY)).pack(anchor="w")
+        actions = tk.Frame(hero, bg=CLR["sidebar_bg"])
         actions.grid(row=0, column=1, sticky="e", padx=14, pady=12)
         self._contract_editor_button_var = tk.StringVar(value="Hide editor")
         self._contract_history_button_var = tk.StringVar(value="Show history")
         def _hero_button(text_value=None, text=None, command=None, primary=False):
             return tk.Button(actions, textvariable=text_value, text=text or "", command=command,
-                             bg="#2563eb" if primary else "#16375f", fg="#ffffff",
-                             activebackground="#1d4ed8" if primary else "#234c78",
+                             bg=CLR["primary"] if primary else CLR["sidebar_hover"], fg="#ffffff",
+                             activebackground=CLR["primary_hover"] if primary else CLR["sidebar_border"],
                              activeforeground="#ffffff", relief="flat", cursor="hand2",
                              padx=12, pady=7, font=(FONT_FAMILY, FS_BODY, "bold"))
         hero_actions = [
@@ -16001,25 +16792,17 @@ class App(tk.Tk):
         for i in range(7):
             kpi_strip.columnconfigure(i, weight=1)
 
-        def _ct_kpi(col, title, var, sub, accent="#38bdf8"):
-            card = tk.Frame(kpi_strip, bg="#ffffff", highlightbackground="#dbe4ef",
-                            highlightthickness=1, bd=0)
+        def _ct_kpi(col, title, var, sub, accent=CLR["primary"]):
+            card = self._kpi_card(kpi_strip, title, var, sub, dot=accent)
             card.grid(row=0, column=col, sticky="nsew", padx=(0 if col == 0 else 6, 0))
-            tk.Frame(card, bg=accent, height=4).pack(fill="x", side="top")
-            tk.Label(card, text=title, bg="#ffffff", fg="#64748b",
-                     font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=10, pady=(7, 0))
-            tk.Label(card, textvariable=var, bg="#ffffff", fg="#0f172a",
-                     font=("Segoe UI", 13, "bold")).pack(anchor="w", padx=10)
-            tk.Label(card, text=sub, bg="#ffffff", fg="#5f6b7a",
-                     font=("Segoe UI", 9)).pack(anchor="w", padx=10, pady=(0, 7))
 
-        _ct_kpi(0, "Total", self.ct_kpi_total_var, "visible rows", "#64748b")
-        _ct_kpi(1, "Open", self.ct_kpi_open_var, "live exposure", "#38bdf8")
-        _ct_kpi(2, "Closed", self.ct_kpi_closed_var, "realized", "#22c55e")
-        _ct_kpi(3, "Open Qty", self.ct_kpi_open_qty_var, "contract qty", "#0ea5e9")
+        _ct_kpi(0, "Total", self.ct_kpi_total_var, "visible rows", CLR["muted"])
+        _ct_kpi(1, "Open", self.ct_kpi_open_var, "live exposure", CLR["accent"])
+        _ct_kpi(2, "Closed", self.ct_kpi_closed_var, "realized", CLR["success"])
+        _ct_kpi(3, "Open Qty", self.ct_kpi_open_qty_var, "contract qty", CLR["accent"])
         _ct_kpi(4, "Remaining", self.ct_kpi_remaining_var, "est. balance", "#8b5cf6")
-        _ct_kpi(5, "Open Edge", self.ct_kpi_open_edge_var, "vs latest local", "#f59e0b")
-        _ct_kpi(6, "Missing", self.ct_kpi_missing_var, "data checks", "#ef4444")
+        _ct_kpi(5, "Open Edge", self.ct_kpi_open_edge_var, "vs latest local", CLR["warning"])
+        _ct_kpi(6, "Missing", self.ct_kpi_missing_var, "data checks", CLR["danger"])
 
         form = ttk.LabelFrame(self.tab_contracts, text="Contract Editor · commercial, pricing and logistics", padding=12, style="Contracts.TLabelframe")
         form.grid(row=2, column=0, sticky="ew", pady=(0,10))
@@ -16913,10 +17696,16 @@ class App(tk.Tk):
 
         parent = scroll_frame
 
-        ttk.Label(parent, text="Single Deal Calculator (Add snapshot to History)", font=("Segoe UI", 12, "bold")).grid(row=0, column=0, sticky="w")
+        header = tk.Frame(parent, bg=CLR["bg"])
+        header.grid(row=0, column=0, sticky="w", pady=(0, 4))
+        tk.Label(header, text="Deal Evaluator", bg=CLR["bg"], fg=CLR["text"],
+                 font=(FONT_FAMILY, FS_TITLE, "bold")).pack(anchor="w")
+        tk.Label(header, text="Compare an import offer against your local landed-cost benchmark.",
+                 bg=CLR["bg"], fg=CLR["muted"], font=(FONT_FAMILY, FS_BODY)).pack(anchor="w")
 
-        frm = ttk.Frame(parent)
-        frm.grid(row=1, column=0, sticky="nw", pady=(10,0))
+        form_card, form_body = self._card(parent)
+        form_card.grid(row=1, column=0, sticky="new", pady=(8, 0))
+        frm = form_body
         for i in range(6):
             frm.columnconfigure(i, weight=0, minsize=150)
 
@@ -17231,8 +18020,8 @@ class App(tk.Tk):
     }
 
     def _build_decision_card(self, parent, row0):
-        card = tk.Frame(parent, bg="#ffffff", highlightthickness=2,
-                        highlightbackground="#1f3864")
+        card = tk.Frame(parent, bg=CLR["surface"], highlightthickness=2,
+                        highlightbackground=CLR["primary"])
         card.grid(row=row0, column=0, columnspan=2, sticky="ew", pady=(4, 8))
         self._dec_head = tk.Label(card, text="Recommendation: run Calculate",
                                   bg="#f1f5f9", fg="#334155", anchor="w",
@@ -22243,19 +23032,19 @@ class App(tk.Tk):
                             highlightbackground=CLR["border"], padx=pad, pady=pad)
 
         # ── Hero header ───────────────────────────────────────────────
-        hero = tk.Frame(p, bg="#0b1f3a", padx=18, pady=14)
+        hero = tk.Frame(p, bg="#1b2036", padx=18, pady=14)
         hero.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         hero.columnconfigure(0, weight=1)
-        title_box = tk.Frame(hero, bg="#0b1f3a")
+        title_box = tk.Frame(hero, bg="#1b2036")
         title_box.grid(row=0, column=0, sticky="w")
-        tk.Label(title_box, text="Basis Intelligence", bg="#0b1f3a", fg="#ffffff",
+        tk.Label(title_box, text="Basis Intelligence", bg="#1b2036", fg="#ffffff",
                  font=(FONT_FAMILY, FS_TITLE, "bold")).pack(anchor="w")
         tk.Label(
             title_box,
             text="Compare contracts, local market quotations, and actual local purchases on one auditable basis timeline.",
-            bg="#0b1f3a", fg="#b9c9dc", font=(FONT_FAMILY, FS_BODY),
+            bg="#1b2036", fg="#b9c9dc", font=(FONT_FAMILY, FS_BODY),
             justify="left", wraplength=920).pack(anchor="w", pady=(3, 0))
-        hero_badges = tk.Frame(hero, bg="#0b1f3a")
+        hero_badges = tk.Frame(hero, bg="#1b2036")
         hero_badges.grid(row=0, column=1, sticky="e", padx=(14, 0))
         for text, bg, fg in (
             ("CONTRACT + MARKET + PURCHASE", "#16345d", "#dbeafe"),
@@ -26779,12 +27568,23 @@ class App(tk.Tk):
         return self._sorted_contract_items(contracts)
 
     def _contract_priced_and_unpriced_qty(self, c):
+        # Same "priced" definition as _home_contract_pricing_split(): without
+        # pricing lots, a CBOT contract needs an agreed premium_cents to
+        # count as priced (a CIF from a live/floating CBOT preview is not a
+        # locked price); a non-CBOT contract has no premium step, so a
+        # stored CIF is the final price.
         qty = to_float((c or {}).get("qty_mt"), None)
         lots = self._contract_pricing_lots(c or {})
         priced_qty = sum((to_float(lot.get("qty_mt"), 0) or 0)
                          for lot in lots if isinstance(lot, dict))
-        if not lots and self._contract_cif_usd(c or {}) is not None and qty is not None:
-            priced_qty = qty
+        if not lots and qty is not None:
+            comm = ((c or {}).get("commodity") or "").strip().upper()
+            comm_meta = self.state_obj.get("commodities", {}).get(comm, {}) or {}
+            if (comm_meta.get("type") or "").upper() == "CBOT":
+                if to_float((c or {}).get("premium_cents"), None) is not None:
+                    priced_qty = qty
+            elif self._contract_cif_usd(c or {}) is not None:
+                priced_qty = qty
         if qty is None:
             return priced_qty or None, None
         return min(priced_qty, qty), max(qty - priced_qty, 0.0)
@@ -27131,14 +27931,14 @@ class App(tk.Tk):
         win.title("Compare Two Contracts")
         win.geometry("1120x760")
         win.minsize(900, 620)
-        win.configure(bg="#07111f")
+        win.configure(bg="#1b2036")
         win.transient(self)
         win.columnconfigure(0, weight=1); win.rowconfigure(2, weight=1)
 
-        hero = tk.Frame(win, bg="#0b1f3a", highlightthickness=1, highlightbackground="#183b66")
+        hero = tk.Frame(win, bg="#1b2036", highlightthickness=1, highlightbackground="#2e3550")
         hero.grid(row=0, column=0, sticky="ew")
-        tk.Label(hero, text="Contract Comparison", bg="#0b1f3a", fg="white", font=(FONT_FAMILY, 18, "bold")).pack(anchor="w", padx=18, pady=(14, 2))
-        tk.Label(hero, text="Compare two contracts side by side using the same saved pricing, cost and local-market logic.", bg="#0b1f3a", fg="#a9c2de", font=(FONT_FAMILY, FS_BODY)).pack(anchor="w", padx=18, pady=(0, 14))
+        tk.Label(hero, text="Contract Comparison", bg="#1b2036", fg="white", font=(FONT_FAMILY, 18, "bold")).pack(anchor="w", padx=18, pady=(14, 2))
+        tk.Label(hero, text="Compare two contracts side by side using the same saved pricing, cost and local-market logic.", bg="#1b2036", fg="#a9c2de", font=(FONT_FAMILY, FS_BODY)).pack(anchor="w", padx=18, pady=(0, 14))
 
         picker = ttk.Frame(win, padding=12)
         picker.grid(row=1, column=0, sticky="ew")
@@ -27163,7 +27963,7 @@ class App(tk.Tk):
             tv.heading(col, text=col); tv.column(col, width=width, anchor=anchor)
         tv.grid(row=0, column=0, sticky="nsew")
         sb = ttk.Scrollbar(table_wrap, orient="vertical", command=tv.yview); sb.grid(row=0, column=1, sticky="ns"); tv.configure(yscrollcommand=sb.set)
-        tv.tag_configure("section", background="#dbeafe", foreground="#0b1f3a", font=(FONT_FAMILY, FS_BODY, "bold"))
+        tv.tag_configure("section", background="#dbeafe", foreground="#1b2036", font=(FONT_FAMILY, FS_BODY, "bold"))
         tv.tag_configure("warn", background="#fff7ed")
 
         current = {"a": "", "b": ""}
