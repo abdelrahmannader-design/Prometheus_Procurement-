@@ -23854,7 +23854,9 @@ class App(tk.Tk):
         from openpyxl import Workbook
         from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
         from openpyxl.utils import get_column_letter
+        from openpyxl.chart import LineChart, Reference
 
+        rows = sorted(rows, key=lambda r: r.get("date") or "")
         wb = Workbook()
         ws = wb.active
         ws.title = "Basis Data"
@@ -23928,6 +23930,33 @@ class App(tk.Tk):
             max_len = max(len(str(ws.cell(row=r, column=ci).value or ""))
                           for r in range(1, ws.max_row + 1))
             ws.column_dimensions[letter].width = min(max(max_len + 2, 10), 36)
+
+        # ── Line chart with markers: basis (or SBM equivalent price) over
+        # time, one point per date. Columns M (Contract Basis / Contract Eq)
+        # and N (Implied Basis / Local Eq) are the same columns for both
+        # report types — only their header labels differ.
+        if len(rows) >= 2:
+            last_data_row = header_row + len(rows)
+            chart = LineChart()
+            chart.title = ("SBM Equivalent Price Over Time" if is_sbm_report
+                            else "Implied Basis Over Time")
+            chart.style = 12
+            chart.x_axis.title = "Date"
+            chart.y_axis.title = ("Contract Eq / Local Eq (USD/ST)" if is_sbm_report
+                                   else "Basis (application units)")
+            chart.height = 10
+            chart.width = 26
+            chart.add_data(Reference(ws, min_col=13, max_col=14,
+                                      min_row=header_row, max_row=last_data_row),
+                            titles_from_data=True)
+            chart.set_categories(Reference(ws, min_col=1, min_row=header_row + 1,
+                                            max_row=last_data_row))
+            for series, colour in zip(chart.series, ("F59E0B", "1F3864")):
+                series.marker.symbol = "circle"
+                series.marker.size = 6
+                series.smooth = False
+                series.graphicalProperties.line.solidFill = colour
+            ws.add_chart(chart, f"A{last_data_row + 3}")
 
         assumptions = wb.create_sheet("Assumptions")
         assumptions["A1"] = "Comparison formulas and governance"
@@ -27887,6 +27916,32 @@ class App(tk.Tk):
         except Exception as exc:
             self._surface_error("_export_contracts_excel", exc, show=True)
 
+    def _contract_market_at_date(self, cid, c, ref_date, mode):
+        """CBOT + FX for a contract at one reference date, and the implied
+        market price in USD/MT and EGP/MT. Reuses the same resolvers the
+        Basis Tracker uses (_basis_contract_cbot/_basis_contract_fx) so a
+        "market at pricing/delivery date" figure here always agrees with
+        Basis Tracker's own numbers for the same contract and date."""
+        base = (c.get("commodity") or "").strip().upper().split("-")[0]
+        empty = {"cbot": None, "cbot_date": "", "fx": None, "fx_date": "",
+                 "factor": None, "market_usd_mt": None, "market_egp_mt": None}
+        if not base or not ref_date:
+            return empty
+        ch, fxh = self._basis_history_lists(base)
+        factor = cbot_conv_factor(base, strict=False)
+        premium = to_float(c.get("premium_cents"), 0.0) or 0.0
+        cif = self._contract_cif_usd(c, cid)
+        fees_egp = ((to_float(c.get("discharge_egp_mt"), 0) or 0) +
+                    (to_float(c.get("clearance_egp_mt"), 0) or 0))
+        cbot, cbot_date, _cbot_src = self._basis_contract_cbot(
+            cid, c, base, ref_date, ch, factor, premium, cif, mode=mode)
+        fx, fx_date, _fx_src = self._basis_contract_fx(
+            cid, c, ref_date, fxh, cif, fees_egp, mode=mode)
+        market_usd_mt = (cbot + premium) * factor if (cbot is not None and factor) else None
+        market_egp_mt = market_usd_mt * fx if (market_usd_mt is not None and fx) else None
+        return {"cbot": cbot, "cbot_date": cbot_date, "fx": fx, "fx_date": fx_date,
+                "factor": factor, "market_usd_mt": market_usd_mt, "market_egp_mt": market_egp_mt}
+
     def _contract_comparison_rows(self, cid_a, cid_b):
         contracts = self.state_obj.get("contracts", {}) or {}
         if cid_a not in contracts or cid_b not in contracts:
@@ -27938,27 +27993,225 @@ class App(tk.Tk):
         return a, b, rows
 
     def _build_contract_comparison_workbook(self, cid_a, cid_b):
+        """Formula-based two-contract comparison workbook.
+
+        Inputs (CIF, FX, fees, CBOT-at-date, local price) are written as
+        plain values; every derived figure (Contract Goods, Own-After,
+        Market Price at each reference date, Saving, Total Saving) is a
+        live Excel formula referencing those input cells in the same
+        column, so editing an input recalculates the rest of that
+        contract's column automatically.
+        """
         from openpyxl import Workbook
         from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
         from openpyxl.utils import get_column_letter
-        a, b, rows = self._contract_comparison_rows(cid_a, cid_b)
+        from openpyxl.chart import BarChart, Reference
+
+        contracts = self.state_obj.get("contracts", {}) or {}
+        if cid_a not in contracts or cid_b not in contracts:
+            raise ValueError("Choose two valid contracts.")
+        c_a, c_b = contracts[cid_a], contracts[cid_b]
+        a = self._contract_export_row(cid_a, c_a)
+        b = self._contract_export_row(cid_b, c_b)
+
+        a_pd, _src = self._basis_reference_date_for_contract(c_a, mode="PRICING")
+        a_dd, _src = self._basis_reference_date_for_contract(c_a, mode="DELIVERY")
+        b_pd, _src = self._basis_reference_date_for_contract(c_b, mode="PRICING")
+        b_dd, _src = self._basis_reference_date_for_contract(c_b, mode="DELIVERY")
+        a_pm = self._contract_market_at_date(cid_a, c_a, a_pd, "PRICING")
+        a_dm = self._contract_market_at_date(cid_a, c_a, a_dd, "DELIVERY")
+        b_pm = self._contract_market_at_date(cid_b, c_b, b_pd, "PRICING")
+        b_dm = self._contract_market_at_date(cid_b, c_b, b_dd, "DELIVERY")
+        factor_a = a_pm["factor"] or a_dm["factor"]
+        factor_b = b_pm["factor"] or b_dm["factor"]
+
+        def _values(row, pm, dm, pricing_date, delivery_date, factor):
+            return {
+                "contract": row["contract"], "commodity": row["commodity"],
+                "supplier": row["supplier"], "origin": row["origin"],
+                "delivery_date": row["delivery_date"],
+                "pricing_ref_date": pricing_date or "—",
+                "qty_mt": row["qty_mt"], "remaining_mt": row["remaining_mt"],
+                "unpriced_qty_mt": row["unpriced_qty_mt"],
+                "cif_usd_mt": row["cif_usd_mt"], "premium": row["premium"],
+                "contract_fx": row["contract_fx"], "factor": factor,
+                "discharge_egp_mt": row["discharge_egp_mt"],
+                "clearance_egp_mt": row["clearance_egp_mt"],
+                "freight_egp_mt": row["freight_egp_mt"],
+                "contract_goods_egp_mt": row["contract_goods_egp_mt"],
+                "own_after_egp_mt": row["own_after_egp_mt"],
+                "local_egp_mt": row["local_egp_mt"],
+                "cbot_pricing": pm["cbot"], "fx_pricing": pm["fx"],
+                "market_usd_pricing": pm["market_usd_mt"],
+                "market_egp_pricing": pm["market_egp_mt"],
+                "delivery_ref_date": delivery_date or "—",
+                "cbot_delivery": dm["cbot"], "fx_delivery": dm["fx"],
+                "market_usd_delivery": dm["market_usd_mt"],
+                "market_egp_delivery": dm["market_egp_mt"],
+                "saving_egp_mt": row["saving_egp_mt"],
+                "total_saving_egp": row["total_saving_egp"],
+                "data_quality": row["data_quality"],
+            }
+
+        a_values = _values(a, a_pm, a_dm, a_pd, a_dd, factor_a)
+        b_values = _values(b, b_pm, b_dm, b_pd, b_dd, factor_b)
+
+        # (section, label, kind, key, number_format, lower_is_better)
+        # kind: "text" (no comparison/formula) | "num" (input value) |
+        # "formula" (Excel formula referencing other rows in the same column)
+        ROWS = [
+            ("IDENTITY", "Contract", "text", "contract", None, None),
+            ("IDENTITY", "Commodity", "text", "commodity", None, None),
+            ("IDENTITY", "Supplier", "text", "supplier", None, None),
+            ("IDENTITY", "Origin", "text", "origin", None, None),
+            ("DATES", "Delivery Date", "text", "delivery_date", None, None),
+            ("DATES", "Pricing Reference Date", "text", "pricing_ref_date", None, None),
+            ("VOLUME", "Quantity MT", "num", "qty_mt", "#,##0", False),
+            ("VOLUME", "Remaining MT", "num", "remaining_mt", "#,##0", True),
+            ("VOLUME", "Unpriced MT", "num", "unpriced_qty_mt", "#,##0", True),
+            ("PRICE", "CIF USD/MT", "num", "cif_usd_mt", "#,##0.00", True),
+            ("PRICE", "Basis / Premium", "num", "premium", "#,##0.00", True),
+            ("PRICE", "Contract FX (EGP/USD)", "num", "contract_fx", "#,##0.0000", True),
+            ("PRICE", "Conversion Factor", "num", "factor", "#,##0.0000", None),
+            ("PRICE", "Discharge EGP/MT", "num", "discharge_egp_mt", "#,##0", True),
+            ("PRICE", "Clearance EGP/MT", "num", "clearance_egp_mt", "#,##0", True),
+            ("PRICE", "Freight EGP/MT", "num", "freight_egp_mt", "#,##0", True),
+            ("PRICE", "Contract Goods EGP/MT", "formula", "contract_goods_egp_mt", "#,##0", True),
+            ("PRICE", "Own-After EGP/MT", "formula", "own_after_egp_mt", "#,##0", True),
+            ("MARKET", "Matched Local EGP/MT", "num", "local_egp_mt", "#,##0", None),
+            ("MARKET", "CBOT @ Pricing Date", "num", "cbot_pricing", "#,##0.00", None),
+            ("MARKET", "FX @ Pricing Date", "num", "fx_pricing", "#,##0.0000", None),
+            ("MARKET", "Market Price @ Pricing (USD/MT)", "formula", "market_usd_pricing", "#,##0.00", None),
+            ("MARKET", "Market Price @ Pricing (EGP/MT)", "formula", "market_egp_pricing", "#,##0", None),
+            ("MARKET", "Delivery Reference Date", "text", "delivery_ref_date", None, None),
+            ("MARKET", "CBOT @ Delivery Date", "num", "cbot_delivery", "#,##0.00", None),
+            ("MARKET", "FX @ Delivery Date", "num", "fx_delivery", "#,##0.0000", None),
+            ("MARKET", "Market Price @ Delivery (USD/MT)", "formula", "market_usd_delivery", "#,##0.00", None),
+            ("MARKET", "Market Price @ Delivery (EGP/MT)", "formula", "market_egp_delivery", "#,##0", None),
+            ("OUTCOME", "Saving / Position EGP/MT", "formula", "saving_egp_mt", "+#,##0;[Red]-#,##0", False),
+            ("OUTCOME", "Total Saving / Position EGP", "formula", "total_saving_egp", "+#,##0;[Red]-#,##0", False),
+            ("QUALITY", "Data Quality", "text", "data_quality", None, None),
+        ]
+
+        HEADER_ROW = 4
+        DATA_FIRST = 5
+        row_of = {spec[3]: DATA_FIRST + i for i, spec in enumerate(ROWS)}
+
+        FORMULAS = {
+            "contract_goods_egp_mt": lambda col: f"={col}{row_of['cif_usd_mt']}*{col}{row_of['contract_fx']}",
+            "own_after_egp_mt": lambda col: (
+                f"={col}{row_of['contract_goods_egp_mt']}+{col}{row_of['discharge_egp_mt']}"
+                f"+{col}{row_of['clearance_egp_mt']}+{col}{row_of['freight_egp_mt']}"),
+            "market_usd_pricing": lambda col: f"=({col}{row_of['cbot_pricing']}+{col}{row_of['premium']})*{col}{row_of['factor']}",
+            "market_egp_pricing": lambda col: f"={col}{row_of['market_usd_pricing']}*{col}{row_of['fx_pricing']}",
+            "market_usd_delivery": lambda col: f"=({col}{row_of['cbot_delivery']}+{col}{row_of['premium']})*{col}{row_of['factor']}",
+            "market_egp_delivery": lambda col: f"={col}{row_of['market_usd_delivery']}*{col}{row_of['fx_delivery']}",
+            "saving_egp_mt": lambda col: f"={col}{row_of['local_egp_mt']}-{col}{row_of['own_after_egp_mt']}",
+            "total_saving_egp": lambda col: f"={col}{row_of['saving_egp_mt']}*{col}{row_of['qty_mt']}",
+        }
+
         wb = Workbook(); ws = wb.active; ws.title = "Contract Comparison"
         navy = "0B1F3A"; blue = "2563EB"; pale = "EAF2FF"
         thin = Side(style="thin", color="D8E1EC"); border = Border(left=thin, right=thin, top=thin, bottom=thin)
         ws["A1"] = "PROMETHEUS PROCUREMENT — CONTRACT COMPARISON"; ws["A1"].font = Font(bold=True, size=15, color=navy)
         ws["A2"] = f"Generated: {now_ts()}"
+        ws["A3"] = ("Formula-based: edit the input cells (CIF, FX, fees, CBOT/FX at each "
+                    "reference date, local price) and Contract Goods, Own-After, Market "
+                    "Price, Saving and Total Saving recalculate automatically.")
+        ws["A3"].font = Font(italic=True, color="64748B")
         headers = ["Section", "Metric", f"A · {cid_a}", f"B · {cid_b}", "Comparison"]
         for col, label in enumerate(headers, 1):
-            c = ws.cell(4, col, label); c.fill = PatternFill("solid", fgColor=navy); c.font = Font(bold=True, color="FFFFFF"); c.border = border; c.alignment = Alignment(horizontal="center")
-        for ridx, row in enumerate(rows, 5):
-            for cidx, value in enumerate(row, 1):
-                c = ws.cell(ridx, cidx, value); c.border = border; c.alignment = Alignment(vertical="center", wrap_text=True)
-            if ridx == 5 or rows[ridx-5][0] != rows[ridx-6][0]:
-                for cidx in range(1, 6): ws.cell(ridx, cidx).fill = PatternFill("solid", fgColor=pale)
-                ws.cell(ridx, 1).font = Font(bold=True, color=blue)
-        for col, width in enumerate([14, 27, 28, 28, 30], 1): ws.column_dimensions[get_column_letter(col)].width = width
-        ws.freeze_panes = "A5"
-        return wb, (a, b, rows)
+            c = ws.cell(HEADER_ROW, col, label); c.fill = PatternFill("solid", fgColor=navy); c.font = Font(bold=True, color="FFFFFF"); c.border = border; c.alignment = Alignment(horizontal="center")
+
+        def _compare_text(lower_better, av, bv, suffix=""):
+            if lower_better is None:
+                return ""
+            av_f = to_float(av, None); bv_f = to_float(bv, None)
+            if av_f is None or bv_f is None:
+                return "Need data"
+            delta = bv_f - av_f
+            if abs(delta) < 0.005:
+                return "Equal"
+            winner = "A" if ((av_f < bv_f) == lower_better) else "B"
+            return f"{winner} better by {abs(delta):,.2f}{suffix}"
+
+        prior_section = None
+        for section, label, kind, key, num_fmt, lower_better in ROWS:
+            r = row_of[key]
+            ws.cell(r, 1, section)
+            ws.cell(r, 2, label)
+            av, bv = a_values[key], b_values[key]
+            if kind == "text":
+                ws.cell(r, 3, av if av not in (None, "") else "—")
+                ws.cell(r, 4, bv if bv not in (None, "") else "—")
+                ws.cell(r, 5, "")
+            else:
+                if kind == "formula":
+                    cell_a = ws.cell(r, 3, FORMULAS[key]("C"))
+                    cell_b = ws.cell(r, 4, FORMULAS[key]("D"))
+                else:
+                    cell_a = ws.cell(r, 3, av)
+                    cell_b = ws.cell(r, 4, bv)
+                if num_fmt:
+                    cell_a.number_format = num_fmt
+                    cell_b.number_format = num_fmt
+                ws.cell(r, 5, _compare_text(lower_better, av, bv))
+            for cidx in range(1, 6):
+                cell = ws.cell(r, cidx)
+                cell.border = border
+                cell.alignment = Alignment(vertical="center", wrap_text=True)
+            if section != prior_section:
+                for cidx in range(1, 6):
+                    ws.cell(r, cidx).fill = PatternFill("solid", fgColor=pale)
+                ws.cell(r, 1).font = Font(bold=True, color=blue)
+                prior_section = section
+
+        for col, width in enumerate([14, 32, 24, 24, 32], 1):
+            ws.column_dimensions[get_column_letter(col)].width = width
+        ws.freeze_panes = f"A{DATA_FIRST}"
+
+        # ── Chart data block (mirrors the live formula cells above, so the
+        # chart stays in sync if inputs are edited) + clustered bar chart ──
+        CHART_COL_LABEL, CHART_COL_A, CHART_COL_B = 7, 8, 9
+        chart_metrics = [
+            ("Contract Goods EGP/MT", "contract_goods_egp_mt"),
+            ("Own-After EGP/MT", "own_after_egp_mt"),
+            ("Matched Local EGP/MT", "local_egp_mt"),
+            ("Market @ Pricing EGP/MT", "market_egp_pricing"),
+            ("Market @ Delivery EGP/MT", "market_egp_delivery"),
+            ("Saving / MT EGP", "saving_egp_mt"),
+        ]
+        for cidx, label in ((CHART_COL_LABEL, "Metric"), (CHART_COL_A, f"A · {cid_a}"), (CHART_COL_B, f"B · {cid_b}")):
+            c = ws.cell(HEADER_ROW, cidx, label)
+            c.fill = PatternFill("solid", fgColor=navy); c.font = Font(bold=True, color="FFFFFF")
+            c.border = border; c.alignment = Alignment(horizontal="center")
+        for i, (label, key) in enumerate(chart_metrics, 1):
+            r = HEADER_ROW + i
+            ws.cell(r, CHART_COL_LABEL, label).border = border
+            cell_a = ws.cell(r, CHART_COL_A, f"=C{row_of[key]}")
+            cell_b = ws.cell(r, CHART_COL_B, f"=D{row_of[key]}")
+            cell_a.number_format = cell_b.number_format = "#,##0"
+            cell_a.border = cell_b.border = border
+        ws.column_dimensions[get_column_letter(CHART_COL_LABEL)].width = 26
+        ws.column_dimensions[get_column_letter(CHART_COL_A)].width = 16
+        ws.column_dimensions[get_column_letter(CHART_COL_B)].width = 16
+
+        chart_last_row = HEADER_ROW + len(chart_metrics)
+        chart = BarChart()
+        chart.type = "col"
+        chart.grouping = "clustered"
+        chart.style = 10
+        chart.title = "Key EGP/MT Metrics — A vs B"
+        chart.y_axis.title = "EGP / MT"
+        chart.height = 9
+        chart.width = 19
+        chart.add_data(Reference(ws, min_col=CHART_COL_A, max_col=CHART_COL_B,
+                                  min_row=HEADER_ROW, max_row=chart_last_row), titles_from_data=True)
+        chart.set_categories(Reference(ws, min_col=CHART_COL_LABEL,
+                                        min_row=HEADER_ROW + 1, max_row=chart_last_row))
+        ws.add_chart(chart, f"G{chart_last_row + 3}")
+
+        return wb, (a_values, b_values, ROWS)
 
     def _export_contract_comparison_excel(self, cid_a, cid_b, parent=None):
         if not _need_openpyxl():

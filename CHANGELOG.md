@@ -1,5 +1,37 @@
 # Changelog
 
+## Unreleased — Formula-based Contract Comparison + Basis Tracker charts
+
+- Rewrote the two-contract comparison Excel export
+  (`_build_contract_comparison_workbook`) to be formula-based: CIF, FX,
+  fees, CBOT-at-date and local price are written as input cells, and every
+  derived figure (Contract Goods, Own-After, Market Price, Saving, Total
+  Saving) is a live Excel formula referencing those inputs in the same
+  column — edit an input and the rest of that contract's column
+  recalculates.
+- Added "Market Price at Pricing Date" and "Market Price at Delivery
+  (receiving) Date" to the comparison, each showing CBOT, FX, and the
+  resulting market price in USD/MT and EGP/MT — resolved via the same
+  `_basis_contract_cbot`/`_basis_contract_fx` engine Basis Tracker uses,
+  so the figures always agree with Basis Tracker for the same contract and
+  date. New `_contract_market_at_date()` helper.
+- Added a clustered bar chart to the comparison export (Contract Goods,
+  Own-After, Local, Market @ Pricing, Market @ Delivery, Saving — A vs B),
+  fed by cells that mirror the live formulas so the chart stays in sync
+  with edits.
+- Added a line chart with marker points to the Basis Tracker Excel export
+  (`_build_basis_excel_workbook`): Contract Basis and Implied Basis (or,
+  for SBM, Contract/Local Equivalent Price) plotted over time, one point
+  per date. Rows are now sorted by date before writing so the chart reads
+  chronologically.
+
+Verified headlessly: built two contracts with CBOT/FX/local history
+spanning both pricing and delivery dates, exported the comparison and
+confirmed every formula cell references the correct row and evaluates to
+the same number the app's own economics engine produces; exported Basis
+Tracker with 76 rows and confirmed the chart renders. No exceptions in
+either path.
+
 ## Unreleased — Bug fixes (Contract Performance Excel export)
 
 `export_performance_excel` was completely broken and would crash on every
