@@ -17,6 +17,20 @@
   open alerts on a single exportable page.
 - Added an "Annual savings target (EGP)" setting under Setup & Data →
   Decision Settings, driving the new YTD progress bar.
+- Added a "Value created since go-live" headline on the Home hero banner —
+  all-time closed-contract realised savings, distinct from the YTD figure.
+- Added a Forward Landed-Cost Trend line to the Executive Summary: a
+  transparent 90-day linear extrapolation of logged CBOT + FX history into
+  a projected landed cost, clearly labelled as a trend line, not a forecast
+  guarantee.
+- Added a CEO Email Digest under Setup & Data → Data Management: SMTP
+  settings, a "Send Test Brief Now" button, and an optional auto-send
+  (every N days while the app is open) that emails the CEO Brief PDF.
+- Added a High-priority Action Center alert when the YTD savings run-rate
+  projects materially (>=15%) short of the annual target.
+- Category Performance rows on Home are now clickable — jumps to the
+  Contracts tab pre-filtered to that commodity, replacing the old
+  commodity-card click behaviour.
 
 ## V10.8.15 — Modern Contracts Workspace
 

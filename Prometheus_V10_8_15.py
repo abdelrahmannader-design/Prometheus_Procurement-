@@ -7,6 +7,12 @@ import json
 import os
 import re
 import csv
+import io
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.base import MIMEBase
+from email import encoders
 import datetime as dt
 import math
 import traceback
@@ -3243,6 +3249,7 @@ class App(tk.Tk):
         self._start_home_market_autofetch()
         self._start_daily_fx_fetch()    # auto-store USD/EGP every day
         self._start_cbot_history_fetch() # auto-store CBOT daily closes
+        self.after(60_000, self._ceo_digest_auto_tick)  # hourly CEO email digest check
 
     @staticmethod
     def stripe_tree(tv):
@@ -6728,6 +6735,103 @@ class App(tk.Tk):
         keys = sorted(by_date)[-days:]
         return [(k, by_date[k]) for k in keys]
 
+    def _home_value_since_golive(self, commodity="ALL"):
+        """All-time closed-contract realised savings and the earliest
+        realised date on record — the "value created since go-live" line."""
+        f_comm = "All" if (commodity or "ALL").upper() == "ALL" else commodity.upper()
+        rows, totals = self._sv_collect_savings_rows(f_comm, "All", "All", "Closed")
+        earliest = None
+        for row in rows:
+            if not row.get("is_realized"):
+                continue
+            dd = parse_date_flex(row.get("realized_date") or row.get("delivery_date") or "")
+            if dd is not None and (earliest is None or dd < earliest):
+                earliest = dd
+        return {
+            "total": to_float(totals.get("grand_sav"), 0.0) or 0.0,
+            "count": int(totals.get("counted", 0) or 0),
+            "since": earliest,
+        }
+
+    def _home_forecast_landed_cost(self, commodity="CORN", horizon_days=90):
+        """Transparent linear-trend extrapolation of CBOT + FX history into a
+        projected landed cost. This is a trend line, not a predictive model —
+        every place it is shown says so explicitly."""
+        base = (commodity or "CORN").strip().upper().split("-")[0]
+
+        def _series(records, value_fn, filter_fn=None):
+            pts = []
+            for e in records or []:
+                if filter_fn is not None and not filter_fn(e):
+                    continue
+                d = e.get("date")
+                v = value_fn(e)
+                if d and v is not None:
+                    pts.append((d, v))
+            pts.sort(key=lambda t: t[0])
+            return pts[-60:]
+
+        cbot_hist = _series(
+            self.state_obj.get("cbot_history", []) or [],
+            value_fn=lambda e: to_float(e.get("close", e.get("price")), None),
+            filter_fn=lambda e: (e.get("commodity") or "").upper() == base)
+        fx_hist = _series(
+            self.state_obj.get("fx_history", []) or [],
+            value_fn=lambda e: to_float(e.get("rate"), None))
+
+        def _trend(series):
+            if len(series) < 2:
+                return None
+            try:
+                x0 = dt.date.fromisoformat(series[0][0]).toordinal()
+                xs = [dt.date.fromisoformat(d).toordinal() - x0 for d, _ in series]
+            except Exception:
+                return None
+            ys = [v for _, v in series]
+            n = len(xs)
+            mean_x = sum(xs) / n
+            mean_y = sum(ys) / n
+            denom = sum((x - mean_x) ** 2 for x in xs)
+            if denom == 0:
+                return {"slope": 0.0, "intercept": mean_y, "last_x": xs[-1], "last_y": ys[-1]}
+            slope = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys)) / denom
+            intercept = mean_y - slope * mean_x
+            return {"slope": slope, "intercept": intercept, "last_x": xs[-1], "last_y": ys[-1]}
+
+        cbot_trend = _trend(cbot_hist)
+        fx_trend = _trend(fx_hist)
+        if not cbot_trend or not fx_trend:
+            return None
+
+        factor = cbot_conv_factor(base, strict=False)
+        if not factor:
+            return None
+
+        projected_cbot = cbot_trend["intercept"] + cbot_trend["slope"] * (cbot_trend["last_x"] + horizon_days)
+        projected_fx = fx_trend["intercept"] + fx_trend["slope"] * (fx_trend["last_x"] + horizon_days)
+        current_cbot = cbot_trend["last_y"]
+        current_fx = fx_trend["last_y"]
+
+        fees_egp = 0.0
+        contracts = [c for c in (self.state_obj.get("contracts", {}) or {}).values()
+                     if (c.get("commodity") or "").upper().split("-")[0] == base]
+        if contracts:
+            latest = max(contracts, key=lambda c: c.get("delivery_date") or "")
+            fees_egp = ((to_float(latest.get("discharge_egp_mt"), 0) or 0) +
+                        (to_float(latest.get("clearance_egp_mt"), 0) or 0) +
+                        (to_float(self._contract_freight_egp_mt(latest), 0) or 0))
+
+        return {
+            "commodity": base,
+            "horizon_days": horizon_days,
+            "current_cbot": current_cbot,
+            "projected_cbot": projected_cbot,
+            "current_fx": current_fx,
+            "projected_fx": projected_fx,
+            "current_landed_egp_mt": current_cbot * factor * current_fx + fees_egp,
+            "projected_landed_egp_mt": projected_cbot * factor * projected_fx + fees_egp,
+        }
+
     def _home_select_commodity(self, commodity):
         """Filter the complete Home portfolio, not only the savings table."""
         label = (commodity or "All").strip().upper()
@@ -7325,6 +7429,14 @@ class App(tk.Tk):
             return
         selected = self._home_active_commodity()
 
+        # ── Value created since go-live (hero headline) ──────────────────
+        if hasattr(self, "hd_golive_var"):
+            golive = self._home_value_since_golive(selected)
+            since_txt = f" since {golive['since'].strftime('%b %Y')}" if golive.get("since") else ""
+            self.hd_golive_var.set(
+                f"💎 Value created{since_txt}: {self._home_compact_money(golive['total'])} "
+                f"across {golive['count']} closed contracts")
+
         # ── YTD target progress ─────────────────────────────────────────
         ytd = self._home_ytd_target_progress(selected)
         canvas = self.hd_ytd_progress_canvas
@@ -7402,6 +7514,153 @@ class App(tk.Tk):
                 yoy_txt,
             ))
 
+        # ── Forward landed-cost trend (simple linear extrapolation) ──────
+        if hasattr(self, "hd_forecast_var"):
+            forecast_commodity = selected if selected != "ALL" else (
+                self._home_commodity_options()[0] if self._home_commodity_options() else "CORN")
+            forecast = self._home_forecast_landed_cost(forecast_commodity, horizon_days=90)
+            if forecast:
+                delta = forecast["projected_landed_egp_mt"] - forecast["current_landed_egp_mt"]
+                direction = "up" if delta >= 0 else "down"
+                self.hd_forecast_var.set(
+                    f"{forecast['commodity']}: currently ~EGP {forecast['current_landed_egp_mt']:,.0f}/MT, "
+                    f"trend-projected ~EGP {forecast['projected_landed_egp_mt']:,.0f}/MT in "
+                    f"{forecast['horizon_days']}d ({direction} EGP {abs(delta):,.0f}/MT).")
+            else:
+                self.hd_forecast_var.set(
+                    "Needs at least 2 logged CBOT and FX data points for this commodity to compute a trend.")
+
+    def _build_ceo_brief_pdf(self, dest):
+        """Render the single-page CEO Brief into `dest` (a filepath string
+        or a file-like/BytesIO object). Shared by the on-screen export
+        button and the email digest sender so both stay in sync."""
+        selected = self._home_active_commodity()
+        scope_label = "All commodities" if selected == "ALL" else selected
+        fx_mode_sel = getattr(self, "_hd_fx_mode_var", None)
+        fx_mode = fx_mode_sel.get() if fx_mode_sel else "live"
+        metrics = self._home_exec_metrics(selected, fx_mode=fx_mode)
+        ytd = self._home_ytd_target_progress(selected)
+        hedge = self._home_fx_hedge_coverage(selected)
+        cal = self._home_cash_calendar(selected)
+        rollup = self._home_category_rollup()
+        golive = self._home_value_since_golive(selected)
+        try:
+            alerts = self.evaluate_alerts()
+        except Exception:
+            alerts = []
+        priority_order = {"High": 0, "Medium": 1, "Low": 2}
+        alerts = sorted(alerts, key=lambda a: priority_order.get(a.get("priority", "Low"), 3))[:6]
+
+        c = canvas.Canvas(dest, pagesize=A4)
+        w, h = A4
+        M_LEFT, M_RIGHT, M_TOP, M_BOTTOM = 1.5 * cm, 1.5 * cm, 1.8 * cm, 1.8 * cm
+
+        def header(title):
+            c.setFont("Helvetica-Bold", 14)
+            c.drawString(M_LEFT, h - M_TOP, title)
+            c.setFont("Helvetica", 8.5)
+            c.drawString(M_LEFT, h - M_TOP - 0.55 * cm,
+                        f"Generated: {now_ts()}  |  Scope: {scope_label}")
+            c.line(M_LEFT, h - M_TOP - 0.75 * cm, w - M_RIGHT, h - M_TOP - 0.75 * cm)
+            return h - M_TOP - 1.3 * cm
+
+        def ensure_room(y, needed=0.6 * cm, title="CEO Brief (continued)"):
+            if y < M_BOTTOM + needed:
+                c.showPage()
+                return header(title)
+            return y
+
+        def section(y, title):
+            y = ensure_room(y, 1.0 * cm)
+            c.setFont("Helvetica-Bold", 10.5)
+            c.drawString(M_LEFT, y, title)
+            return y - 0.55 * cm
+
+        def kv_row(y, k, v):
+            y = ensure_room(y)
+            c.setFont("Helvetica-Bold", 9.5)
+            c.drawString(M_LEFT, y, str(k))
+            c.setFont("Helvetica", 9.5)
+            c.drawRightString(w - M_RIGHT, y, str(v))
+            return y - 0.5 * cm
+
+        y = header("Prometheus Procurement — CEO Brief")
+
+        y = section(y, "Headline")
+        since_txt = f" (since {golive['since'].isoformat()})" if golive.get("since") else ""
+        y = kv_row(y, f"Value created since go-live{since_txt}",
+                   f"{self._home_compact_money(golive['total'])} · {golive['count']} contracts closed")
+        y = kv_row(y, "Realised savings (closed contracts)", self._home_compact_money(metrics["realized_saving"]))
+        y = kv_row(y, "Open indicative exposure (vs local)", self._home_compact_money(metrics["open_position"]))
+        y = kv_row(y, "Open quantity", f"{metrics['open_qty']:,.0f} MT · {metrics['open_count']} contracts")
+        y = kv_row(y, "Lowest coverage",
+                   f"{metrics['coverage_days']:.0f} days" if metrics["coverage_days"] is not None else "—")
+        y = kv_row(y, "Data gaps", str(metrics["data_gaps"]))
+        y -= 0.2 * cm
+
+        y = section(y, "Year-to-Date Target")
+        if ytd["target"]:
+            pct = ytd["pct_of_target"] or 0.0
+            y = kv_row(y, f"YTD realised vs {ytd['year']} target",
+                      f"{self._home_compact_money(ytd['ytd_saving'])} of "
+                      f"{self._home_compact_money(ytd['target'])} ({pct:.0f}%)")
+            if ytd["pace_projection"] is not None:
+                y = kv_row(y, "Run-rate projection to year end",
+                          self._home_compact_money(ytd["pace_projection"]))
+        else:
+            y = kv_row(y, "YTD realised savings", self._home_compact_money(ytd["ytd_saving"]))
+            y = kv_row(y, "Annual target", "Not set")
+        y -= 0.2 * cm
+
+        y = section(y, "FX Cover & Cash Due")
+        y = kv_row(y, "FX hedge coverage (Form 4 secured)",
+                   f"{hedge['pct']:.0f}% of {hedge['open_qty']:,.0f} MT" if hedge["pct"] is not None else "—")
+        b = cal["buckets"]
+        y = kv_row(y, "Cash due (overdue / ≤30d)",
+                   f"{self._home_compact_money(b['due'])} / {self._home_compact_money(b['0_30'])}")
+        y = kv_row(y, "Cash due (31-60d / 61-90d)",
+                   f"{self._home_compact_money(b['31_60'])} / {self._home_compact_money(b['61_90'])}")
+        y -= 0.2 * cm
+
+        y = section(y, "Category Performance (commodity, YoY vs last year)")
+        c.setFont("Helvetica-Bold", 8.5)
+        headers = ["Commodity", "Closed MT", "Realised", "Open MT", "Indicative", "YTD", "YoY"]
+        x_positions = [M_LEFT, M_LEFT + 2.6*cm, M_LEFT + 5.0*cm, M_LEFT + 8.0*cm,
+                       M_LEFT + 10.2*cm, M_LEFT + 13.0*cm, M_LEFT + 15.4*cm]
+        y = ensure_room(y, 0.8 * cm)
+        for x, htext in zip(x_positions, headers):
+            c.drawString(x, y, htext)
+        y -= 0.45 * cm
+        c.setFont("Helvetica", 8.2)
+        for r in rollup:
+            y = ensure_room(y, 0.55 * cm, "Category Performance (continued)")
+            yoy_txt = f"{r['yoy_pct']:+.0f}%" if r["yoy_pct"] is not None else "—"
+            vals = [
+                r["commodity"], f"{r['closed_qty']:,.0f}",
+                self._home_compact_money(r["realized_saving"]),
+                f"{r['open_qty']:,.0f}",
+                self._home_compact_money(r["open_position"]) if r["open_qty"] else "—",
+                self._home_compact_money(r["ytd_saving"]), yoy_txt,
+            ]
+            for x, val in zip(x_positions, vals):
+                c.drawString(x, y, str(val))
+            y -= 0.42 * cm
+        y -= 0.2 * cm
+
+        y = section(y, "Top Open Alerts")
+        if not alerts:
+            y = kv_row(y, "Status", "No urgent alerts in the selected scope")
+        else:
+            for a in alerts:
+                y = ensure_room(y, 0.6 * cm, "Top Open Alerts (continued)")
+                c.setFont("Helvetica-Bold", 8.5)
+                c.drawString(M_LEFT, y, f"[{a.get('priority', '')}]")
+                c.setFont("Helvetica", 8.5)
+                c.drawString(M_LEFT + 1.8 * cm, y, (a.get("issue") or "")[:100])
+                y -= 0.42 * cm
+
+        c.save()
+
     def _export_ceo_brief_pdf(self):
         """Export a single-page executive brief: headline KPIs, YTD target
         pace, FX cover, cash calendar, category performance and the top
@@ -7416,133 +7675,143 @@ class App(tk.Tk):
                 title="Export CEO Brief")
             if not fp:
                 return
-
-            selected = self._home_active_commodity()
-            scope_label = "All commodities" if selected == "ALL" else selected
-            fx_mode_sel = getattr(self, "_hd_fx_mode_var", None)
-            fx_mode = fx_mode_sel.get() if fx_mode_sel else "live"
-            metrics = self._home_exec_metrics(selected, fx_mode=fx_mode)
-            ytd = self._home_ytd_target_progress(selected)
-            hedge = self._home_fx_hedge_coverage(selected)
-            cal = self._home_cash_calendar(selected)
-            rollup = self._home_category_rollup()
-            try:
-                alerts = self.evaluate_alerts()
-            except Exception:
-                alerts = []
-            priority_order = {"High": 0, "Medium": 1, "Low": 2}
-            alerts = sorted(alerts, key=lambda a: priority_order.get(a.get("priority", "Low"), 3))[:6]
-
-            c = canvas.Canvas(fp, pagesize=A4)
-            w, h = A4
-            M_LEFT, M_RIGHT, M_TOP, M_BOTTOM = 1.5 * cm, 1.5 * cm, 1.8 * cm, 1.8 * cm
-
-            def header(title):
-                c.setFont("Helvetica-Bold", 14)
-                c.drawString(M_LEFT, h - M_TOP, title)
-                c.setFont("Helvetica", 8.5)
-                c.drawString(M_LEFT, h - M_TOP - 0.55 * cm,
-                            f"Generated: {now_ts()}  |  Scope: {scope_label}")
-                c.line(M_LEFT, h - M_TOP - 0.75 * cm, w - M_RIGHT, h - M_TOP - 0.75 * cm)
-                return h - M_TOP - 1.3 * cm
-
-            def ensure_room(y, needed=0.6 * cm, title="CEO Brief (continued)"):
-                if y < M_BOTTOM + needed:
-                    c.showPage()
-                    return header(title)
-                return y
-
-            def section(y, title):
-                y = ensure_room(y, 1.0 * cm)
-                c.setFont("Helvetica-Bold", 10.5)
-                c.drawString(M_LEFT, y, title)
-                return y - 0.55 * cm
-
-            def kv_row(y, k, v):
-                y = ensure_room(y)
-                c.setFont("Helvetica-Bold", 9.5)
-                c.drawString(M_LEFT, y, str(k))
-                c.setFont("Helvetica", 9.5)
-                c.drawRightString(w - M_RIGHT, y, str(v))
-                return y - 0.5 * cm
-
-            y = header("Prometheus Procurement — CEO Brief")
-
-            y = section(y, "Headline")
-            y = kv_row(y, "Realised savings (closed contracts)", self._home_compact_money(metrics["realized_saving"]))
-            y = kv_row(y, "Open indicative exposure (vs local)", self._home_compact_money(metrics["open_position"]))
-            y = kv_row(y, "Open quantity", f"{metrics['open_qty']:,.0f} MT · {metrics['open_count']} contracts")
-            y = kv_row(y, "Lowest coverage",
-                       f"{metrics['coverage_days']:.0f} days" if metrics["coverage_days"] is not None else "—")
-            y = kv_row(y, "Data gaps", str(metrics["data_gaps"]))
-            y -= 0.2 * cm
-
-            y = section(y, "Year-to-Date Target")
-            if ytd["target"]:
-                pct = ytd["pct_of_target"] or 0.0
-                y = kv_row(y, f"YTD realised vs {ytd['year']} target",
-                          f"{self._home_compact_money(ytd['ytd_saving'])} of "
-                          f"{self._home_compact_money(ytd['target'])} ({pct:.0f}%)")
-                if ytd["pace_projection"] is not None:
-                    y = kv_row(y, "Run-rate projection to year end",
-                              self._home_compact_money(ytd["pace_projection"]))
-            else:
-                y = kv_row(y, "YTD realised savings", self._home_compact_money(ytd["ytd_saving"]))
-                y = kv_row(y, "Annual target", "Not set")
-            y -= 0.2 * cm
-
-            y = section(y, "FX Cover & Cash Due")
-            y = kv_row(y, "FX hedge coverage (Form 4 secured)",
-                       f"{hedge['pct']:.0f}% of {hedge['open_qty']:,.0f} MT" if hedge["pct"] is not None else "—")
-            b = cal["buckets"]
-            y = kv_row(y, "Cash due (overdue / ≤30d)",
-                       f"{self._home_compact_money(b['due'])} / {self._home_compact_money(b['0_30'])}")
-            y = kv_row(y, "Cash due (31-60d / 61-90d)",
-                       f"{self._home_compact_money(b['31_60'])} / {self._home_compact_money(b['61_90'])}")
-            y -= 0.2 * cm
-
-            y = section(y, "Category Performance (commodity, YoY vs last year)")
-            c.setFont("Helvetica-Bold", 8.5)
-            headers = ["Commodity", "Closed MT", "Realised", "Open MT", "Indicative", "YTD", "YoY"]
-            x_positions = [M_LEFT, M_LEFT + 2.6*cm, M_LEFT + 5.0*cm, M_LEFT + 8.0*cm,
-                           M_LEFT + 10.2*cm, M_LEFT + 13.0*cm, M_LEFT + 15.4*cm]
-            y = ensure_room(y, 0.8 * cm)
-            for x, htext in zip(x_positions, headers):
-                c.drawString(x, y, htext)
-            y -= 0.45 * cm
-            c.setFont("Helvetica", 8.2)
-            for r in rollup:
-                y = ensure_room(y, 0.55 * cm, "Category Performance (continued)")
-                yoy_txt = f"{r['yoy_pct']:+.0f}%" if r["yoy_pct"] is not None else "—"
-                vals = [
-                    r["commodity"], f"{r['closed_qty']:,.0f}",
-                    self._home_compact_money(r["realized_saving"]),
-                    f"{r['open_qty']:,.0f}",
-                    self._home_compact_money(r["open_position"]) if r["open_qty"] else "—",
-                    self._home_compact_money(r["ytd_saving"]), yoy_txt,
-                ]
-                for x, val in zip(x_positions, vals):
-                    c.drawString(x, y, str(val))
-                y -= 0.42 * cm
-            y -= 0.2 * cm
-
-            y = section(y, "Top Open Alerts")
-            if not alerts:
-                y = kv_row(y, "Status", "No urgent alerts in the selected scope")
-            else:
-                for a in alerts:
-                    y = ensure_room(y, 0.6 * cm, "Top Open Alerts (continued)")
-                    c.setFont("Helvetica-Bold", 8.5)
-                    c.drawString(M_LEFT, y, f"[{a.get('priority', '')}]")
-                    c.setFont("Helvetica", 8.5)
-                    c.drawString(M_LEFT + 1.8 * cm, y, (a.get("issue") or "")[:100])
-                    y -= 0.42 * cm
-
-            c.save()
+            self._build_ceo_brief_pdf(fp)
             messagebox.showinfo(APP_NAME, f"CEO Brief exported.\n\n{fp}")
         except Exception as e:
             log_exception(e, "_export_ceo_brief_pdf")
             messagebox.showerror(APP_NAME, f"CEO Brief export failed: {e}")
+
+    def _send_ceo_digest_email(self, manual=False):
+        """Build the CEO Brief PDF and email it via the configured SMTP
+        server. Returns (ok: bool, message: str)."""
+        if not _need_reportlab():
+            return False, "PDF export requires reportlab (pip install reportlab)."
+        ui = self.state_obj.get("ui", {}) or {}
+        host = (ui.get("ceo_email_smtp_host") or "").strip()
+        port = int(to_float(ui.get("ceo_email_smtp_port"), 587) or 587)
+        username = (ui.get("ceo_email_username") or "").strip()
+        password = ui.get("ceo_email_password") or ""
+        use_tls = bool(ui.get("ceo_email_use_tls", True))
+        recipients = [r.strip() for r in (ui.get("ceo_email_recipients") or "").split(",") if r.strip()]
+        if not host or not recipients:
+            return False, "Set an SMTP host and at least one recipient in Setup & Data → Data Management first."
+        try:
+            buf = io.BytesIO()
+            self._build_ceo_brief_pdf(buf)
+            pdf_bytes = buf.getvalue()
+
+            selected = self._home_active_commodity()
+            metrics = self._home_exec_metrics(selected, fx_mode="live")
+            ytd = self._home_ytd_target_progress(selected)
+            golive = self._home_value_since_golive(selected)
+
+            msg = MIMEMultipart()
+            msg["Subject"] = f"Prometheus CEO Brief — {dt.date.today().isoformat()}"
+            msg["From"] = username or host
+            msg["To"] = ", ".join(recipients)
+            body_lines = [
+                "Automated CEO Brief from Prometheus Procurement.",
+                "",
+                f"Value created since go-live: {self._home_compact_money(golive['total'])}",
+                f"Realised savings (closed contracts): {self._home_compact_money(metrics['realized_saving'])}",
+                f"Open indicative exposure: {self._home_compact_money(metrics['open_position'])}",
+            ]
+            if ytd["target"]:
+                body_lines.append(
+                    f"YTD vs target: {self._home_compact_money(ytd['ytd_saving'])} of "
+                    f"{self._home_compact_money(ytd['target'])} ({(ytd['pct_of_target'] or 0):.0f}%)")
+            body_lines += ["", "Full details in the attached PDF."]
+            msg.attach(MIMEText("\n".join(body_lines), "plain"))
+
+            part = MIMEBase("application", "pdf")
+            part.set_payload(pdf_bytes)
+            encoders.encode_base64(part)
+            part.add_header("Content-Disposition",
+                            f'attachment; filename="CEO_Brief_{dt.date.today().isoformat()}.pdf"')
+            msg.attach(part)
+
+            with smtplib.SMTP(host, port, timeout=25) as server:
+                server.ehlo()
+                if use_tls:
+                    server.starttls()
+                    server.ehlo()
+                if username and password:
+                    server.login(username, password)
+                server.sendmail(username or host, recipients, msg.as_string())
+
+            ui = self.state_obj.setdefault("ui", {})
+            ui["last_ceo_digest_sent"] = dt.date.today().isoformat()
+            save_state(self.state_obj)
+            return True, f"Sent to {', '.join(recipients)}"
+        except Exception as e:
+            log_exception(e, "_send_ceo_digest_email")
+            return False, str(e)
+
+    def _ceo_digest_auto_tick(self):
+        """Checked hourly while the app is open: sends the CEO digest email
+        automatically once the configured interval has elapsed. There is no
+        background service, so this only fires while Prometheus is running —
+        documented in the Setup & Data panel."""
+        try:
+            ui = self.state_obj.get("ui", {}) or {}
+            if bool(ui.get("ceo_email_auto_send", False)):
+                last = ui.get("last_ceo_digest_sent")
+                interval = int(to_float(ui.get("ceo_email_interval_days"), 7) or 7)
+                due = True
+                if last:
+                    try:
+                        due = (dt.date.today() - dt.date.fromisoformat(last)).days >= interval
+                    except Exception:
+                        due = True
+                if due:
+                    ok, _msg = self._send_ceo_digest_email(manual=False)
+                    if ok and hasattr(self, "_ceo_email_status_var"):
+                        self._ceo_email_status_var.set(self._ceo_email_last_sent_note())
+        except Exception as exc:
+            log_exception(exc, "_ceo_digest_auto_tick")
+        finally:
+            try:
+                self.after(60 * 60 * 1000, self._ceo_digest_auto_tick)
+            except Exception:
+                pass
+
+    def _ceo_email_last_sent_note(self):
+        last = (self.state_obj.get("ui", {}) or {}).get("last_ceo_digest_sent")
+        return f"Last sent: {last}" if last else "Never sent yet."
+
+    def _home_rollup_row_click(self, event):
+        """Category Performance row click: filter Home to that commodity and
+        jump to Contracts with the same commodity pre-filtered, the same way
+        the old commodity cards used to."""
+        tree = self.hd_rollup_tree
+        row_id = tree.identify_row(event.y)
+        if not row_id:
+            return
+        values = tree.item(row_id, "values")
+        if not values:
+            return
+        commodity = str(values[0]).strip()
+        if not commodity:
+            return
+        try:
+            self._home_select_commodity(commodity)
+        except Exception as exc:
+            log_exception(exc, "_home_rollup_row_click:select_commodity")
+        try:
+            if hasattr(self, "contract_search_var"):
+                self.contract_search_var.set(commodity)
+            if hasattr(self, "contract_filter_commodity_var"):
+                self.contract_filter_commodity_var.set("ALL")
+            if hasattr(self, "contract_filter_status_var"):
+                self.contract_filter_status_var.set("ALL")
+            if hasattr(self, "contract_filter_origin_var"):
+                self.contract_filter_origin_var.set("ALL")
+            self.refresh_contracts_tree()
+            self.nb.select(self.tab_contracts_group)
+            if hasattr(self, "_contracts_nb"):
+                self._contracts_nb.select(self.tab_contracts_outer)
+        except Exception as exc:
+            log_exception(exc, "_home_rollup_row_click:jump_to_contracts")
 
     def _build_home_dashboard(self):
         """Build a premium Home tab command center.
@@ -7749,7 +8018,11 @@ class App(tk.Tk):
         tk.Label(hero, textvariable=self.hd_formula_rule_var,
                  bg="#07111f", fg="#60a5fa", font=("Segoe UI", 9, "bold")).grid(row=2, column=0, sticky="w", padx=16, pady=(0, 4))
         tk.Label(hero, textvariable=self.hd_market_status_var,
-                 bg="#07111f", fg="#9fb3c8", font=("Segoe UI", 9)).grid(row=3, column=0, sticky="w", padx=16, pady=(0, 14))
+                 bg="#07111f", fg="#9fb3c8", font=("Segoe UI", 9)).grid(row=3, column=0, sticky="w", padx=16, pady=(0, 4))
+        self.hd_golive_var = tk.StringVar(value="💎 Value created since go-live: —")
+        tk.Label(hero, textvariable=self.hd_golive_var,
+                 bg="#07111f", fg="#4ade80", font=("Segoe UI", 12, "bold")).grid(
+                     row=4, column=0, sticky="w", padx=16, pady=(0, 14))
         tk.Button(hero, text="📄 CEO Brief (PDF)",
                   command=self._export_ceo_brief_pdf,
                   bg="#0f766e", fg="#ecfeff", relief="flat", cursor="hand2",
@@ -7892,6 +8165,13 @@ class App(tk.Tk):
         self.hd_open_trend_canvas = tk.Canvas(
             es_left, height=110, width=560, bg="#0b1728", highlightthickness=0)
         self.hd_open_trend_canvas.grid(row=4, column=0, sticky="ew", pady=(4, 0))
+        ttk.Label(es_left,
+                  text="Forward Landed-Cost Trend (90d) — linear extrapolation, not a forecast guarantee",
+                  font=(FONT_FAMILY, FS_BODY, "bold")).grid(row=5, column=0, sticky="w", pady=(8, 0))
+        self.hd_forecast_var = tk.StringVar(value="Refresh to compute.")
+        ttk.Label(es_left, textvariable=self.hd_forecast_var,
+                  font=(FONT_FAMILY, FS_BODY), foreground=CLR["muted"],
+                  wraplength=560, justify="left").grid(row=6, column=0, sticky="w", pady=(2, 0))
 
         es_right = tk.Frame(exec_summary, bg="#ffffff")
         es_right.grid(row=0, column=1, sticky="nsew")
@@ -7923,7 +8203,8 @@ class App(tk.Tk):
                       row=2, column=0, columnspan=2, sticky="w", padx=3, pady=(4, 0))
 
         ttk.Label(exec_summary,
-                  text="Category Performance — by commodity, with year-over-year realised comparison",
+                  text="Category Performance — by commodity, with year-over-year realised comparison  "
+                       "(click a row to open its filtered contract list)",
                   font=(FONT_FAMILY, FS_BODY, "bold")).grid(
                       row=1, column=0, columnspan=2, sticky="w", pady=(10, 2))
         roll_cols = [
@@ -7933,6 +8214,8 @@ class App(tk.Tk):
         ]
         self.hd_rollup_tree = self._hd_make_tree(exec_summary, roll_cols, height=6, row=2)
         self.hd_rollup_tree.master.grid_configure(columnspan=2)
+        self.hd_rollup_tree.configure(cursor="hand2")
+        self.hd_rollup_tree.bind("<Button-1>", self._home_rollup_row_click, add="+")
 
         # V8.2: market intelligence beside CBOT — curve + movement, not just latest price.
         market_intel = ttk.LabelFrame(
@@ -9267,6 +9550,25 @@ class App(tk.Tk):
         fx_today = to_float((self.state_obj.get("market_data", {}).get("fx", {}) or {}).get("price"), None)
         if not fx_today:
             alerts.append(("High", "No USD/EGP saved for today", "Enter FX on the left or click Fetch Live Prices."))
+
+        # ── YTD savings pace vs annual target ───────────────────────────
+        # Flags when the current realised-savings run rate would land
+        # materially (>=15%) short of the configured annual target.
+        try:
+            ytd_check = self._home_ytd_target_progress(selected_commodity)
+            target = ytd_check.get("target")
+            pace = ytd_check.get("pace_projection")
+            if target and pace is not None and pace < target * 0.85:
+                shortfall = target - pace
+                alerts.append((
+                    "High",
+                    f"YTD savings pace projects {self._home_compact_money(pace)} by "
+                    f"{ytd_check['year']} year end — {self._home_compact_money(shortfall)} "
+                    f"short of the {self._home_compact_money(target)} target",
+                    "Review the pipeline: price more open lots, tighten fees, or "
+                    "revisit the annual target in Setup & Data."))
+        except Exception as exc:
+            log_exception(exc, "_refresh_hd_command_center:ytd_pace_alert")
 
         # ── Consumption — low stock / reorder alerts ───────────────────
         try:
@@ -12168,6 +12470,88 @@ class App(tk.Tk):
                   text=DATA_SOURCE_POLICY["note"],
                   foreground=CLR["danger"], wraplength=1150).grid(row=2, column=0, columnspan=4,
                                                 sticky="w", pady=(6, 0))
+
+        # ── CEO Email Digest ─────────────────────────────────────────────
+        email_ui = self.state_obj.get("ui", {}) or {}
+        email_frame = ttk.LabelFrame(
+            p, text="📧 CEO Email Digest — send the CEO Brief PDF by email", padding=10)
+        email_frame.grid(row=4, column=0, sticky="ew", pady=(0, 10))
+        for i in range(6):
+            email_frame.columnconfigure(i, weight=0)
+
+        ttk.Label(email_frame, text="SMTP host").grid(row=0, column=0, sticky="w")
+        self._ceo_email_host_var = tk.StringVar(value=email_ui.get("ceo_email_smtp_host", ""))
+        ttk.Entry(email_frame, textvariable=self._ceo_email_host_var, width=26).grid(
+            row=0, column=1, sticky="w", padx=(4, 12))
+        ttk.Label(email_frame, text="Port").grid(row=0, column=2, sticky="w")
+        self._ceo_email_port_var = tk.StringVar(value=str(email_ui.get("ceo_email_smtp_port", 587)))
+        ttk.Entry(email_frame, textvariable=self._ceo_email_port_var, width=8).grid(
+            row=0, column=3, sticky="w", padx=(4, 12))
+        self._ceo_email_tls_var = tk.BooleanVar(value=bool(email_ui.get("ceo_email_use_tls", True)))
+        ttk.Checkbutton(email_frame, text="Use STARTTLS", variable=self._ceo_email_tls_var).grid(
+            row=0, column=4, sticky="w")
+
+        ttk.Label(email_frame, text="Username").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        self._ceo_email_user_var = tk.StringVar(value=email_ui.get("ceo_email_username", ""))
+        ttk.Entry(email_frame, textvariable=self._ceo_email_user_var, width=26).grid(
+            row=1, column=1, sticky="w", padx=(4, 12), pady=(6, 0))
+        ttk.Label(email_frame, text="Password").grid(row=1, column=2, sticky="w", pady=(6, 0))
+        self._ceo_email_pass_var = tk.StringVar(value=email_ui.get("ceo_email_password", ""))
+        ttk.Entry(email_frame, textvariable=self._ceo_email_pass_var, width=20, show="*").grid(
+            row=1, column=3, columnspan=2, sticky="w", padx=(4, 12), pady=(6, 0))
+
+        ttk.Label(email_frame, text="Recipients (comma-separated)").grid(
+            row=2, column=0, sticky="w", pady=(6, 0))
+        self._ceo_email_recipients_var = tk.StringVar(value=email_ui.get("ceo_email_recipients", ""))
+        ttk.Entry(email_frame, textvariable=self._ceo_email_recipients_var, width=50).grid(
+            row=2, column=1, columnspan=4, sticky="ew", padx=(4, 12), pady=(6, 0))
+
+        self._ceo_email_auto_var = tk.BooleanVar(value=bool(email_ui.get("ceo_email_auto_send", False)))
+        ttk.Checkbutton(email_frame, text="Auto-send while the app is open, every",
+                        variable=self._ceo_email_auto_var).grid(
+                            row=3, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        self._ceo_email_interval_var = tk.StringVar(value=str(email_ui.get("ceo_email_interval_days", 7)))
+        ttk.Entry(email_frame, textvariable=self._ceo_email_interval_var, width=5).grid(
+            row=3, column=2, sticky="w", pady=(8, 0))
+        ttk.Label(email_frame, text="day(s)").grid(row=3, column=3, sticky="w", pady=(8, 0))
+
+        def _save_ceo_email_settings():
+            eui = self.state_obj.setdefault("ui", {})
+            eui["ceo_email_smtp_host"] = self._ceo_email_host_var.get().strip()
+            port = to_float(self._ceo_email_port_var.get(), 587) or 587
+            eui["ceo_email_smtp_port"] = int(port)
+            eui["ceo_email_username"] = self._ceo_email_user_var.get().strip()
+            eui["ceo_email_password"] = self._ceo_email_pass_var.get()
+            eui["ceo_email_recipients"] = self._ceo_email_recipients_var.get().strip()
+            eui["ceo_email_use_tls"] = bool(self._ceo_email_tls_var.get())
+            eui["ceo_email_auto_send"] = bool(self._ceo_email_auto_var.get())
+            interval = to_float(self._ceo_email_interval_var.get(), 7) or 7
+            eui["ceo_email_interval_days"] = max(1, int(interval))
+            save_state(self.state_obj)
+            messagebox.showinfo(APP_NAME, "Email digest settings saved.")
+
+        def _send_test_ceo_email():
+            _save_ceo_email_settings()
+            ok, msg = self._send_ceo_digest_email(manual=True)
+            if ok:
+                messagebox.showinfo(APP_NAME, f"CEO Brief email sent.\n\n{msg}")
+            else:
+                messagebox.showerror(APP_NAME, f"Failed to send: {msg}")
+            self._ceo_email_status_var.set(self._ceo_email_last_sent_note())
+
+        ttk.Button(email_frame, text="Save Email Settings",
+                   command=_save_ceo_email_settings).grid(row=4, column=0, sticky="w", pady=(10, 0))
+        ttk.Button(email_frame, text="Send Test Brief Now",
+                   command=_send_test_ceo_email).grid(row=4, column=1, sticky="w", pady=(10, 0))
+        self._ceo_email_status_var = tk.StringVar(value=self._ceo_email_last_sent_note())
+        ttk.Label(email_frame, textvariable=self._ceo_email_status_var,
+                  foreground=CLR["muted"]).grid(row=4, column=2, columnspan=3, sticky="w", pady=(10, 0))
+        ttk.Label(email_frame,
+                  text="Uses an app password, not your real account password, for Gmail/Outlook/etc. "
+                       "\"Auto-send\" only fires while Prometheus is running — there is no background "
+                       "service, so if the app isn't open on the due day it sends at the next launch.",
+                  foreground=CLR["muted"], wraplength=1150).grid(
+                      row=5, column=0, columnspan=6, sticky="w", pady=(6, 0))
 
         imports = ttk.LabelFrame(p, text="Imports — reduce manual daily feeding", padding=10)
         imports.grid(row=1, column=0, sticky="ew", pady=(0, 10))
