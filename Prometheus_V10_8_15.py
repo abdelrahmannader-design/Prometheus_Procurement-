@@ -6572,6 +6572,162 @@ class App(tk.Tk):
             "data_gaps": int(data_gaps),
         }
 
+    # ------------------------------------------------------------------
+    # CEO-facing rollups: YTD target pace, FX hedge cover, cash calendar,
+    # category (commodity) performance with year-over-year comparison, and
+    # the open-MTM trend series behind the Home dashboard's trend chart.
+    # ------------------------------------------------------------------
+    def _home_ytd_target_progress(self, commodity="ALL"):
+        """Year-to-date closed-contract realised savings vs the configured
+        annual target, plus a simple run-rate projection to year end."""
+        today = dt.date.today()
+        year_start = dt.date(today.year, 1, 1)
+        next_year_start = dt.date(today.year + 1, 1, 1)
+        f_comm = "All" if (commodity or "ALL").upper() == "ALL" else commodity.upper()
+        rows, _totals = self._sv_collect_savings_rows(f_comm, "All", "All", "Closed")
+        ytd_saving = 0.0
+        for row in rows:
+            dd = parse_date_flex(row.get("realized_date") or row.get("delivery_date") or "")
+            value = to_float(row.get("total_sav"), None)
+            if dd is None or value is None:
+                continue
+            if year_start <= dd <= today:
+                ytd_saving += value
+        target = to_float((self.state_obj.get("ui", {}) or {}).get("annual_savings_target_egp"), None)
+        days_elapsed = (today - year_start).days + 1
+        days_in_year = (next_year_start - year_start).days
+        pace_projection = (ytd_saving / days_elapsed * days_in_year) if days_elapsed else None
+        pct = (ytd_saving / target * 100.0) if target and target > 0 else None
+        return {
+            "year": today.year,
+            "ytd_saving": ytd_saving,
+            "target": target,
+            "pct_of_target": pct,
+            "pace_projection": pace_projection,
+        }
+
+    def _home_fx_hedge_coverage(self, commodity="ALL"):
+        """Share of open exposure with FX secured (Form 4 issued) vs still
+        floating. A real portfolio-level risk metric, not a per-deal one."""
+        contracts = self.state_obj.get("contracts", {}) or {}
+        total_qty = 0.0
+        hedged_qty = 0.0
+        for cid, c in contracts.items():
+            if (c.get("status") or "Open").strip() == "Closed":
+                continue
+            if not self._home_contract_matches_filter(c, commodity):
+                continue
+            qty = to_float(c.get("remaining_mt") or c.get("qty_mt"), 0.0) or 0.0
+            if not qty:
+                continue
+            total_qty += qty
+            if to_float(c.get("form4_fx"), None):
+                hedged_qty += qty
+        pct = (hedged_qty / total_qty * 100.0) if total_qty else None
+        return {
+            "open_qty": total_qty,
+            "hedged_qty": hedged_qty,
+            "unhedged_qty": max(total_qty - hedged_qty, 0.0),
+            "pct": pct,
+        }
+
+    def _home_cash_calendar(self, commodity="ALL"):
+        """Bucket estimated cash outflow (own-after x quantity) for open
+        contracts by how soon delivery is due — a treasury planning view."""
+        today = dt.date.today()
+        buckets = {"due": 0.0, "0_30": 0.0, "31_60": 0.0, "61_90": 0.0, "90_plus": 0.0}
+        counts = {k: 0 for k in buckets}
+        contracts = self.state_obj.get("contracts", {}) or {}
+        fx_mode_sel = getattr(self, "_hd_fx_mode_var", None)
+        fx_mode = fx_mode_sel.get() if fx_mode_sel else "live"
+        for cid, c in contracts.items():
+            if (c.get("status") or "Open").strip() == "Closed":
+                continue
+            if not self._home_contract_matches_filter(c, commodity):
+                continue
+            metrics = self._hd_cost_for_contract(cid, c, use_latest_fx=True, fx_mode=fx_mode)
+            qty = to_float(metrics.get("qty"), 0.0) or 0.0
+            own_after = metrics.get("own_after")
+            if not qty or own_after is None:
+                continue
+            cash = own_after * qty
+            dd = parse_date_flex(c.get("delivery_date") or c.get("storage_start") or "")
+            if dd is None:
+                key = "90_plus"
+            else:
+                days = (dd - today).days
+                if days < 0:
+                    key = "due"
+                elif days <= 30:
+                    key = "0_30"
+                elif days <= 60:
+                    key = "31_60"
+                elif days <= 90:
+                    key = "61_90"
+                else:
+                    key = "90_plus"
+            buckets[key] += cash
+            counts[key] += 1
+        return {"buckets": buckets, "counts": counts, "total": sum(buckets.values())}
+
+    def _home_category_rollup(self):
+        """Per-commodity spend/saving rollup with a YTD vs prior-YTD (YoY)
+        comparison — a one-table procurement P&L by category."""
+        today = dt.date.today()
+        year_start = dt.date(today.year, 1, 1)
+        prior_year_start = dt.date(today.year - 1, 1, 1)
+        try:
+            prior_year_same_day = dt.date(today.year - 1, today.month, today.day)
+        except ValueError:
+            prior_year_same_day = dt.date(today.year - 1, 2, 28)
+        rows = []
+        for comm in self._home_commodity_options():
+            metrics = self._home_exec_metrics(comm, fx_mode="live")
+            comm_rows, _t = self._sv_collect_savings_rows(comm, "All", "All", "Closed")
+            ytd = 0.0
+            prior_ytd = 0.0
+            for row in comm_rows:
+                dd = parse_date_flex(row.get("realized_date") or row.get("delivery_date") or "")
+                value = to_float(row.get("total_sav"), None)
+                if dd is None or value is None:
+                    continue
+                if year_start <= dd <= today:
+                    ytd += value
+                elif prior_year_start <= dd <= prior_year_same_day:
+                    prior_ytd += value
+            yoy_pct = ((ytd - prior_ytd) / abs(prior_ytd) * 100.0) if prior_ytd else None
+            rows.append({
+                "commodity": comm,
+                "closed_qty": metrics["closed_qty"],
+                "realized_saving": metrics["realized_saving"],
+                "realized_per_mt": metrics["realized_per_mt"],
+                "open_qty": metrics["open_qty"],
+                "open_position": metrics["open_position"],
+                "ytd_saving": ytd,
+                "prior_ytd_saving": prior_ytd,
+                "yoy_pct": yoy_pct,
+            })
+        return rows
+
+    def _home_open_mtm_trend_series(self, commodity="ALL", days=60):
+        """Daily total open-MTM edge from the stored open_mtm_daily ledger —
+        feeds the Home Open Exposure Trend chart."""
+        history = self.state_obj.get("open_mtm_daily", []) or []
+        selected = (commodity or "ALL").strip().upper()
+        by_date = {}
+        for rec in history:
+            if not isinstance(rec, dict):
+                continue
+            if selected != "ALL" and (rec.get("base_commodity") or "").upper() != selected:
+                continue
+            d = rec.get("date")
+            val = to_float(rec.get("total_saving_egp"), None)
+            if not d or val is None:
+                continue
+            by_date[d] = by_date.get(d, 0.0) + val
+        keys = sorted(by_date)[-days:]
+        return [(k, by_date[k]) for k in keys]
+
     def _home_select_commodity(self, commodity):
         """Filter the complete Home portfolio, not only the savings table."""
         label = (commodity or "All").strip().upper()
@@ -6746,6 +6902,10 @@ class App(tk.Tk):
             self.hd_kpi_coverage.set("—")
         self.hd_kpi_data_gaps.set(str(metrics["data_gaps"]))
         self._refresh_home_modern_panels(metrics)
+        try:
+            self._refresh_hd_exec_summary()
+        except Exception as exc:
+            log_exception(exc, "_refresh_home_executive_kpis:exec_summary")
 
 
     # ------------------------------------------------------------------
@@ -7158,6 +7318,232 @@ class App(tk.Tk):
             self._hd_modern_quality_lbl.configure(fg="#fb7185")
             self._hd_modern_quality_note.set(f"{gaps} data gaps materially reduce dashboard confidence.")
 
+    def _refresh_hd_exec_summary(self):
+        """Refresh the Executive Summary panel: YTD target pace, FX hedge
+        cover, cash calendar, open-MTM trend and category performance."""
+        if not hasattr(self, "hd_rollup_tree"):
+            return
+        selected = self._home_active_commodity()
+
+        # ── YTD target progress ─────────────────────────────────────────
+        ytd = self._home_ytd_target_progress(selected)
+        canvas = self.hd_ytd_progress_canvas
+        canvas.delete("all")
+        cw = canvas.winfo_width()
+        if cw <= 1:
+            cw = int(canvas.cget("width") or 400)
+        ch = int(canvas.cget("height") or 20)
+        if ytd["target"]:
+            pct = max(0.0, ytd["pct_of_target"] or 0.0)
+            self.hd_ytd_target_var.set(
+                f"YTD Realised {self._home_compact_money(ytd['ytd_saving'])} of "
+                f"{self._home_compact_money(ytd['target'])} target ({pct:.0f}%) — {ytd['year']}")
+            fill_w = max(0.0, min(1.0, pct / 100.0)) * cw
+            colour = "#16a34a" if pct >= 100 else ("#2563eb" if pct >= 60 else "#f59e0b")
+            canvas.create_rectangle(0, 0, cw, ch, fill="#e2e8f0", outline="")
+            canvas.create_rectangle(0, 0, fill_w, ch, fill=colour, outline="")
+            canvas.create_text(cw / 2, ch / 2, text=f"{pct:.0f}%",
+                               fill="#0f172a", font=("Segoe UI", 9, "bold"))
+            if ytd["pace_projection"] is not None:
+                diff = ytd["pace_projection"] - ytd["target"]
+                verdict = "on pace to beat" if diff >= 0 else "on pace to miss"
+                self.hd_ytd_pace_var.set(
+                    f"At the current run rate, {ytd['year']} closes at ~"
+                    f"{self._home_compact_money(ytd['pace_projection'])} — {verdict} target by "
+                    f"{self._home_compact_money(abs(diff))}.")
+            else:
+                self.hd_ytd_pace_var.set("")
+        else:
+            self.hd_ytd_target_var.set(
+                f"YTD Realised {self._home_compact_money(ytd['ytd_saving'])} — "
+                f"no annual target set (Setup & Data → Decision Settings).")
+            self.hd_ytd_pace_var.set("")
+
+        # ── Open-MTM trend chart ────────────────────────────────────────
+        series = self._home_open_mtm_trend_series(selected, days=60)
+        vals = [v for _d, v in series]
+        labels = []
+        if series:
+            step = max(1, len(series) // 4)
+            for idx, (d, _v) in enumerate(series):
+                labels.append(d[5:] if (idx % step == 0 or idx == len(series) - 1) else "")
+        positive = (vals[-1] if vals else 0.0) >= 0
+        self._home_draw_line_chart(self.hd_open_trend_canvas, vals, labels, positive=positive)
+
+        # ── FX hedge coverage ────────────────────────────────────────────
+        hedge = self._home_fx_hedge_coverage(selected)
+        if hedge["pct"] is not None:
+            self.hd_hedge_pct_var.set(
+                f"{hedge['pct']:.0f}%  ({hedge['hedged_qty']:,.0f} / {hedge['open_qty']:,.0f} MT)")
+        else:
+            self.hd_hedge_pct_var.set("—  no open exposure")
+
+        # ── Cash calendar ────────────────────────────────────────────────
+        cal = self._home_cash_calendar(selected)
+        b = cal["buckets"]
+        due_txt = f"  (+{self._home_compact_money(b['due'])} overdue)" if b.get("due") else ""
+        self.hd_cash_30_var.set(self._home_compact_money(b["0_30"]) + due_txt)
+        self.hd_cash_60_var.set(self._home_compact_money(b["31_60"]))
+        self.hd_cash_90_var.set(self._home_compact_money(b["61_90"]))
+
+        # ── Category performance rollup ─────────────────────────────────
+        for i in self.hd_rollup_tree.get_children():
+            self.hd_rollup_tree.delete(i)
+        for r in self._home_category_rollup():
+            yoy_txt = f"{r['yoy_pct']:+.0f}% vs last yr" if r["yoy_pct"] is not None else "no prior-year base"
+            self.hd_rollup_tree.insert("", "end", values=(
+                r["commodity"],
+                f"{r['closed_qty']:,.0f}",
+                self._home_compact_money(r["realized_saving"]),
+                f"EGP {r['realized_per_mt']:+,.0f}" if r["realized_per_mt"] is not None else "—",
+                f"{r['open_qty']:,.0f}",
+                self._home_compact_money(r["open_position"]) if r["open_qty"] else "—",
+                self._home_compact_money(r["ytd_saving"]),
+                yoy_txt,
+            ))
+
+    def _export_ceo_brief_pdf(self):
+        """Export a single-page executive brief: headline KPIs, YTD target
+        pace, FX cover, cash calendar, category performance and the top
+        open alerts — everything a CEO needs without opening the app."""
+        if not _need_reportlab():
+            return
+        try:
+            fp = filedialog.asksaveasfilename(
+                initialdir=get_default_export_dir(),
+                initialfile=f"CEO_Brief_{now_ts()[:10]}.pdf",
+                defaultextension=".pdf", filetypes=[("PDF", "*.pdf")],
+                title="Export CEO Brief")
+            if not fp:
+                return
+
+            selected = self._home_active_commodity()
+            scope_label = "All commodities" if selected == "ALL" else selected
+            fx_mode_sel = getattr(self, "_hd_fx_mode_var", None)
+            fx_mode = fx_mode_sel.get() if fx_mode_sel else "live"
+            metrics = self._home_exec_metrics(selected, fx_mode=fx_mode)
+            ytd = self._home_ytd_target_progress(selected)
+            hedge = self._home_fx_hedge_coverage(selected)
+            cal = self._home_cash_calendar(selected)
+            rollup = self._home_category_rollup()
+            try:
+                alerts = self.evaluate_alerts()
+            except Exception:
+                alerts = []
+            priority_order = {"High": 0, "Medium": 1, "Low": 2}
+            alerts = sorted(alerts, key=lambda a: priority_order.get(a.get("priority", "Low"), 3))[:6]
+
+            c = canvas.Canvas(fp, pagesize=A4)
+            w, h = A4
+            M_LEFT, M_RIGHT, M_TOP, M_BOTTOM = 1.5 * cm, 1.5 * cm, 1.8 * cm, 1.8 * cm
+
+            def header(title):
+                c.setFont("Helvetica-Bold", 14)
+                c.drawString(M_LEFT, h - M_TOP, title)
+                c.setFont("Helvetica", 8.5)
+                c.drawString(M_LEFT, h - M_TOP - 0.55 * cm,
+                            f"Generated: {now_ts()}  |  Scope: {scope_label}")
+                c.line(M_LEFT, h - M_TOP - 0.75 * cm, w - M_RIGHT, h - M_TOP - 0.75 * cm)
+                return h - M_TOP - 1.3 * cm
+
+            def ensure_room(y, needed=0.6 * cm, title="CEO Brief (continued)"):
+                if y < M_BOTTOM + needed:
+                    c.showPage()
+                    return header(title)
+                return y
+
+            def section(y, title):
+                y = ensure_room(y, 1.0 * cm)
+                c.setFont("Helvetica-Bold", 10.5)
+                c.drawString(M_LEFT, y, title)
+                return y - 0.55 * cm
+
+            def kv_row(y, k, v):
+                y = ensure_room(y)
+                c.setFont("Helvetica-Bold", 9.5)
+                c.drawString(M_LEFT, y, str(k))
+                c.setFont("Helvetica", 9.5)
+                c.drawRightString(w - M_RIGHT, y, str(v))
+                return y - 0.5 * cm
+
+            y = header("Prometheus Procurement — CEO Brief")
+
+            y = section(y, "Headline")
+            y = kv_row(y, "Realised savings (closed contracts)", self._home_compact_money(metrics["realized_saving"]))
+            y = kv_row(y, "Open indicative exposure (vs local)", self._home_compact_money(metrics["open_position"]))
+            y = kv_row(y, "Open quantity", f"{metrics['open_qty']:,.0f} MT · {metrics['open_count']} contracts")
+            y = kv_row(y, "Lowest coverage",
+                       f"{metrics['coverage_days']:.0f} days" if metrics["coverage_days"] is not None else "—")
+            y = kv_row(y, "Data gaps", str(metrics["data_gaps"]))
+            y -= 0.2 * cm
+
+            y = section(y, "Year-to-Date Target")
+            if ytd["target"]:
+                pct = ytd["pct_of_target"] or 0.0
+                y = kv_row(y, f"YTD realised vs {ytd['year']} target",
+                          f"{self._home_compact_money(ytd['ytd_saving'])} of "
+                          f"{self._home_compact_money(ytd['target'])} ({pct:.0f}%)")
+                if ytd["pace_projection"] is not None:
+                    y = kv_row(y, "Run-rate projection to year end",
+                              self._home_compact_money(ytd["pace_projection"]))
+            else:
+                y = kv_row(y, "YTD realised savings", self._home_compact_money(ytd["ytd_saving"]))
+                y = kv_row(y, "Annual target", "Not set")
+            y -= 0.2 * cm
+
+            y = section(y, "FX Cover & Cash Due")
+            y = kv_row(y, "FX hedge coverage (Form 4 secured)",
+                       f"{hedge['pct']:.0f}% of {hedge['open_qty']:,.0f} MT" if hedge["pct"] is not None else "—")
+            b = cal["buckets"]
+            y = kv_row(y, "Cash due (overdue / ≤30d)",
+                       f"{self._home_compact_money(b['due'])} / {self._home_compact_money(b['0_30'])}")
+            y = kv_row(y, "Cash due (31-60d / 61-90d)",
+                       f"{self._home_compact_money(b['31_60'])} / {self._home_compact_money(b['61_90'])}")
+            y -= 0.2 * cm
+
+            y = section(y, "Category Performance (commodity, YoY vs last year)")
+            c.setFont("Helvetica-Bold", 8.5)
+            headers = ["Commodity", "Closed MT", "Realised", "Open MT", "Indicative", "YTD", "YoY"]
+            x_positions = [M_LEFT, M_LEFT + 2.6*cm, M_LEFT + 5.0*cm, M_LEFT + 8.0*cm,
+                           M_LEFT + 10.2*cm, M_LEFT + 13.0*cm, M_LEFT + 15.4*cm]
+            y = ensure_room(y, 0.8 * cm)
+            for x, htext in zip(x_positions, headers):
+                c.drawString(x, y, htext)
+            y -= 0.45 * cm
+            c.setFont("Helvetica", 8.2)
+            for r in rollup:
+                y = ensure_room(y, 0.55 * cm, "Category Performance (continued)")
+                yoy_txt = f"{r['yoy_pct']:+.0f}%" if r["yoy_pct"] is not None else "—"
+                vals = [
+                    r["commodity"], f"{r['closed_qty']:,.0f}",
+                    self._home_compact_money(r["realized_saving"]),
+                    f"{r['open_qty']:,.0f}",
+                    self._home_compact_money(r["open_position"]) if r["open_qty"] else "—",
+                    self._home_compact_money(r["ytd_saving"]), yoy_txt,
+                ]
+                for x, val in zip(x_positions, vals):
+                    c.drawString(x, y, str(val))
+                y -= 0.42 * cm
+            y -= 0.2 * cm
+
+            y = section(y, "Top Open Alerts")
+            if not alerts:
+                y = kv_row(y, "Status", "No urgent alerts in the selected scope")
+            else:
+                for a in alerts:
+                    y = ensure_room(y, 0.6 * cm, "Top Open Alerts (continued)")
+                    c.setFont("Helvetica-Bold", 8.5)
+                    c.drawString(M_LEFT, y, f"[{a.get('priority', '')}]")
+                    c.setFont("Helvetica", 8.5)
+                    c.drawString(M_LEFT + 1.8 * cm, y, (a.get("issue") or "")[:100])
+                    y -= 0.42 * cm
+
+            c.save()
+            messagebox.showinfo(APP_NAME, f"CEO Brief exported.\n\n{fp}")
+        except Exception as e:
+            log_exception(e, "_export_ceo_brief_pdf")
+            messagebox.showerror(APP_NAME, f"CEO Brief export failed: {e}")
+
     def _build_home_dashboard(self):
         """Build a premium Home tab command center.
 
@@ -7343,9 +7729,9 @@ class App(tk.Tk):
         main = tk.Frame(body, bg="#06101d")
         main.grid(row=0, column=1, sticky="nsew", padx=(0, 12), pady=12)
         main.columnconfigure(0, weight=1)
-        main.rowconfigure(6, weight=1)
         main.rowconfigure(7, weight=1)
         main.rowconfigure(8, weight=1)
+        main.rowconfigure(9, weight=1)
 
         self.hd_market_status_var = tk.StringVar(value="Auto-refresh every 30 minutes. Manual refresh is always available.")
         self.hd_formula_rule_var = tk.StringVar(value="Open CORN MTM CIF = (Latest CBOT + Contract Premium) × 0.3937 · cash landed basis, excl. finance carry (Finance-sheet convention)")
@@ -7355,6 +7741,7 @@ class App(tk.Tk):
         hero.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         hero.columnconfigure(0, weight=1)
         hero.columnconfigure(1, weight=0)
+        hero.columnconfigure(2, weight=0)
         tk.Label(hero, text="CEO Dashboard", bg="#07111f", fg="#f8fafc",
                  font=("Segoe UI", 18, "bold")).grid(row=0, column=0, sticky="w", padx=16, pady=(14, 0))
         tk.Label(hero, text="Executive overview of procurement performance",
@@ -7363,11 +7750,16 @@ class App(tk.Tk):
                  bg="#07111f", fg="#60a5fa", font=("Segoe UI", 9, "bold")).grid(row=2, column=0, sticky="w", padx=16, pady=(0, 4))
         tk.Label(hero, textvariable=self.hd_market_status_var,
                  bg="#07111f", fg="#9fb3c8", font=("Segoe UI", 9)).grid(row=3, column=0, sticky="w", padx=16, pady=(0, 14))
+        tk.Button(hero, text="📄 CEO Brief (PDF)",
+                  command=self._export_ceo_brief_pdf,
+                  bg="#0f766e", fg="#ecfeff", relief="flat", cursor="hand2",
+                  font=("Segoe UI", 9, "bold"), padx=16, pady=8).grid(
+                      row=0, column=1, rowspan=4, sticky="e", padx=(16, 8), pady=16)
         tk.Button(hero, text="🔄 Refresh Everything",
                   command=lambda: self.refresh_all(fetch_market=True),
                   bg="#2563eb", fg="white", relief="flat", cursor="hand2",
                   font=("Segoe UI", 9, "bold"), padx=16, pady=8).grid(
-                      row=0, column=1, rowspan=4, sticky="e", padx=16, pady=16)
+                      row=0, column=2, rowspan=4, sticky="e", padx=16, pady=16)
 
         # KPI cards: visually separated open MTM and realized numbers.
         kpi_frame = tk.Frame(main, bg="#06101d")
@@ -7468,12 +7860,86 @@ class App(tk.Tk):
         self._hd_reco_lbl.grid(row=4, column=0, sticky="w", padx=12,
                                pady=(0, 8))
 
+        # ── Executive Summary: YTD target pace, FX cover, cash calendar,
+        # open-MTM trend and a category (commodity) performance rollup with
+        # a year-over-year realised comparison. Everything here is derived
+        # from data already captured elsewhere on Home — no new inputs.
+        exec_summary = ttk.LabelFrame(
+            main,
+            text="🎯 Executive Summary — YTD target, FX cover, cash due, category performance",
+            padding=8)
+        exec_summary.grid(row=4, column=0, sticky="ew", pady=(0, 10))
+        exec_summary.columnconfigure(0, weight=2)
+        exec_summary.columnconfigure(1, weight=1)
+
+        es_left = tk.Frame(exec_summary, bg="#ffffff")
+        es_left.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        es_left.columnconfigure(0, weight=1)
+        self.hd_ytd_target_var = tk.StringVar(
+            value="Set an annual savings target in Setup & Data → Decision Settings.")
+        ttk.Label(es_left, textvariable=self.hd_ytd_target_var,
+                  font=(FONT_FAMILY, FS_BODY, "bold"),
+                  wraplength=560, justify="left").grid(row=0, column=0, sticky="w")
+        self.hd_ytd_progress_canvas = tk.Canvas(
+            es_left, height=20, width=400, bg="#e2e8f0", highlightthickness=0)
+        self.hd_ytd_progress_canvas.grid(row=1, column=0, sticky="ew", pady=(4, 4))
+        self.hd_ytd_pace_var = tk.StringVar(value="")
+        ttk.Label(es_left, textvariable=self.hd_ytd_pace_var,
+                  font=(FONT_FAMILY, FS_BODY), foreground=CLR["muted"],
+                  wraplength=560, justify="left").grid(row=2, column=0, sticky="w", pady=(0, 8))
+        ttk.Label(es_left, text="Open Exposure Trend — daily open MTM edge (last 60 stored days)",
+                  font=(FONT_FAMILY, FS_BODY, "bold")).grid(row=3, column=0, sticky="w")
+        self.hd_open_trend_canvas = tk.Canvas(
+            es_left, height=110, width=560, bg="#0b1728", highlightthickness=0)
+        self.hd_open_trend_canvas.grid(row=4, column=0, sticky="ew", pady=(4, 0))
+
+        es_right = tk.Frame(exec_summary, bg="#ffffff")
+        es_right.grid(row=0, column=1, sticky="nsew")
+        es_right.columnconfigure(0, weight=1)
+        es_right.columnconfigure(1, weight=1)
+
+        def _es_tile(row, col, title, var):
+            box = tk.Frame(es_right, bg="#f4f7fb", highlightthickness=1,
+                           highlightbackground="#d7e2ee")
+            box.grid(row=row, column=col, sticky="nsew", padx=3, pady=3)
+            tk.Label(box, text=title, bg="#f4f7fb", fg="#5f6b7a",
+                     font=("Segoe UI", 8, "bold")).pack(anchor="w", padx=8, pady=(6, 0))
+            tk.Label(box, textvariable=var, bg="#f4f7fb", fg="#0f172a",
+                     font=("Segoe UI", 12, "bold")).pack(anchor="w", padx=8, pady=(0, 6))
+
+        self.hd_hedge_pct_var = tk.StringVar(value="—")
+        self.hd_cash_30_var   = tk.StringVar(value="—")
+        self.hd_cash_60_var   = tk.StringVar(value="—")
+        self.hd_cash_90_var   = tk.StringVar(value="—")
+        _es_tile(0, 0, "FX Hedge Coverage", self.hd_hedge_pct_var)
+        _es_tile(0, 1, "Cash Due ≤ 30d", self.hd_cash_30_var)
+        _es_tile(1, 0, "Cash Due 31-60d", self.hd_cash_60_var)
+        _es_tile(1, 1, "Cash Due 61-90d", self.hd_cash_90_var)
+        ttk.Label(es_right,
+                  text="Hedge cover = open MT with Form 4 FX secured. "
+                       "Cash due = estimated own-after landed cost by delivery window.",
+                  font=(FONT_FAMILY, 8), foreground=CLR["muted"],
+                  wraplength=260, justify="left").grid(
+                      row=2, column=0, columnspan=2, sticky="w", padx=3, pady=(4, 0))
+
+        ttk.Label(exec_summary,
+                  text="Category Performance — by commodity, with year-over-year realised comparison",
+                  font=(FONT_FAMILY, FS_BODY, "bold")).grid(
+                      row=1, column=0, columnspan=2, sticky="w", pady=(10, 2))
+        roll_cols = [
+            ("Commodity", 100, "w"), ("Closed_MT", 90, "e"), ("Realised_EGP", 120, "e"),
+            ("Saving_MT", 95, "e"), ("Open_MT", 90, "e"), ("Indicative_EGP", 120, "e"),
+            ("YTD_EGP", 120, "e"), ("YoY_vs_last_year", 130, "e"),
+        ]
+        self.hd_rollup_tree = self._hd_make_tree(exec_summary, roll_cols, height=6, row=2)
+        self.hd_rollup_tree.master.grid_configure(columnspan=2)
+
         # V8.2: market intelligence beside CBOT — curve + movement, not just latest price.
         market_intel = ttk.LabelFrame(
             main,
             text="📈 Futures & Market Movement — free/public prototype feeds; source + as-of shown",
             padding=8)
-        market_intel.grid(row=4, column=0, sticky="ew", pady=(0, 10))
+        market_intel.grid(row=5, column=0, sticky="ew", pady=(0, 10))
         market_intel.columnconfigure(0, weight=1)
         market_intel.rowconfigure(1, weight=1)
         market_intel.rowconfigure(2, weight=1)
@@ -7517,7 +7983,7 @@ class App(tk.Tk):
 
         # Action Center
         action = ttk.LabelFrame(main, text="🚨 Action Center — highest priority issues first", padding=8)
-        action.grid(row=5, column=0, sticky="ew", pady=(0, 10))
+        action.grid(row=6, column=0, sticky="ew", pady=(0, 10))
         action.columnconfigure(0, weight=1)
         action.rowconfigure(0, weight=1)
         action_cols = [("Priority", 90, "w"), ("Issue", 390, "w"), ("Action", 560, "w")]
@@ -7528,7 +7994,7 @@ class App(tk.Tk):
 
         # Open exposure table
         exp = ttk.LabelFrame(main, text="Open Mark-to-Market — CIF result + live CBOT formula on every refresh", padding=8)
-        exp.grid(row=6, column=0, sticky="nsew", pady=(0, 10))
+        exp.grid(row=7, column=0, sticky="nsew", pady=(0, 10))
         exp.columnconfigure(0, weight=1)
         exp.rowconfigure(2, weight=1)
 
@@ -7631,7 +8097,7 @@ class App(tk.Tk):
 
         # Realized savings scorecard — with commodity filter
         sc = ttk.LabelFrame(main, text="💰 Realized Savings Scorecard — CLOSED contracts only", padding=8)
-        sc.grid(row=7, column=0, sticky="nsew", pady=(0, 10))
+        sc.grid(row=8, column=0, sticky="nsew", pady=(0, 10))
         sc.columnconfigure(0, weight=1)
         sc.rowconfigure(1, weight=1)
 
@@ -7676,7 +8142,7 @@ class App(tk.Tk):
 
         # Scenario engine
         se = ttk.LabelFrame(main, text="🎯 Scenario Engine — edit premium/CIF/fees/freight and compare instantly", padding=8)
-        se.grid(row=8, column=0, sticky="nsew", pady=(0, 10))
+        se.grid(row=9, column=0, sticky="nsew", pady=(0, 10))
         se.columnconfigure(0, weight=1)
         se.rowconfigure(1, weight=1)
 
@@ -11573,6 +12039,33 @@ class App(tk.Tk):
                   text="Savings within ± this threshold are flagged 'Marginal' rather than a firm Import/Local call.",
                   foreground=CLR["muted"]).grid(row=1, column=0, columnspan=3,
                                                 sticky="w", pady=(4, 0))
+
+        ttk.Label(settings, text="Annual savings target (EGP)").grid(
+            row=2, column=0, sticky="w", pady=(8, 0), padx=(0, 8))
+        self._annual_target_var = tk.StringVar(
+            value=str(self.state_obj.get("ui", {}).get("annual_savings_target_egp") or ""))
+        ttk.Entry(settings, textvariable=self._annual_target_var, width=16).grid(
+            row=2, column=1, sticky="w", padx=(0, 8), pady=(8, 0))
+
+        def _save_annual_target():
+            ui = self.state_obj.setdefault("ui", {})
+            v = to_float(self._annual_target_var.get(), None)
+            if v is None or v <= 0:
+                messagebox.showerror(APP_NAME, "Enter a positive annual savings target in EGP.")
+                return
+            ui["annual_savings_target_egp"] = round(v, 2)
+            save_state(self.state_obj)
+            messagebox.showinfo(APP_NAME, "Annual savings target saved.")
+            try:
+                self._refresh_hd_exec_summary()
+            except Exception as exc:
+                log_exception(exc, "_save_annual_target:refresh")
+        ttk.Button(settings, text="Save Target", command=_save_annual_target).grid(
+            row=2, column=2, sticky="w", pady=(8, 0))
+        ttk.Label(settings,
+                  text="Drives the YTD Target Progress bar on Home. Compared against closed-contract realised savings for the calendar year.",
+                  foreground=CLR["muted"]).grid(row=2, column=3, columnspan=2,
+                                                sticky="w", padx=(8, 0), pady=(8, 0))
 
         ttk.Label(settings, text="Alert: CBOT day move ≥ (%)").grid(
             row=3, column=0, sticky="w", pady=(8, 0), padx=(0, 8))
