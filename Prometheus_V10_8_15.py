@@ -11607,7 +11607,7 @@ class App(tk.Tk):
                 ("Supplier",      r["supplier"],           None),
                 ("Commodity",     r["commodity"],          None),
                 ("Origin",        r["origin"],             None),
-                ("Vessel",        r["vessel"] or "—",      None),
+                ("Vessel",        r.get("vessel") or "—",  None),
                 ("Quantity (MT)", r["qty_mt"],             "#,##0"),
             ]
             params_right = [
@@ -11760,22 +11760,21 @@ class App(tk.Tk):
             OA_REF = f"$E${ROW_OA}"     # absolute ref to own-after input cell
             QTY_REF = f"$E${ROW_QTY}"  # absolute ref to qty cell
 
-            pre_fill = PatternFill("solid", fgColor="F5F5F5")
-            pre_font = Font(name="Calibri", size=10, color="AAAAAA", italic=True)
-
-            # Track first post-delivery row for cumulative formula
+            # Track first row for the cumulative-saving formula. run_performance()
+            # only produces post-delivery observations (post_pairs), so every
+            # row here is post-delivery — there is no pre-delivery row shape.
             first_post_dr = None
 
-            for di, row_d in enumerate(r["rows"]):
-                dr     = DATA_FIRST + di
-                is_pre = row_d.get("is_pre", False)
+            for di, row_t in enumerate(r["rows"]):
+                dr = DATA_FIRST + di
+                label, local, _oa, _sav_mt, _cum_avg, _signal = row_t
 
                 # Col A: Date
-                c = ws.cell(dr, 1, row_d["date"])
+                c = ws.cell(dr, 1, label)
                 c.alignment = left_al
 
                 # Col B: Local price (raw)
-                c = ws.cell(dr, 2, row_d["local"])
+                c = ws.cell(dr, 2, local)
                 c.number_format = "#,##0"
                 c.alignment = right_al
 
@@ -11791,50 +11790,30 @@ class App(tk.Tk):
                 c.alignment = right_al
                 c.font = bold
 
-                # Col E: Cumulative — blank/dash for pre-delivery
-                if is_pre:
-                    c = ws.cell(dr, 5, "—")
-                    c.alignment = center
-                elif first_post_dr is None:
-                    # First post-delivery row: start fresh cumulative
+                # Col E: Cumulative saving
+                if first_post_dr is None:
                     first_post_dr = dr
                     c = ws.cell(dr, 5, f"=D{dr}*{QTY_REF}")
-                    c.number_format = "+#,##0;[Red]-#,##0"
-                    c.alignment = right_al
                 else:
                     c = ws.cell(dr, 5, f"=E{dr-1}+D{dr}*{QTY_REF}")
-                    c.number_format = "+#,##0;[Red]-#,##0"
-                    c.alignment = right_al
+                c.number_format = "+#,##0;[Red]-#,##0"
+                c.alignment = right_al
 
                 # Col F: Signal
-                if is_pre:
-                    c = ws.cell(dr, 6, "pre-delivery")
-                    c.alignment = center
-                else:
-                    c = ws.cell(dr, 6)
-                    c.value = (f'=IF(D{dr}>200,"BUY / PRICE",'
-                               f'IF(D{dr}>0,"MARGINAL","WAIT"))')
-                    c.alignment = center
+                c = ws.cell(dr, 6)
+                c.value = (f'=IF(D{dr}>200,"BUY / PRICE",'
+                           f'IF(D{dr}>0,"MARGINAL","WAIT"))')
+                c.alignment = center
 
                 # Col G: Gap %
-                if is_pre:
-                    c = ws.cell(dr, 7, "—")
-                    c.alignment = center
-                else:
-                    c = ws.cell(dr, 7, f"=IF(B{dr}<>0,D{dr}/B{dr},0)")
-                    c.number_format = "0.0%;[Red]-0.0%"
-                    c.alignment = center
+                c = ws.cell(dr, 7, f"=IF(B{dr}<>0,D{dr}/B{dr},0)")
+                c.number_format = "0.0%;[Red]-0.0%"
+                c.alignment = center
 
                 # Row styling
                 for col_n in range(1, 8):
                     cell = ws.cell(dr, col_n)
                     cell.border = brd
-                    if is_pre:
-                        # Only override if not already set to something specific
-                        if cell.font.color.rgb in ("000000", "FF000000",
-                                                    "555555", "FF555555"):
-                            cell.font = pre_font
-                        cell.fill = pre_fill
 
             # ── Average row — post-delivery only ─────────────────────────
             AVG_ROW = DATA_LAST + 1
@@ -11876,41 +11855,39 @@ class App(tk.Tk):
 
             # Darker red fill on entire row when saving < 0
             # (applied via conditional formatting on col D, affecting A:G)
-            neg_dxf = DifferentialStyle(
-                fill=PatternFill(patternType="solid", bgColor="FDECEA"))
-            pos_dxf = DifferentialStyle(
-                fill=PatternFill(patternType="solid", bgColor="E8F7E8"))
+            # FormulaRule() is a factory function, not the Rule class — it
+            # builds its own DifferentialStyle from font/border/fill kwargs
+            # and does not accept a pre-built dxf= argument.
+            neg_fill = PatternFill(patternType="solid", bgColor="FDECEA")
+            pos_fill = PatternFill(patternType="solid", bgColor="E8F7E8")
 
             from openpyxl.formatting.rule import FormulaRule
             ws.conditional_formatting.add(
                 f"A{DATA_FIRST}:G{DATA_LAST}",
                 FormulaRule(formula=[f"$D{DATA_FIRST}<0"],
-                            dxf=neg_dxf, stopIfTrue=False))
+                            fill=neg_fill, stopIfTrue=False))
             ws.conditional_formatting.add(
                 f"A{DATA_FIRST}:G{DATA_LAST}",
                 FormulaRule(formula=[f"$D{DATA_FIRST}>200"],
-                            dxf=pos_dxf, stopIfTrue=False))
+                            fill=pos_fill, stopIfTrue=False))
 
             # Signal column: green for BUY, red for WAIT
-            buy_dxf  = DifferentialStyle(
-                font=Font(name="Calibri", bold=True, color="1A7A1A"))
-            wait_dxf = DifferentialStyle(
-                font=Font(name="Calibri", bold=True, color="C0392B"))
-            marg_dxf = DifferentialStyle(
-                font=Font(name="Calibri", bold=True, color="B36000"))
+            buy_font  = Font(name="Calibri", bold=True, color="1A7A1A")
+            wait_font = Font(name="Calibri", bold=True, color="C0392B")
+            marg_font = Font(name="Calibri", bold=True, color="B36000")
 
             ws.conditional_formatting.add(
                 f"F{DATA_FIRST}:F{DATA_LAST}",
                 FormulaRule(formula=[f'F{DATA_FIRST}="BUY / PRICE"'],
-                            dxf=buy_dxf))
+                            font=buy_font))
             ws.conditional_formatting.add(
                 f"F{DATA_FIRST}:F{DATA_LAST}",
                 FormulaRule(formula=[f'F{DATA_FIRST}="WAIT"'],
-                            dxf=wait_dxf))
+                            font=wait_font))
             ws.conditional_formatting.add(
                 f"F{DATA_FIRST}:F{DATA_LAST}",
                 FormulaRule(formula=[f'F{DATA_FIRST}="MARGINAL"'],
-                            dxf=marg_dxf))
+                            font=marg_font))
 
             # ── Line chart ────────────────────────────────────────────
             chart = LineChart()
@@ -12055,19 +12032,26 @@ class App(tk.Tk):
 
             # ── Contract summary box ──────────────────────────────────
             row = 5
+            # r["rows"] entries are (label, local, oa, sav_mt, cum_avg, signal);
+            # label is an ISO date with an optional "  ◀ DELIVERY"/"  ◀ TODAY"
+            # marker appended, so split() isolates the date.
+            row_dates = [row_t[0].split()[0] for row_t in r["rows"]]
+            d_from = row_dates[0] if row_dates else "—"
+            d_to = row_dates[-1] if row_dates else "—"
+            n_points = len(r["rows"])
             summary_items = [
                 ("Contract Ref",   r["contract_ref"]),
                 ("Supplier",       r["supplier"]),
                 ("Commodity",      r["commodity"]),
                 ("Origin",         r["origin"]),
-                ("Vessel",         r["vessel"] or "—"),
+                ("Vessel",         r.get("vessel") or "—"),
                 ("Quantity (MT)",  r["qty_mt"]),
                 ("CIF Price",      f"${r['cif_usd']:.2f}/MT" if r["cif_usd"] else "—"),
                 ("Delivery FX",    f"{r['delivery_fx']:.4f} EGP/$" if r["delivery_fx"] else "—"),
                 ("Discharge",      f"EGP {r['discharge']:,.0f}/MT" if r["discharge"] else "—"),
                 ("Clearance",      f"EGP {r['clearance']:,.0f}/MT" if r["clearance"] else "—"),
                 ("Own-after Cost", f"EGP {r['own_after_egp']:,.0f}/MT"),
-                ("Analysis Period",f"{r['d_from']}  →  {r['d_to']}  ({r['n_points']} price points)"),
+                ("Analysis Period",f"{d_from}  →  {d_to}  ({n_points} price points)"),
             ]
 
             ws.merge_cells(f"A{row}:B{row}")
@@ -12100,9 +12084,9 @@ class App(tk.Tk):
             kpi_row = row + len(left_items) + 1
             kpis = [
                 ("Own-after (EGP/MT)",  r["own_after_egp"],   num_fmt,  False),
-                ("Avg Local (EGP/MT)",  r["avg_local"],        num_fmt,  False),
+                ("Avg Local (EGP/MT)",  r["avg_local_egp"],    num_fmt,  False),
                 ("Avg Saving/MT",       r["avg_sav_mt"],       num_fmt,  True),
-                ("Total Saving (EGP)",  r["cum_sav_egp"],      num_fmt,  True),
+                ("Total Saving (EGP)",  r["total_saving"],     num_fmt,  True),
             ]
             ws.merge_cells(f"A{kpi_row}:H{kpi_row}")
             cell(kpi_row, 1, "KEY RESULTS",
@@ -12160,26 +12144,28 @@ class App(tk.Tk):
                 ws.column_dimensions[get_column_letter(ci)].width = width
             ws.row_dimensions[data_start].height = 30
 
-            # Data rows
+            # Data rows. r["rows"] entries are the same
+            # (label, local, oa, sav_mt, cum_avg, signal) tuples run_performance()
+            # produces for the formula-based sheet above.
             chart_local     = []
             chart_own_after = []
-            for di, row_d in enumerate(r["rows"]):
-                dr  = data_start + 1 + di
-                sav = row_d["sav_mt"]
-                gap = (sav / row_d["local"]) if row_d["local"] else None
+            for di, row_t in enumerate(r["rows"]):
+                dr = data_start + 1 + di
+                label, local, own_after, sav, cum_sav, signal = row_t
+                gap = (sav / local) if local else None
 
                 is_pos = sav >= 0
                 row_fill = pos_fill if sav > 200 else (
                            white   if sav > 0    else neg_fill)
 
                 values_to_write = [
-                    (row_d["date"],     None,      left_al),
-                    (row_d["local"],    num_fmt,   right),
-                    (row_d["own_after"],num_fmt,   right),
-                    (sav,               num_fmt,   right),
-                    (row_d["cum_sav"],  num_fmt,   right),
-                    (row_d["signal"],   None,      center),
-                    (gap,               pct_fmt,   center),
+                    (label,      None,      left_al),
+                    (local,      num_fmt,   right),
+                    (own_after,  num_fmt,   right),
+                    (sav,        num_fmt,   right),
+                    (cum_sav,    num_fmt,   right),
+                    (signal,     None,      center),
+                    (gap,        pct_fmt,   center),
                 ]
                 for ci, (val, fmt, aln) in enumerate(values_to_write, 1):
                     c = ws.cell(dr, ci, val)
@@ -12192,16 +12178,16 @@ class App(tk.Tk):
                     if fmt:
                         c.number_format = fmt
 
-                chart_local.append(row_d["local"])
-                chart_own_after.append(row_d["own_after"])
+                chart_local.append(local)
+                chart_own_after.append(own_after)
 
             # Average / total row
             avg_row = data_start + 1 + len(r["rows"])
-            cell(avg_row, 1, f"AVERAGE  ({r['n_points']} points)",
+            cell(avg_row, 1, f"AVERAGE  ({n_points} points)",
                  font=bold, fill=tot_fill, border=brd_h, alignment=left_al)
             for ci, val in enumerate([
-                r["avg_local"], r["own_after_egp"],
-                r["avg_sav_mt"], r["cum_sav_egp"], None, None
+                r["avg_local_egp"], r["own_after_egp"],
+                r["avg_sav_mt"], r["total_saving"], None, None
             ], 2):
                 c = ws.cell(avg_row, ci, val)
                 c.fill          = tot_fill
@@ -12220,10 +12206,10 @@ class App(tk.Tk):
             # Write chart series data
             ws.cell(data_start, chart_data_col,     "Local")
             ws.cell(data_start, chart_data_col + 1, "Own-after")
-            for di, row_d in enumerate(r["rows"]):
+            for di, (local, own_after) in enumerate(zip(chart_local, chart_own_after)):
                 dr = data_start + 1 + di
-                ws.cell(dr, chart_data_col,     row_d["local"])
-                ws.cell(dr, chart_data_col + 1, row_d["own_after"])
+                ws.cell(dr, chart_data_col,     local)
+                ws.cell(dr, chart_data_col + 1, own_after)
             # Hide chart data columns visually
             ws.column_dimensions[get_column_letter(chart_data_col)].width     = 0
             ws.column_dimensions[get_column_letter(chart_data_col+1)].width   = 0

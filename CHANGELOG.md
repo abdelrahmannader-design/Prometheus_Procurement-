@@ -1,5 +1,33 @@
 # Changelog
 
+## Unreleased — Bug fixes (Contract Performance Excel export)
+
+`export_performance_excel` was completely broken and would crash on every
+single use — found while reviewing the app's historical error_log.txt.
+Fixed several accumulated issues:
+- `FormulaRule(..., dxf=...)` isn't valid in the installed openpyxl —
+  `FormulaRule` builds its own differential style from `font`/`fill`
+  kwargs and doesn't accept a pre-built one. Switched both conditional
+  formatting blocks to pass `fill=`/`font=` directly.
+- `cell.font.color.rgb` crashed with `AttributeError` on default cells
+  (no color set → `font.color` is `None`). Added a `None` guard.
+- The second ("printable summary") sheet the export builds referenced
+  `row["vessel"]`, `row["d_from"/"d_to"/"n_points"]`, `row["avg_local"]`
+  and `row["cum_sav_egp"]` — none of which `run_performance()` actually
+  stores — and iterated `row["rows"]` (a list of plain tuples) with
+  dict-style access (`row_d["date"]`, `row_d.get("is_pre")`, etc.). None
+  of this matched the real data shape `run_performance()` produces.
+  Rewrote both the formula-based sheet and the printable-summary sheet to
+  consume the real `(label, local, own_after, sav_mt, cum_avg, signal)`
+  tuples, dropped the now-nonexistent "pre-delivery" row concept, and
+  derived the analysis-period label from the row dates instead of a
+  missing field.
+
+Verified end-to-end headlessly: built a closed contract with logged local
+prices, ran the Contract Performance analysis, and exported to Excel —
+completes with the chart and conditional formatting intact and no
+exceptions, where it previously crashed immediately.
+
 ## Unreleased — CEO Dashboard Enhancements
 
 - Added an Executive Summary panel to Home: YTD realised-savings vs an
