@@ -20508,6 +20508,16 @@ class App(tk.Tk):
                     continue
                 imports.append((dd.isoformat(), cid, c))
             imports.sort(key=lambda t: t[0])
+            # Local purchases have no recorded premium of their own, so their
+            # CBOT Equivalent nets out THIS period's average import premium
+            # per commodity instead of assuming a zero basis.
+            _prem_sums: dict[str, list] = {}
+            for _d, _cid, _c in imports:
+                _base_c = (_c.get("commodity") or "").strip().upper().split("-")[0]
+                _p = to_float(_c.get("premium_cents"), None)
+                if _base_c and _p is not None:
+                    _prem_sums.setdefault(_base_c, []).append(_p)
+            avg_prem_by_comm = {k: sum(v) / len(v) for k, v in _prem_sums.items()}
             locals_ = []
             for rec in (self.state_obj.get("local_purchases", []) or []):
                 if comm_filter != "ALL" and (rec.get("commodity") or "").strip().upper().split("-")[0] != comm_filter:
@@ -20554,7 +20564,20 @@ class App(tk.Tk):
             wsA["A3"] = "Average local expenses (EGP/MT)"; wsA["B3"] = exp
             wsA["A4"] = f"Latest USD/EGP rate ({latest_fx_d or 'none stored'})"
             wsA["B4"] = latest_fx if latest_fx is not None else ""
-            wsA["A6"] = ("Formulas: CIF=(CBOT+premium)×B2 · EGP@port=CIF×FX+B3 · "
+            if single_commodity:
+                wsA["A5"] = f"Avg {single_commodity} import premium this period (¢/bu)"
+                wsA["B5"] = avg_prem_by_comm.get(single_commodity, 0.0)
+                wsA["C5"] = ("From the Import Purchases rows above. Used by Local "
+                             "Purchases' CBOT Equivalent (a local buy has no premium "
+                             "of its own, so this stands in for one) — edit it to "
+                             "test a different assumed basis.")
+            else:
+                wsA["A5"] = "Avg import premium this period (¢/bu, per commodity)"
+                wsA["B5"] = ""
+                wsA["C5"] = ("Mixed-commodity brief — each Local Purchases row uses "
+                             "its own commodity's period-average import premium, "
+                             "embedded directly in that row's formula.")
+            wsA["A7"] = ("Formulas: CIF=(CBOT+premium)×B2 · EGP@port=CIF×FX+B3 · "
                          "mktCIF=(mkt−B3)÷FX · mktPrem=mktCIF÷B2−CBOT · "
                          "FX impact = (B4 − contract FX) × CIF · "
                          "CBOT Equivalent (Implied) = CIF÷B2−premium, falling back "
@@ -20563,9 +20586,9 @@ class App(tk.Tk):
                          "rows only, other commodities embed their own factor "
                          "per row (e.g. SBM 1.1023 $/short-ton→$/MT). Local "
                          "Purchases CBOT Equivalent (Implied) = ((price+transport"
-                         "−B3)÷FX)÷factor — no premium to net out, so it's the "
-                         "flat CBOT a zero-basis deal would need.")
-            for _r in (2, 3, 4):
+                         "−B3)÷FX)÷factor − avg import premium (B5) — nets out "
+                         "this period's typical basis instead of assuming zero.")
+            for _r in (2, 3, 4, 5):
                 wsA.cell(row=_r, column=1).font = Font(bold=True)
             wsA.column_dimensions["A"].width = 40
             wsA.column_dimensions["B"].width = 12
@@ -20752,6 +20775,7 @@ class App(tk.Tk):
             # on the purchase itself (marked gray when estimated this way).
             GRAY = Font(color="808080", italic=True)
             local_gray_used_flag = {"any": False}
+            local_no_prem_flag = {"any": False}
             loc_tot_row = None
             if locals_:
                 ws.cell(row=r, column=1, value="LOCAL PURCHASES").font = BOLD
@@ -20759,7 +20783,8 @@ class App(tk.Tk):
                 loc_headers = ["Date", "Commodity", "Qty MT", "Price EGP/MT",
                                "Transport EGP/MT", "All-in EGP/MT",
                                "Local expenses EGP/MT", "FX", "CBOT Ref",
-                               "CBOT Equivalent (Implied)", "Value EGP"]
+                               "Premium used (¢/bu)", "CBOT Equivalent (Implied)",
+                               "Value EGP"]
                 for ci, h in enumerate(loc_headers, start=1):
                     cell = ws.cell(row=r, column=ci, value=h)
                     cell.fill = hdr_fill; cell.font = hdr_font
@@ -20784,6 +20809,8 @@ class App(tk.Tk):
                             fx_val, _fd = self._basis_nearest_le(fxh, d)
                     factor_any = cbot_conv_factor(base, strict=False)
                     use_b2 = (single_commodity is not None) or base == "CORN"
+                    avg_prem_loc = avg_prem_by_comm.get(base)
+                    no_prem_ref = avg_prem_loc is None
 
                     ws.cell(row=r, column=1, value=d)
                     ws.cell(row=r, column=2, value=comm)
@@ -20808,15 +20835,23 @@ class App(tk.Tk):
                         if fx_from_history:
                             fc.font = GRAY
                             local_gray_used_flag["any"] = True
+                    if use_b2:
+                        pc = ws.cell(row=r, column=10, value="=Assumptions!$B$5")
+                    else:
+                        pc = ws.cell(row=r, column=10, value=avg_prem_loc or 0.0)
+                    pc.number_format = "#,##0.0"
+                    if no_prem_ref:
+                        pc.font = Font(color="B00020", italic=True)
+                        local_no_prem_flag["any"] = True
                     if px is not None and fx_val and factor_any:
-                        cbe_formula = (f"=(F{r}-G{r})/H{r}/Assumptions!$B$2" if use_b2
-                                       else f"=(F{r}-G{r})/H{r}/{factor_any}")
-                        cec = ws.cell(row=r, column=10, value=cbe_formula)
+                        cbe_formula = (f"=(F{r}-G{r})/H{r}/Assumptions!$B$2-J{r}" if use_b2
+                                       else f"=(F{r}-G{r})/H{r}/{factor_any}-J{r}")
+                        cec = ws.cell(row=r, column=11, value=cbe_formula)
                         cec.number_format = "#,##0.00"; cec.font = BLUE
                     if px is not None:
-                        vc = ws.cell(row=r, column=11, value=f"=C{r}*D{r}")
+                        vc = ws.cell(row=r, column=12, value=f"=C{r}*D{r}")
                         vc.number_format = "#,##0"; vc.font = BLUE
-                    for ci in range(1, 12):
+                    for ci in range(1, 13):
                         ws.cell(row=r, column=ci).border = border
                     r += 1
                 ws.cell(row=r, column=1, value="TOTAL local").font = BOLD
@@ -20826,7 +20861,7 @@ class App(tk.Tk):
                              value=f"=SUMPRODUCT(C{loc0}:C{r-1},D{loc0}:D{r-1})"
                                    f"/SUM(C{loc0}:C{r-1})")
                 wa.font = Font(bold=True, color="1A4FA0"); wa.number_format = "#,##0"
-                tv = ws.cell(row=r, column=11, value=f"=SUM(K{loc0}:K{r-1})")
+                tv = ws.cell(row=r, column=12, value=f"=SUM(L{loc0}:L{r-1})")
                 tv.font = Font(bold=True, color="1A4FA0"); tv.number_format = "#,##0"
                 loc_tot_row = r
                 r += 2
@@ -20845,7 +20880,7 @@ class App(tk.Tk):
             if loc_tot_row:
                 ws.cell(row=r, column=1, value="Local volume MT / value EGP")
                 ws.cell(row=r, column=3, value=f"=C{loc_tot_row}").font = BLUE
-                ws.cell(row=r, column=4, value=f"=K{loc_tot_row}").font = BLUE
+                ws.cell(row=r, column=4, value=f"=L{loc_tot_row}").font = BLUE
                 r += 1
             ws.cell(row=r, column=1,
                     value=f"Contracts: {len(imports)}   ·   Local buys: {len(locals_)}")
@@ -20870,6 +20905,12 @@ class App(tk.Tk):
                     "Gray CBOT Ref/FX cells in Local Purchases: not recorded on "
                     "the purchase itself, so the nearest logged history on/before "
                     "the purchase date was used instead.")
+            if local_no_prem_flag["any"]:
+                _period_notes.append(
+                    "Red \"Premium used\" cells in Local Purchases: no import "
+                    "contract for that commodity in this period to average a "
+                    "premium from, so 0 was used — that row's CBOT Equivalent "
+                    "is a zero-basis upper bound, not a real estimate.")
             for txt in _period_notes:
                 ws.cell(row=r, column=1, value=txt).alignment = Alignment(wrap_text=True)
                 ws.merge_cells(start_row=r, start_column=1, end_row=r,
@@ -20934,6 +20975,21 @@ class App(tk.Tk):
                      if c.get("delivery_date")]
             win_lo, win_hi = (min(dates), max(dates)) if dates else ("", "")
 
+            # Local purchases have no recorded premium of their own, so their
+            # CBOT Equivalent nets out THIS period's average import premium
+            # per commodity (from the contracts above) instead of assuming a
+            # zero basis — otherwise the whole local-market basis gets
+            # misread as CBOT and the figure runs 150-200+ points too high.
+            avg_prem_by_comm: dict[str, float] = {}
+            _prem_sums: dict[str, list] = {}
+            for c in contracts.values():
+                base_c = (c.get("commodity") or "").strip().upper().split("-")[0]
+                p = to_float(c.get("premium_cents"), None)
+                if base_c and p is not None:
+                    _prem_sums.setdefault(base_c, []).append(p)
+            for base_c, plist in _prem_sums.items():
+                avg_prem_by_comm[base_c] = sum(plist) / len(plist)
+
             wb = Workbook(); ws = wb.active; ws.title = "Finance Brief"
             thin = Side(style="thin", color="808080")
             border = Border(left=thin, right=thin, top=thin, bottom=thin)
@@ -20975,6 +21031,20 @@ class App(tk.Tk):
             wsA["A3"] = "Average local expenses (EGP/MT)"
             wsA["B3"] = self._basis_expenses_egp_mt()
             wsA["C3"] = "At-port costs inside the local price. Editable in Basis Tracker bar."
+            if single_commodity:
+                wsA["A4"] = f"Avg {single_commodity} import premium this period (¢/bu)"
+                wsA["B4"] = avg_prem_by_comm.get(single_commodity, 0.0)
+                wsA["C4"] = ("From the Import contract rows above. Used by Local "
+                             "Purchases' CBOT Equivalent (a local buy has no premium "
+                             "of its own, so this stands in for one) — edit it to "
+                             "test a different assumed basis.")
+            else:
+                wsA["A4"] = "Avg import premium this period (¢/bu, per commodity)"
+                wsA["B4"] = ""
+                wsA["C4"] = ("Mixed-commodity brief — each Local Purchases row uses "
+                             "its own commodity's period-average import premium "
+                             "(from the Import contract rows above), embedded "
+                             "directly in that row's formula.")
             wsA["A5"] = ("Row formulas:  CIF = (CBOT + premium) × factor   ·   "
                          "EGP at port = CIF × FX + expenses   ·   "
                          "market CIF = (market − expenses) ÷ FX   ·   "
@@ -20983,9 +21053,10 @@ class App(tk.Tk):
                          "premium falls back to Market Premium (orange) when the "
                          "contract's own premium is 0/blank   ·   Local Purchases "
                          "CBOT Equivalent (Implied) = ((price+transport−expenses)"
-                         "÷FX)÷factor — no premium to net out, so it's the flat "
-                         "CBOT a zero-basis deal would need.")
-            for _r in (2, 3):
+                         "÷FX)÷factor − avg import premium (B4) — nets out this "
+                         "period's typical basis instead of assuming zero, since a "
+                         "local buy has no premium of its own to subtract.")
+            for _r in (2, 3, 4):
                 wsA.cell(row=_r, column=1).font = Font(bold=True)
             wsA.column_dimensions["A"].width = 36
             wsA.column_dimensions["B"].width = 12
@@ -21141,6 +21212,7 @@ class App(tk.Tk):
                           (rec.get("commodity") or "").strip().upper().split("-")[0] == comm_filter]
             local_recs.sort(key=lambda rec: rec.get("date", ""))
             local_prem_used_flag = {"any": False}
+            local_no_prem_flag = {"any": False}
             if local_recs:
                 gc = ws.cell(row=nr, column=1, value="Local Purchases")
                 gc.font = Font(bold=True, size=10); gc.fill = grp_fill
@@ -21149,7 +21221,8 @@ class App(tk.Tk):
                 loc_headers = ["No", "Date", "Supplier", "QTY", "Origin", "Notes",
                                "FX", "Price EGP/MT", "Transport EGP/MT",
                                "All-in EGP/MT", "Local expenses EGP/MT",
-                               "CBOT Ref", "CBOT Equivalent (Implied)"]
+                               "CBOT Ref", "Premium used (¢/bu)",
+                               "CBOT Equivalent (Implied)"]
                 for ci, h in enumerate(loc_headers, start=1):
                     cell = ws.cell(row=lr, column=ci, value=h)
                     cell.fill = hdr_fill; cell.font = hdr_font
@@ -21175,6 +21248,8 @@ class App(tk.Tk):
                             fx_val, _fd = self._basis_nearest_le(fxh, d)
                     factor_any_loc = cbot_conv_factor(base, strict=False)
                     use_b2_loc = (single_commodity is not None) or base == "CORN"
+                    avg_prem_loc = avg_prem_by_comm.get(base)
+                    no_prem_ref = avg_prem_loc is None
 
                     ws.cell(row=lr, column=1, value=i)
                     ws.cell(row=lr, column=2, value=d)
@@ -21202,12 +21277,27 @@ class App(tk.Tk):
                         if cbot_from_history:
                             cc.font = Font(color="808080", italic=True)
                             local_prem_used_flag["any"] = True
+                    # Premium used: this commodity's own period-average import
+                    # premium (Assumptions!B4 when it's the brief's single
+                    # commodity, else the literal average for a mixed brief).
+                    # With no import contracts for this commodity in the brief
+                    # there's nothing to base an average on — 0 is used and
+                    # the cell is flagged, so the CBOT Equivalent reads as a
+                    # zero-basis upper bound, not a real estimate.
+                    if use_b2_loc:
+                        pc = ws.cell(row=lr, column=13, value="=Assumptions!$B$4")
+                    else:
+                        pc = ws.cell(row=lr, column=13, value=avg_prem_loc or 0.0)
+                    pc.number_format = "#,##0.0"
+                    if no_prem_ref:
+                        pc.font = Font(color="B00020", italic=True)
+                        local_no_prem_flag["any"] = True
                     if px is not None and fx_val and factor_any_loc:
-                        cbe_formula = (f"=(J{lr}-K{lr})/G{lr}/Assumptions!$B$2" if use_b2_loc
-                                       else f"=(J{lr}-K{lr})/G{lr}/{factor_any_loc}")
-                        cec = ws.cell(row=lr, column=13, value=cbe_formula)
+                        cbe_formula = (f"=(J{lr}-K{lr})/G{lr}/Assumptions!$B$2-M{lr}" if use_b2_loc
+                                       else f"=(J{lr}-K{lr})/G{lr}/{factor_any_loc}-M{lr}")
+                        cec = ws.cell(row=lr, column=14, value=cbe_formula)
                         cec.number_format = "#,##0.00"; cec.font = Font(color="1A4FA0")
-                    for ci in range(1, 14):
+                    for ci in range(1, 15):
                         ws.cell(row=lr, column=ci).border = border
                         ws.cell(row=lr, column=ci).alignment = Alignment(horizontal="center")
                     lr += 1
@@ -21237,6 +21327,12 @@ class App(tk.Tk):
                     "Gray CBOT Ref/FX cells in Local Purchases: not recorded on "
                     "the purchase itself, so the nearest logged history on/before "
                     "the purchase date was used instead.")
+            if local_no_prem_flag["any"]:
+                notes.append(
+                    "Red \"Premium used\" cells in Local Purchases: no import "
+                    "contract for that commodity in this brief to average a "
+                    "premium from, so 0 was used — that row's CBOT Equivalent "
+                    "is a zero-basis upper bound, not a real estimate.")
             if mkt_prem_used_flag["any"]:
                 notes.append(
                     "Orange \"CBOT Equivalent (Implied)\" cells: that contract's "

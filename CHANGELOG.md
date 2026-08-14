@@ -1,5 +1,37 @@
 # Changelog
 
+## Unreleased — Fix: unrealistic Local Purchases CBOT Equivalent
+
+User-flagged: the Local Purchases CBOT Equivalent added last round was
+still unrealistic — e.g. a real CORN local buy implied CBOT ≈ 665 while
+the period's actual Avr CBOT was ≈ 450, a ~215-point gap. Root cause: the
+formula assumed a zero-basis (flat) local price, but a local buy's price
+always carries a real basis/premium over CBOT — with nothing to net that
+back out, the entire basis got misread as CBOT, every time, for every
+local row.
+
+Fixed by netting out this period's average import premium per commodity
+(computed from the brief's own Import contract rows) instead of assuming
+zero:
+
+`CBOT Equivalent = ((price+transport−expenses)÷FX)÷factor − avg import premium`
+
+- New editable "Avg import premium this period" cell in Assumptions (B4 in
+  Finance Brief, B5 in Period Brief) when the brief is filtered to one
+  commodity — auto-computed but editable to test a different assumption.
+- New "Premium used (¢/bu)" column in both briefs' Local Purchases tables,
+  so which premium was netted out is visible per row, not hidden inside
+  the formula. Mixed "ALL" briefs use each row's own commodity's average,
+  embedded as a literal.
+- Rows for a commodity with no import contracts in the brief (nothing to
+  average) fall back to 0 and are flagged red with a legend note — the
+  figure is then a zero-basis upper bound, not a real estimate.
+
+Verified against the real numbers from the user's uploaded brief: the
+215-point gap closes to ~16 points (664.5 → 465.8 vs Avr CBOT 449.6).
+Re-ran the full regression suite — no exceptions, no regressions in any
+of the six earlier fix areas.
+
 ## Unreleased — CBOT Equivalent (Implied) for Local Purchases
 
 Period Brief and Finance Brief only ever computed "CBOT Equivalent
