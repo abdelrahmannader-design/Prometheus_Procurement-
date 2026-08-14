@@ -3970,6 +3970,12 @@ class App(tk.Tk):
         _ent(1, 7, self.lp_cbot_ref_lp_var, w=10)
         _lbl(1, 8, "FX Ref")
         _ent(1, 9, self.lp_fx_ref_lp_var, w=10)
+        _lp_fill_btn = ttk.Button(form, text="⟳", width=2,
+                                  command=self._lp_fill_cbot_fx_from_history)
+        _lp_fill_btn.grid(row=1, column=10, sticky="w", padx=(0, 4), pady=(0, 4))
+        attach_tooltip(_lp_fill_btn,
+                       "Fill CBOT/FX from the nearest logged history on or "
+                       "before the purchase date, for this commodity.")
 
         # Freight / transport quick-pick row
         _lbl(2, 0, "Transport / Freight:")
@@ -4098,6 +4104,7 @@ class App(tk.Tk):
             ("TotalCost", 110,  "e"),
             ("CBOTRef",    80,  "e"),
             ("FXRef",      70,  "e"),
+            ("Basis",      90,  "e"),
             ("VsImport",  115,  "e"),
             ("Notes",     160,  "w"),
         ]
@@ -4106,7 +4113,8 @@ class App(tk.Tk):
             "Commodity":"Commodity","Origin":"Origin","QtyMT":"Qty (MT)",
             "PriceEGP":"Price (EGP/MT)","Transport":"Transport (EGP/MT)",
             "TotalCost":"Total Cost (EGP)","CBOTRef":"CBOT Ref (¢)",
-            "FXRef":"FX Ref","VsImport":"vs Import (EGP/MT)","Notes":"Notes",
+            "FXRef":"FX Ref","Basis":"Implied Basis",
+            "VsImport":"vs Import (EGP/MT)","Notes":"Notes",
         }
         self.lp_purchases_tree = ttk.Treeview(
             tf, columns=[c for c,_,_ in lp_cols],
@@ -5306,6 +5314,32 @@ class App(tk.Tk):
             trans = get_default_local_transport_egp_mt(self.state_obj)
         return trans
 
+    def _lp_fill_cbot_fx_from_history(self):
+        """Fill CBOT Ref / FX Ref from the nearest logged history on or
+        before the purchase date, for the selected commodity."""
+        try:
+            d = parse_date_flex(self.lp_date_lp_var.get())
+            if d is None:
+                messagebox.showerror(APP_NAME, "Enter a valid purchase date first.")
+                return
+            base = (self.lp_commodity_lp_var.get() or "").strip().upper().split("-")[0]
+            if not base:
+                messagebox.showerror(APP_NAME, "Choose a commodity first.")
+                return
+            ch, fxh = self._basis_history_lists(base)
+            cbot, _cbot_date = self._basis_nearest_le(ch, d.isoformat())
+            fx, _fx_date = self._basis_nearest_le(fxh, d.isoformat())
+            if cbot is None and fx is None:
+                messagebox.showinfo(APP_NAME,
+                                    "No CBOT/FX history on or before that date yet.")
+                return
+            if cbot is not None:
+                self.lp_cbot_ref_lp_var.set(f"{cbot:.2f}")
+            if fx is not None:
+                self.lp_fx_ref_lp_var.set(f"{fx:.4f}")
+        except Exception as e:
+            self._surface_error("_lp_fill_cbot_fx_from_history", e, show=True)
+
     def _lp_form_to_dict(self):
         return {
             "date":              self.lp_date_lp_var.get().strip(),
@@ -5518,6 +5552,7 @@ class App(tk.Tk):
         total_imp_qty  = 0.0
         total_imp_paid = 0.0
 
+        exp = self._basis_expenses_egp_mt()
         for rec in lps:
             qty   = to_float(rec.get("qty_mt"), None) or 0
             price = to_float(rec.get("price_egp_mt"), None) or 0
@@ -5536,6 +5571,23 @@ class App(tk.Tk):
             if imp_avg:
                 vs_imp = allin - imp_avg
                 tag    = "cheaper" if vs_imp < 0 else "costlier"
+
+            # Implied basis on the purchase date: use the stored CBOT/FX
+            # reference if the user entered one, else fall back to nearest
+            # logged history on/before that date — same formula Basis
+            # Tracker uses, so the two screens always agree.
+            cbot_val = to_float(rec.get("cbot_ref"), None)
+            fx_val = to_float(rec.get("fx_ref"), None)
+            if cbot_val is None or fx_val is None:
+                ch, fxh = self._basis_history_lists(base)
+                if cbot_val is None:
+                    cbot_val, _cd = self._basis_nearest_le(ch, rec.get("date", ""))
+                if fx_val is None:
+                    fx_val, _fd = self._basis_nearest_le(fxh, rec.get("date", ""))
+            factor = cbot_conv_factor(base, strict=False)
+            basis = (((allin - exp) / fx_val) / factor - cbot_val
+                      if (fx_val and factor and cbot_val is not None) else None)
+
             tv.insert("", "end", iid=str(rec.get("id","")),
                       tags=(tag,), values=(
                 rec.get("id",""), rec.get("date",""),
@@ -5546,6 +5598,7 @@ class App(tk.Tk):
                     if rec.get("cbot_ref") else "",
                 fmt_num(rec.get("fx_ref"), 4)
                     if rec.get("fx_ref") else "",
+                fmt_num(basis, 2) if basis is not None else "—",
                 fmt_num(vs_imp, 0) if vs_imp is not None else "—",
                 rec.get("note",""),
             ))
@@ -5556,7 +5609,7 @@ class App(tk.Tk):
             tv.insert("", "end", iid="__LP_TOTAL__", tags=("total",),
                       values=("","TOTAL","","","",
                               fmt_num(total_lp_qty,0),"","",
-                              fmt_num(total_lp_paid,0),"","","",""))
+                              fmt_num(total_lp_paid,0),"","","","",""))
 
         # import totals
         for c in self.state_obj.get("contracts", {}).values():
@@ -10191,8 +10244,22 @@ class App(tk.Tk):
         dv["pf_det_frt"].set(f"EGP {frt:,.0f}" if frt else "—")
         dv["pf_det_own"].set(f"EGP {own:,.0f}/MT" if own else "—")
 
-        btn_row = ttk.Frame(p)
-        btn_row.grid(row=5, column=0, sticky="w", pady=(8, 0))
+        # `p` here used to reference an undefined name (only _build_performance's
+        # local `p = self.tab_performance` existed) — the resulting NameError
+        # silently killed this method every time a contract was selected, so
+        # the button below was never (re)created. Also avoid re-gridding a
+        # fresh Frame into row 5 on every selection (it collided with
+        # pf_notes_var, and old frames were never destroyed) by reusing one
+        # button row on its own row.
+        old_btn_row = getattr(self, "_pf_btn_row", None)
+        if old_btn_row is not None:
+            try:
+                old_btn_row.destroy()
+            except Exception:
+                pass
+        btn_row = ttk.Frame(self.tab_performance)
+        btn_row.grid(row=6, column=0, sticky="w", pady=(8, 0))
+        self._pf_btn_row = btn_row
         ttk.Button(btn_row, text="📥  Export Performance Excel",
                    command=self.export_performance_excel).pack(side="left", padx=(0,8))
         ttk.Button(btn_row, text="🔬  Export Full Contract Intelligence",
@@ -13379,7 +13446,8 @@ class App(tk.Tk):
         sup_cols = [
             ("Rank",         50,"center"), ("Supplier",   150,"w"),
             ("Contracts",    75,"center"), ("Total MT",   90,"e"),
-            ("Avg CBOT Edge ¢",110,"e"),   ("Avg Premium ¢",100,"e"),
+            ("Avg CBOT",     95,"e"),      ("Avg CBOT Edge ¢",110,"e"),
+            ("Avg Premium ¢",100,"e"),
             ("Avg vs Local EGP/MT",130,"e"),("Total Saving EGP",130,"e"),
             ("Win Rate",     85,"center"), ("Best Contract",140,"w"),
             ("Grade",        80,"center"),
@@ -13424,7 +13492,7 @@ class App(tk.Tk):
 
         from collections import defaultdict
         sup_data = defaultdict(lambda: {
-            "contracts":0, "qty":0, "cbot_edges":[], "premiums":[],
+            "contracts":0, "qty":0, "cbot_edges":[], "impl_cbots":[], "premiums":[],
             "vs_local":[], "total_sav":0, "wins":0, "n_local":0,
             "best_contract":None, "best_sav":-1e18,
         })
@@ -13445,6 +13513,8 @@ class App(tk.Tk):
             sd["qty"]       += r.get("qty") or 0
             if r.get("cbot_edge") is not None:
                 sd["cbot_edges"].append(r["cbot_edge"])
+            if r.get("impl_cbot") is not None:
+                sd["impl_cbots"].append(r["impl_cbot"])
             if r.get("premium") is not None:
                 sd["premiums"].append(r["premium"])
             if r.get("local_edge") is not None:
@@ -13461,17 +13531,18 @@ class App(tk.Tk):
         rows = []
         for sup, sd in sup_data.items():
             avg_edge   = sum(sd["cbot_edges"])/len(sd["cbot_edges"]) if sd["cbot_edges"] else None
+            avg_cbot   = sum(sd["impl_cbots"])/len(sd["impl_cbots"]) if sd["impl_cbots"] else None
             avg_prem   = sum(sd["premiums"])/len(sd["premiums"]) if sd["premiums"] else None
             avg_local  = sum(sd["vs_local"])/len(sd["vs_local"]) if sd["vs_local"] else None
             win_rate   = sd["wins"]/sd["n_local"]*100 if sd["n_local"] else None
-            rows.append((sup, sd["contracts"], sd["qty"], avg_edge, avg_prem,
+            rows.append((sup, sd["contracts"], sd["qty"], avg_edge, avg_cbot, avg_prem,
                          avg_local, sd["total_sav"], win_rate,
                          sd["best_contract"]))
 
         # Rank by avg CBOT edge (the unbiased metric)
         rows.sort(key=lambda x: (x[3] if x[3] is not None else -999), reverse=True)
 
-        for rank, (sup, n, qty, edge, prem, avg_local, tot_sav, win_rate, best) in enumerate(rows, 1):
+        for rank, (sup, n, qty, edge, avg_cbot, prem, avg_local, tot_sav, win_rate, best) in enumerate(rows, 1):
             if   rank == 1:                grade, tag = "A+", "A"
             elif edge and edge > 0:        grade, tag = "A",  "A"
             elif edge and edge > -10:      grade, tag = "B",  "B"
@@ -13480,6 +13551,7 @@ class App(tk.Tk):
 
             tv.insert("", "end", tags=(tag,), values=(
                 rank, sup, n, fmt_num(qty,0),
+                f"{avg_cbot:,.2f}" if avg_cbot is not None else "—",
                 f"{edge:+.2f}" if edge is not None else "—",
                 f"{prem:.2f}" if prem is not None else "—",
                 f"{avg_local:+,.0f}" if avg_local is not None else "—",
@@ -13489,11 +13561,19 @@ class App(tk.Tk):
 
         if rows:
             best_sup = rows[0][0]
-            self._sup_notes_var.set(
-                f"🏆 Best supplier by CBOT timing: {best_sup}  "
-                f"(avg edge {rows[0][3]:+.2f}¢/bu — consistently prices below market)  |  "
-                f"Ranked by avg CBOT edge, not total volume, to remove the bias "
-                f"toward suppliers you simply bought more from.")
+            best_edge = rows[0][3]
+            if best_edge is not None:
+                self._sup_notes_var.set(
+                    f"🏆 Best supplier by CBOT timing: {best_sup}  "
+                    f"(avg edge {best_edge:+.2f}¢/bu — consistently prices below market)  |  "
+                    f"Ranked by avg CBOT edge, not total volume, to remove the bias "
+                    f"toward suppliers you simply bought more from.")
+            else:
+                self._sup_notes_var.set(
+                    f"🏆 Top-ranked supplier: {best_sup}  |  "
+                    f"No CBOT edge data available yet for full ranking confidence.  |  "
+                    f"Ranked by avg CBOT edge, not total volume, to remove the bias "
+                    f"toward suppliers you simply bought more from.")
         else:
             self._sup_notes_var.set(
                 f"📭 No closed {f_comm} contracts found "
@@ -13530,12 +13610,12 @@ class App(tk.Tk):
 
             cols = [c[0] for c in [
                 ("Rank",8),("Supplier",22),("Contracts",10),("Total MT",12),
-                ("Avg CBOT Edge ¢",14),("Avg Premium ¢",13),
+                ("Avg CBOT",13),("Avg CBOT Edge ¢",14),("Avg Premium ¢",13),
                 ("Avg vs Local EGP/MT",16),("Total Saving EGP",16),
                 ("Win Rate",10),("Best Contract",18),("Grade",8)]]
             for ci,(h,w) in enumerate([
                 ("Rank",8),("Supplier",22),("Contracts",10),("Total MT",12),
-                ("Avg CBOT Edge ¢",14),("Avg Premium ¢",13),
+                ("Avg CBOT",13),("Avg CBOT Edge ¢",14),("Avg Premium ¢",13),
                 ("Avg vs Local EGP/MT",16),("Total Saving EGP",16),
                 ("Win Rate",10),("Best Contract",18),("Grade",8)],1):
                 c = ws.cell(row=1, column=ci, value=h)
@@ -18586,6 +18666,14 @@ class App(tk.Tk):
         tv.configure(yscrollcommand=ysb.set)
 
     def export_stress_excel(self):
+        """Formula-based stress test export.
+
+        Base CBOT/FX/premium/qty/local/fees/factor live on the Assumptions
+        sheet as plain input cells (B2:B8). Every case row and every grid
+        cell is a live Excel formula built from those cells plus each row's
+        fixed shock magnitude, so editing an assumption recalculates the
+        whole sheet — exactly what a plain Python-computed export can't do.
+        """
         res = self._last_stress
         try:
             if not res or res.get("error"):
@@ -18607,40 +18695,94 @@ class App(tk.Tk):
             ws = wb.active
             ws.title = "Stress Test"
             inp = res["inputs"]
+
+            wsA = wb.create_sheet("Assumptions")
+            wsA["A1"] = "Stress Test — input assumptions (edit B2:B8)"
+            wsA["A1"].font = Font(bold=True, size=12)
+            assumption_rows = [
+                ("Base CBOT (¢/bu)", inp["cbot"], "#,##0.00"),
+                ("Base FX (EGP/USD)", inp["fx"], "#,##0.0000"),
+                ("Base Premium (¢/bu or $/st)", inp["premium_cents"], "#,##0.0"),
+                ("Quantity (MT)", inp["qty_mt"], "#,##0"),
+                ("Local price (EGP/MT)", inp["local_egp_mt"], "#,##0"),
+                ("Fees — discharge+clearance+freight (EGP/MT)", inp["fees_egp_mt"], "#,##0"),
+                ("Conversion factor (¢/bu → $/MT)", inp["factor"], "0.0000"),
+            ]
+            for i, (label, value, fmt) in enumerate(assumption_rows, start=2):
+                wsA.cell(row=i, column=1, value=label).font = Font(bold=True)
+                c = wsA.cell(row=i, column=2, value=value)
+                c.number_format = fmt
+            wsA["A10"] = ("Formula: Landed EGP/MT = ((shocked CBOT + shocked premium) "
+                          "× factor × shocked FX) + fees")
+            wsA["A11"] = "Saving EGP/MT = Local price − Landed EGP/MT   ·   Total EGP = Saving × Qty"
+            wsA["A12"] = ("CBOT/FX shocks are % moves off B2/B3; premium shocks are ¢ "
+                          "moves off B4 — every case and grid cell below is a live "
+                          "formula built from these plus each row's fixed shock size.")
+            wsA.column_dimensions["A"].width = 44
+            wsA.column_dimensions["B"].width = 14
+
+            def _saving_formula(cbot_shock, fx_shock, prem_shock):
+                return (f"=Assumptions!$B$6-(((Assumptions!$B$2*(1+{cbot_shock})+"
+                        f"(Assumptions!$B$4+{prem_shock}))*Assumptions!$B$8*"
+                        f"(Assumptions!$B$3*(1+{fx_shock})))+Assumptions!$B$7)")
+
+            def _total_formula(cbot_shock, fx_shock, prem_shock):
+                return f"=({_saving_formula(cbot_shock, fx_shock, prem_shock)[1:]})*Assumptions!$B$5"
+
+            def _cbot_formula(cbot_shock):
+                return f"=Assumptions!$B$2*(1+{cbot_shock})"
+
+            def _fx_formula(fx_shock):
+                return f"=Assumptions!$B$3*(1+{fx_shock})"
+
+            def _premium_formula(prem_shock):
+                return f"=Assumptions!$B$4+{prem_shock}"
+
+            def _landed_formula(cbot_shock, fx_shock, prem_shock):
+                return (f"=((Assumptions!$B$2*(1+{cbot_shock})+"
+                        f"(Assumptions!$B$4+{prem_shock}))*Assumptions!$B$8*"
+                        f"(Assumptions!$B$3*(1+{fx_shock})))+Assumptions!$B$7")
+
             ws["A1"] = (f"Stress Test — {inp['commodity']}   ·   engine "
                         f"v{res['version']}   ·   {res['ts']}")
             ws["A1"].font = Font(bold=True, size=13)
-            ws["A2"] = ("Assumptions: CBOT {c:,.2f} · FX {f:.4f} · premium "
-                        "{p:,.1f} · qty {q:,.0f} MT · local {l:,.0f} EGP/MT · "
-                        "fees {fe:,.0f} EGP/MT · factor {fa}"
-                        .format(c=inp["cbot"], f=inp["fx"],
-                                p=inp["premium_cents"], q=inp["qty_mt"],
-                                l=inp["local_egp_mt"], fe=inp["fees_egp_mt"],
-                                fa=inp["factor"]))
+            ws["A2"] = ("Formula-based: edit Assumptions!B2:B8 (CBOT, FX, premium, "
+                        "qty, local, fees, factor) and every case and grid cell "
+                        "below recalculates automatically.")
             ws["A3"] = ("Market data is prototype/public-feed grade unless "
                         "manually verified — not a licensed live feed.")
             r = 5
             ws.cell(row=r, column=1, value="Case").font = Font(bold=True)
-            for ci, h in enumerate(["Saving EGP/MT", "Total EGP", "CBOT",
-                                    "FX", "Premium", "Landed EGP/MT"], start=2):
+            for ci, h in enumerate(["Saving EGP/MT", "Total EGP", "Δ Saving vs Base %",
+                                    "CBOT", "FX", "Premium", "Landed EGP/MT"], start=2):
                 ws.cell(row=r, column=ci, value=h).font = Font(bold=True)
-            for key, label in (("best", "Best"), ("base", "Base"),
-                               ("adverse", "Adverse")):
-                r += 1
+            case_order = (("best", "Best"), ("base", "Base"), ("adverse", "Adverse"))
+            case_rows = {key: r + 1 + i for i, (key, _label) in enumerate(case_order)}
+            base_saving_cell = f"B{case_rows['base']}"
+            for key, label in case_order:
+                r = case_rows[key]
                 row = res[key]
+                cs, fs, ps = row["cbot_shock"], row["fx_shock"], row["prem_shock"]
                 ws.cell(row=r, column=1, value=label)
-                ws.cell(row=r, column=2, value=row["saving_egp_mt"]
-                        ).number_format = "#,##0"
-                ws.cell(row=r, column=3, value=row["saving_total_egp"]
-                        ).number_format = "#,##0"
-                ws.cell(row=r, column=4, value=row["cbot"]).number_format = "#,##0.00"
-                ws.cell(row=r, column=5, value=row["fx"]).number_format = "#,##0.0000"
-                ws.cell(row=r, column=6, value=row["premium"]).number_format = "#,##0.0"
-                ws.cell(row=r, column=7, value=row["landed_egp_mt"]
-                        ).number_format = "#,##0"
+                c_sav = ws.cell(row=r, column=2, value=_saving_formula(cs, fs, ps))
+                c_sav.number_format = "#,##0"
+                c_tot = ws.cell(row=r, column=3, value=_total_formula(cs, fs, ps))
+                c_tot.number_format = "#,##0"
+                if key == "base":
+                    ws.cell(row=r, column=4, value="—")
+                else:
+                    c_delta = ws.cell(
+                        row=r, column=4,
+                        value=f"=(B{r}-{base_saving_cell})/ABS({base_saving_cell})*100")
+                    c_delta.number_format = "+#,##0.0;[Red]-#,##0.0"
+                ws.cell(row=r, column=5, value=_cbot_formula(cs)).number_format = "#,##0.00"
+                ws.cell(row=r, column=6, value=_fx_formula(fs)).number_format = "#,##0.0000"
+                ws.cell(row=r, column=7, value=_premium_formula(ps)).number_format = "#,##0.0"
+                ws.cell(row=r, column=8, value=_landed_formula(cs, fs, ps)).number_format = "#,##0"
+            r = case_rows["adverse"]
             r += 2
             ws.cell(row=r, column=1,
-                    value=f"High Risk: {'YES' if res['high_risk'] else 'No'}"
+                    value=f"High Risk (at export-time assumptions): {'YES' if res['high_risk'] else 'No'}"
                     ).font = Font(bold=True,
                                   color="B00020" if res["high_risk"] else "1A7A1A")
             r += 1
@@ -18655,12 +18797,28 @@ class App(tk.Tk):
                            f"{res['be_fx'] if res['be_fx'] is not None else 'Not available'}"
                            f"   (buffer {res['fx_buffer']} / "
                            f"{res['fx_buffer_pct']}%)"))
+            r += 1
+            ws.cell(row=r, column=1,
+                    value=("Note: Best/Base/Adverse and the two break-evens above reflect "
+                           "the shock combination identified as such when this was exported. "
+                           "Editing Assumptions recalculates their values using that same "
+                           "combination — it does not re-search the grid for a new best/worst "
+                           "corner. The full grid below always recalculates every cell live."),
+                    ).alignment = Alignment(wrap_text=True)
+            ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=8)
+            ws.row_dimensions[r].height = 30
             r += 2
-            # scenario matrices, one block per premium shock
+            # scenario matrices, one block per premium shock — every cell a
+            # live formula referencing Assumptions!B2:B8 plus this cell's
+            # fixed CBOT/FX/premium shock.
+            base_premium = to_float(inp.get("premium_cents"), None)
             for ps in res.get("prem_shocks_used", STRESS_PREM_SHOCKS):
-                _ps_lbl = (f"premium shock {ps:+,.0f}"
-                           if not res.get("premium_locked")
-                           else "premium LOCKED by contract (base only)")
+                if res.get("premium_locked"):
+                    _ps_lbl = "premium LOCKED by contract (base only)"
+                else:
+                    pct_txt = (f" ({ps / base_premium * 100:+.0f}% of base premium)"
+                               if base_premium else "")
+                    _ps_lbl = f"premium shock {ps:+,.0f}¢{pct_txt}"
                 ws.cell(row=r, column=1,
                         value=f"Saving EGP/MT — {_ps_lbl}"
                         ).font = Font(bold=True)
@@ -18681,7 +18839,7 @@ class App(tk.Tk):
                                    and x["fx_shock"] == fs
                                    and x["prem_shock"] == ps)
                         cell = ws.cell(row=r, column=j,
-                                       value=row["saving_egp_mt"])
+                                       value=_saving_formula(cs, fs, ps))
                         cell.number_format = "#,##0"
                         if row["classification"] == "Material Loss":
                             cell.font = Font(color="FFFFFF", bold=True)
@@ -18689,11 +18847,11 @@ class App(tk.Tk):
                         elif row["saving_egp_mt"] < 0:
                             cell.font = Font(color="991B1B")
                 r += 2
-            for col, w in (("A", 16), ("B", 14), ("C", 14), ("D", 12),
-                           ("E", 12), ("F", 12), ("G", 14)):
+            for col, w in (("A", 16), ("B", 14), ("C", 14), ("D", 16),
+                           ("E", 12), ("F", 12), ("G", 12), ("H", 14)):
                 ws.column_dimensions[col].width = w
             wb.save(fp)
-            messagebox.showinfo(APP_NAME, f"Stress test exported:\n{fp}")
+            messagebox.showinfo(APP_NAME, f"Stress test exported with live formulas:\n{fp}")
         except Exception as e:
             self._surface_error("export_stress_excel", e, show=True)
 
@@ -20282,6 +20440,13 @@ class App(tk.Tk):
                                                         sticky="w")
             ttk.Entry(frm, textvariable=t_var, width=14).grid(row=2, column=1,
                                                               sticky="w")
+            ttk.Label(frm, text="Commodity").grid(row=3, column=0, sticky="w",
+                                                   pady=4)
+            comm_var = tk.StringVar(value="ALL")
+            comm_cb = ttk.Combobox(
+                frm, textvariable=comm_var, state="readonly", width=14,
+                values=["ALL"] + self._home_commodity_options())
+            comm_cb.grid(row=3, column=1, sticky="w")
 
             def _preset(*_):
                 today = dt.date.today()
@@ -20311,9 +20476,9 @@ class App(tk.Tk):
                 chosen["go"] = True
                 win.destroy()
             ttk.Button(frm, text="Create brief", command=_ok).grid(
-                row=3, column=0, pady=(10, 0), sticky="w")
+                row=4, column=0, pady=(10, 0), sticky="w")
             ttk.Button(frm, text="Cancel", command=win.destroy).grid(
-                row=3, column=1, pady=(10, 0), sticky="w")
+                row=4, column=1, pady=(10, 0), sticky="w")
             self.wait_window(win)
             if not chosen["go"]:
                 return
@@ -20322,6 +20487,7 @@ class App(tk.Tk):
                 messagebox.showerror(APP_NAME, "Invalid period dates.")
                 return
             lo_s, hi_s = lo.isoformat(), hi.isoformat()
+            comm_filter = (comm_var.get() or "ALL").strip().upper()
 
             exp = self._basis_expenses_egp_mt()
             # latest FX for the revaluation block
@@ -20335,6 +20501,8 @@ class App(tk.Tk):
 
             imports = []
             for cid, c in (self.state_obj.get("contracts", {}) or {}).items():
+                if comm_filter != "ALL" and (c.get("commodity") or "").strip().upper().split("-")[0] != comm_filter:
+                    continue
                 dd = parse_date_flex(c.get("delivery_date"))
                 if dd is None or not (lo <= dd <= hi):
                     continue
@@ -20342,6 +20510,8 @@ class App(tk.Tk):
             imports.sort(key=lambda t: t[0])
             locals_ = []
             for rec in (self.state_obj.get("local_purchases", []) or []):
+                if comm_filter != "ALL" and (rec.get("commodity") or "").strip().upper().split("-")[0] != comm_filter:
+                    continue
                 d = parse_date_flex(rec.get("date"))
                 if d is None or not (lo <= d <= hi):
                     continue
@@ -20350,8 +20520,9 @@ class App(tk.Tk):
                                 to_float(rec.get("price_egp_mt"), None)))
             locals_.sort()
             if not imports and not locals_:
+                scope = "" if comm_filter == "ALL" else f" for {comm_filter}"
                 messagebox.showinfo(APP_NAME,
-                                    f"No purchases found between {lo_s} and {hi_s}.")
+                                    f"No purchases found between {lo_s} and {hi_s}{scope}.")
                 return
 
             fp = filedialog.asksaveasfilename(
@@ -20377,7 +20548,8 @@ class App(tk.Tk):
             wsA["B4"] = latest_fx if latest_fx is not None else ""
             wsA["A6"] = ("Formulas: CIF=(CBOT+premium)×B2 · EGP@port=CIF×FX+B3 · "
                          "mktCIF=(mkt−B3)÷FX · mktPrem=mktCIF÷B2−CBOT · "
-                         "FX impact = (B4 − contract FX) × CIF")
+                         "FX impact = (B4 − contract FX) × CIF · "
+                         "CBOT Equivalent (Implied) = CIF÷B2−premium")
             for _r in (2, 3, 4):
                 wsA.cell(row=_r, column=1).font = Font(bold=True)
             wsA.column_dimensions["A"].width = 40
@@ -20392,7 +20564,8 @@ class App(tk.Tk):
             BLUE = Font(color="1A4FA0")
             BOLD = Font(bold=True)
 
-            ws["A1"] = f"Purchasing Brief   {lo_s} → {hi_s}"
+            scope_label = "" if comm_filter == "ALL" else f"   ·   {comm_filter}"
+            ws["A1"] = f"Purchasing Brief   {lo_s} → {hi_s}{scope_label}"
             ws["A1"].font = Font(bold=True, size=13)
             ws.merge_cells("A1:R1")
 
@@ -20401,7 +20574,7 @@ class App(tk.Tk):
                        "CIF USD/MT", "Avr CBOT", "Premium over July EGP/MT",
                        "Market price EGP/MT at port", "Market CIF USD/MT",
                        "Market Premium over July", "Diff EGP/MT", "Diff USD/MT",
-                       "Diff Premium"]
+                       "Diff Premium", "CBOT Equivalent (Implied)"]
             hr = 3
             for ci, h in enumerate(headers, start=1):
                 cell = ws.cell(row=hr, column=ci, value=h)
@@ -20446,13 +20619,23 @@ class App(tk.Tk):
                           if (mkt_cif is not None and cif is not None) else diff_usd)
                 f_dP   = (f"=O{r}-L{r}"
                           if (mkt_prem is not None and prem is not None) else diff_prem)
+                # CBOT Equivalent (implied): CBOT = CIF/factor - premium — the
+                # CBOT level this contract's own CIF and premium imply, so it
+                # can be sanity-checked against the period's actual average CBOT.
+                factor_any = cbot_conv_factor(comm, strict=False)
+                cbot_equiv_static = ((cif / factor_any - prem)
+                                      if (cif is not None and prem is not None and factor_any) else None)
+                f_cbe = (f"=J{r}/Assumptions!$B$2-L{r}"
+                         if (is_corn and prem is not None and (cif is not None or can_formula))
+                         else cbot_equiv_static)
                 vals = [i, d, c.get("supplier", ""), qty, c.get("origin", ""),
                         c.get("note", ""), fx, f_egp, f_exp, f_cif, cbot, prem,
-                        mkt_port, f_mcif, f_mprm, f_dE, f_dU, f_dP]
+                        mkt_port, f_mcif, f_mprm, f_dE, f_dU, f_dP, f_cbe]
                 _fmt = {4: "#,##0", 7: "#,##0.00", 8: "#,##0", 9: "#,##0",
                         10: "#,##0.00", 11: "#,##0.00", 12: "#,##0.00",
                         13: "#,##0", 14: "#,##0.00", 15: "#,##0.0",
-                        16: "#,##0", 17: "#,##0.00", 18: "#,##0.0"}
+                        16: "#,##0", 17: "#,##0.00", 18: "#,##0.0",
+                        19: "#,##0.00"}
                 for ci, v in enumerate(vals, start=1):
                     cell = ws.cell(row=r, column=ci, value=v)
                     cell.border = border
@@ -20471,7 +20654,7 @@ class App(tk.Tk):
                              value=f"=SUM(D{r0}:D{r-1})" if r - 1 >= r0 else 0)
                 tq.font = Font(bold=True, color="1A4FA0")
                 tq.number_format = "#,##0"
-                for ci in range(1, 19):
+                for ci in range(1, 20):
                     ws.cell(row=r, column=ci).fill = grp_fill
                 imp_tot_row = r
                 r += 2
@@ -20583,7 +20766,7 @@ class App(tk.Tk):
                                end_column=18)
                 r += 1
 
-            widths = [4, 11, 14, 8, 9, 10, 7, 14, 12, 10, 9, 13, 14, 12, 13, 11, 10, 11]
+            widths = [4, 11, 14, 8, 9, 10, 7, 14, 12, 10, 9, 13, 14, 12, 13, 11, 10, 11, 20]
             for i2, w in enumerate(widths, start=1):
                 ws.column_dimensions[get_column_letter(i2)].width = w
             wb.save(fp)
@@ -20605,6 +20788,37 @@ class App(tk.Tk):
                 messagebox.showinfo(APP_NAME, "No contracts to brief.")
                 return
 
+            # ── Commodity picker ────────────────────────────────────────
+            win = tk.Toplevel(self)
+            win.title("Finance brief — choose commodity")
+            win.transient(self); win.grab_set()
+            frm = ttk.Frame(win, padding=12); frm.grid(row=0, column=0)
+            ttk.Label(frm, text="Commodity").grid(row=0, column=0, sticky="w",
+                                                   padx=(0, 8))
+            comm_var = tk.StringVar(value="ALL")
+            ttk.Combobox(frm, textvariable=comm_var, state="readonly", width=14,
+                         values=["ALL"] + self._home_commodity_options()).grid(
+                             row=0, column=1, sticky="w")
+            chosen = {"go": False}
+
+            def _ok():
+                chosen["go"] = True
+                win.destroy()
+            ttk.Button(frm, text="Create brief", command=_ok).grid(
+                row=1, column=0, pady=(10, 0), sticky="w")
+            ttk.Button(frm, text="Cancel", command=win.destroy).grid(
+                row=1, column=1, pady=(10, 0), sticky="w")
+            self.wait_window(win)
+            if not chosen["go"]:
+                return
+            comm_filter = (comm_var.get() or "ALL").strip().upper()
+            if comm_filter != "ALL":
+                contracts = {cid: c for cid, c in contracts.items()
+                             if (c.get("commodity") or "").strip().upper().split("-")[0] == comm_filter}
+                if not contracts:
+                    messagebox.showinfo(APP_NAME, f"No {comm_filter} contracts to brief.")
+                    return
+
             # Window = min..max delivery date across contracts (sheet header).
             dates = [c.get("delivery_date", "") for c in contracts.values()
                      if c.get("delivery_date")]
@@ -20618,7 +20832,8 @@ class App(tk.Tk):
             hdr_font = Font(bold=True, color="FFFFFF", size=9)
             cen = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
-            ws["A1"] = f"Corn Comparison Brief   {win_lo} to {win_hi}"
+            title_scope = "Corn Comparison Brief" if comm_filter == "ALL" else f"{comm_filter} Comparison Brief"
+            ws["A1"] = f"{title_scope}   {win_lo} to {win_hi}"
             ws["A1"].font = Font(bold=True, size=13)
             ws.merge_cells("A1:R1")
 
@@ -20635,7 +20850,8 @@ class App(tk.Tk):
             wsA["A5"] = ("Row formulas:  CIF = (CBOT + premium) × factor   ·   "
                          "EGP at port = CIF × FX + expenses   ·   "
                          "market CIF = (market − expenses) ÷ FX   ·   "
-                         "market premium = market CIF ÷ factor − CBOT")
+                         "market premium = market CIF ÷ factor − CBOT   ·   "
+                         "CBOT Equivalent (Implied) = CIF ÷ factor − premium")
             for _r in (2, 3):
                 wsA.cell(row=_r, column=1).font = Font(bold=True)
             wsA.column_dimensions["A"].width = 36
@@ -20647,7 +20863,7 @@ class App(tk.Tk):
                        "CIF USD/MT", "Avr CBOT", "Premium over July EGP/MT",
                        "Market price EGP/MT at port", "Market CIF USD/MT",
                        "Market Premium over July", "Diff EGP/MT", "Diff USD/MT",
-                       "Diff Premium"]
+                       "Diff Premium", "CBOT Equivalent (Implied)"]
             hr = 3
             for ci, h in enumerate(headers, start=1):
                 cell = ws.cell(row=hr, column=ci, value=h)
@@ -20699,14 +20915,22 @@ class App(tk.Tk):
                               if (mkt_cif is not None and cif is not None) else diff_usd)
                     f_dP   = (f"=O{r}-L{r}"
                               if (mkt_prem is not None and prem is not None) else diff_prem)
+                    # CBOT Equivalent (implied): CBOT = CIF/factor - premium.
+                    factor_any = cbot_conv_factor(comm, strict=False)
+                    cbot_equiv_static = ((cif / factor_any - prem)
+                                          if (cif is not None and prem is not None and factor_any) else None)
+                    f_cbe = (f"=J{r}/Assumptions!$B$2-L{r}"
+                             if (is_corn and prem is not None and (cif is not None or can_formula))
+                             else cbot_equiv_static)
                     vals = [i, c.get("delivery_date", ""), c.get("supplier", ""),
                             qty, c.get("origin", ""), c.get("note", ""),
                             fx, f_egp, f_exp, f_cif, cbot, prem, mkt_port,
-                            f_mcif, f_mprm, f_dE, f_dU, f_dP]
+                            f_mcif, f_mprm, f_dE, f_dU, f_dP, f_cbe]
                     _fmt = {4: "#,##0", 7: "#,##0.00", 8: "#,##0", 9: "#,##0",
                             10: "#,##0.00", 11: "#,##0.00", 12: "#,##0.00",
                             13: "#,##0", 14: "#,##0.00", 15: "#,##0.0",
-                            16: "#,##0", 17: "#,##0.00", 18: "#,##0.0"}
+                            16: "#,##0", 17: "#,##0.00", 18: "#,##0.0",
+                            19: "#,##0.00"}
                     for ci, v in enumerate(vals, start=1):
                         cell = ws.cell(row=r, column=ci, value=v)
                         cell.border = border
@@ -20721,7 +20945,7 @@ class App(tk.Tk):
                 tc = ws.cell(row=r, column=4,
                              value=f"=SUM(D{r0 + 1}:D{r - 1})" if r - 1 > r0 else tot_qty)
                 tc.font = Font(bold=True); tc.number_format = "#,##0"
-                for ci in range(1, 19):
+                for ci in range(1, 20):
                     ws.cell(row=r, column=ci).fill = grp_fill
                 return r + 2
 
@@ -20755,7 +20979,7 @@ class App(tk.Tk):
                                end_row=note_r, end_column=18)
                 note_r += 1
 
-            widths = [4, 11, 14, 8, 9, 10, 7, 14, 12, 10, 9, 13, 14, 12, 13, 11, 10, 11]
+            widths = [4, 11, 14, 8, 9, 10, 7, 14, 12, 10, 9, 13, 14, 12, 13, 11, 10, 11, 20]
             for i, w in enumerate(widths, start=1):
                 ws.column_dimensions[get_column_letter(i)].width = w
 
@@ -20887,6 +21111,7 @@ class App(tk.Tk):
         cbot_impact_egp = 0.0
         cbot_impact_known = False
         cbot_gaps = []
+        cbot_detail = []
         for comm, qty in unpriced_by_comm.items():
             px = latest_cbot.get(comm)
             try:
@@ -20898,7 +21123,10 @@ class App(tk.Tk):
                 continue
             cbot_impact_known = True
             move_usd_mt = px * (cbot_shock_pct / 100.0) * factor
-            cbot_impact_egp += move_usd_mt * qty * fx_now
+            impact_egp = move_usd_mt * qty * fx_now
+            cbot_impact_egp += impact_egp
+            cbot_detail.append({"commodity": comm, "cbot": px, "factor": factor,
+                                 "qty": qty, "impact_egp": impact_egp})
 
         total_impact_egp = (fx_impact_egp or 0.0) + (cbot_impact_egp if cbot_impact_known else 0.0)
         return {
@@ -20907,6 +21135,7 @@ class App(tk.Tk):
             "fx_impact_egp": fx_impact_egp,
             "unpriced_by_comm": unpriced_by_comm,
             "cbot_impact_egp": cbot_impact_egp if cbot_impact_known else None,
+            "cbot_detail": cbot_detail,
             "cbot_gaps": cbot_gaps,
             "total_impact_egp": total_impact_egp,
         }
@@ -24815,13 +25044,21 @@ class App(tk.Tk):
             row=0, column=3, sticky="w", padx=(0, 16))
         ttk.Button(stress, text="Run Stress Test",
                    command=self._run_exposure_stress_test).grid(row=0, column=4, sticky="w")
+        ttk.Label(stress,
+                  text="Formula — FX impact = FX-unsecured open USD exposure × FX shock% × "
+                       "current FX rate. CBOT impact = Σ per unpriced commodity of "
+                       "(latest CBOT × CBOT shock% × conversion factor × unpriced MT × current FX rate). "
+                       "Both are linear (first-order) approximations, not a full re-price.",
+                  foreground=CLR["muted"], wraplength=1150,
+                  justify="left").grid(row=1, column=0, columnspan=5, sticky="w",
+                                       pady=(6, 0))
         self._stress_result_var = tk.StringVar(
             value="Positive shocks = EGP devaluation / higher CBOT. "
                   "Enter both and click Run.")
         ttk.Label(stress, textvariable=self._stress_result_var,
-                  foreground=CLR["muted"], wraplength=1150,
-                  justify="left").grid(row=1, column=0, columnspan=5, sticky="w",
-                                       pady=(6, 0))
+                  foreground=CLR["text"], wraplength=1150,
+                  justify="left").grid(row=2, column=0, columnspan=5, sticky="w",
+                                       pady=(4, 0))
 
         cols = [("Priority", 70), ("Issue", 560), ("Action", 420)]
         self.exp_alert_tree = ttk.Treeview(p, columns=[c for c, _ in cols],
@@ -24849,19 +25086,21 @@ class App(tk.Tk):
             if st["fx_now"] is None:
                 self._stress_result_var.set("No FX history saved — can't run the stress test yet.")
                 return
-            parts = [f"FX {fx_shock:+.1f}% on ${st['fx_exposed_usd']:,.0f} FX-unsecured "
-                     f"exposure: {st['fx_impact_egp']:+,.0f} EGP"]
-            if st["cbot_impact_egp"] is not None:
-                comms = ", ".join(f"{c} {q:,.0f}MT" for c, q in st["unpriced_by_comm"].items()
-                                  if c not in st["cbot_gaps"])
-                parts.append(f"CBOT {cbot_shock:+.1f}% on unpriced ({comms or 'none'}): "
-                             f"{st['cbot_impact_egp']:+,.0f} EGP")
-            elif st["unpriced_by_comm"]:
-                parts.append("CBOT impact unavailable — missing CBOT history for the unpriced commodities.")
+            lines = [
+                f"FX impact = ${st['fx_exposed_usd']:,.0f} exposed × {fx_shock:+.1f}% × "
+                f"{st['fx_now']:,.4f} EGP/USD = {st['fx_impact_egp']:+,.0f} EGP"]
+            for d in st["cbot_detail"]:
+                move_usd_mt = d["cbot"] * (cbot_shock / 100.0) * d["factor"]
+                lines.append(
+                    f"CBOT impact ({d['commodity']}) = {d['cbot']:,.2f}¢/bu × {cbot_shock:+.1f}% × "
+                    f"{d['factor']:.4f} factor = {move_usd_mt:+,.2f} USD/MT × {d['qty']:,.0f} MT × "
+                    f"{st['fx_now']:,.4f} EGP/USD = {d['impact_egp']:+,.0f} EGP")
+            if not st["cbot_detail"] and st["unpriced_by_comm"]:
+                lines.append("CBOT impact unavailable — missing CBOT history for the unpriced commodities.")
             if st["cbot_gaps"]:
-                parts.append(f"(no CBOT price on file for: {', '.join(st['cbot_gaps'])})")
-            parts.append(f"Combined landed-cost impact: {st['total_impact_egp']:+,.0f} EGP")
-            self._stress_result_var.set("   ·   ".join(parts))
+                lines.append(f"(no CBOT price on file for: {', '.join(st['cbot_gaps'])})")
+            lines.append(f"Combined landed-cost impact: {st['total_impact_egp']:+,.0f} EGP")
+            self._stress_result_var.set("\n".join(lines))
         except Exception as e:
             self._surface_error("_run_exposure_stress_test", e, show=True)
 

@@ -1,5 +1,59 @@
 # Changelog
 
+## Unreleased — Contracts tab: commodity filters, CBOT equivalent, formula-based stress, transparency
+
+- **Period Brief & Finance Brief**: both exports now let you pick a single
+  commodity (or "ALL") before generating, via a new dropdown in the export
+  dialog. Sheet titles and the "no purchases found" message reflect the
+  chosen scope.
+- **CBOT Equivalent (Implied)** column added to both briefs: for every corn
+  row with a known CIF and premium, computes
+  `CBOT = CIF / 0.3937 − Premium` as a live Excel formula referencing the
+  new Assumptions conversion-factor cell, so it recalculates if CIF/premium
+  are edited in Excel. Sanity-checked against the user's own example
+  (CIF=285, Premium=210 → CBOT ≈ 513.90).
+- **Stress Scenario Excel** (`export_stress_excel`) rewritten to be fully
+  formula-based: an Assumptions sheet holds editable CBOT, FX, premium,
+  quantity, local price, fees and conversion-factor cells, and every
+  Best/Base/Adverse case, the new "Δ Saving vs Base %" column, and the full
+  shock-grid table are live formulas referencing those cells — change an
+  assumption in Excel and every case and grid cell recalculates. Fixed a
+  bug (caught in testing before release) where the Best row's Δ% formula
+  referenced the Base row's cell before it had been assigned.
+- **Analysis → Contract Performance → Contract Intelligence**: fixed the
+  "🔬 Export Full Contract Intelligence" button doing nothing when clicked.
+  Root cause was a `NameError` from a stale variable reference that Tkinter
+  silently swallowed, so the button was never actually created after
+  selecting a contract. Also fixed the detail panel destroying and
+  recreating its button row on each selection instead of stacking widgets.
+  Local price window: confirmed this is anchored per-contract to that
+  contract's own delivery date (all local prices on/after delivery date,
+  unbounded) unless you narrow it with the optional From/To fields — it is
+  not a single fixed window shared across contracts.
+- **Supplier Scoreboard**: added an "Avg CBOT" column (distinct from "Avg
+  CBOT Edge ¢"), computed from each contract's final pricing CIF and
+  premium the same way the rest of the app derives implied CBOT — reflects
+  final pricing/premium, not a live quote. Also fixed a crash in the
+  scoreboard's summary note when the top-ranked supplier had no CBOT-edge
+  data yet.
+- **Exposure & Risk → Portfolio Stress Test**: the result panel now shows
+  the actual formula and plugged-in numbers behind the FX and CBOT impact
+  figures (exposed USD × shock% × FX rate; and per-commodity CBOT × shock%
+  × conversion factor × unpriced MT × FX rate), not just the final totals.
+- **Local Purchases**: added an "⟳" button to auto-fill CBOT Ref / FX Ref
+  from the nearest logged CBOT/FX history on or before the purchase date,
+  and a new "Basis" column showing the implied basis for each purchase
+  using the same formula as Basis Tracker.
+
+Verified headlessly end-to-end (synthetic contracts, CBOT/FX/local history,
+one local purchase): Period Brief CBOT-equivalent math matches the worked
+example; Stress Excel exports with correct Best/Base/Adverse Δ% formulas
+referencing the Base row; Contract Intelligence button now creates and
+replaces correctly across repeated selections with no stacking; Supplier
+Scoreboard runs and reports correctly whether or not CBOT-edge data exists;
+Exposure & Risk shows the full formula breakdown; Local Purchases auto-fill
+and Basis column compute correctly. No exceptions logged in any path.
+
 ## Unreleased — Formula-based Contract Comparison + Basis Tracker charts
 
 - Rewrote the two-contract comparison Excel export
