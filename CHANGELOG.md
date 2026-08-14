@@ -1,5 +1,39 @@
 # Changelog
 
+## Unreleased — Fix: unrealistic CBOT Equivalent on non-CORN / zero-premium rows
+
+Found by inspecting a real exported Finance Brief for SBM: the "CBOT
+Equivalent (Implied)" column swung wildly (e.g. 292 vs 393 on deals days
+apart) whenever a contract's own premium field was 0. Root cause was two
+separate bugs in `export_finance_brief` and `export_periodic_brief`:
+
+- The Assumptions sheet's conversion-factor cell was hardcoded to the CORN
+  factor (0.3937) and labelled "CORN conversion factor" even when the whole
+  brief was filtered to a different commodity (e.g. SBM, whose real factor
+  is 1.1023). Fixed: when a brief is filtered to one commodity, the
+  Assumptions cell now shows and uses *that* commodity's own factor,
+  correctly labelled; mixed "ALL" briefs keep the CORN-only cell as before
+  and other commodities embed their own factor directly in their row
+  formula (this also means Market Premium is no longer silently blank for
+  every non-CORN row — it used to only compute for CORN).
+- A contract's premium field of 0 almost always means "not tracked for
+  this deal," not "the true basis was zero" — but the formula
+  (`CBOT = CIF ÷ factor − premium`) was using it as-is, which attributes
+  the deal's entire CIF to CBOT and produces an inflated, unrealistic
+  number. Fixed: when a row's own premium is 0/blank, the formula now
+  falls back to that row's Market Premium (already computed elsewhere in
+  the same brief from logged local price + CBOT history) instead, and the
+  cell is colored orange with a legend note so it reads as an estimate,
+  not a recorded deal term. CIF itself is unchanged — it still only
+  re-derives from Avr CBOT + premium for CORN rows, same as before.
+
+Verified headlessly against data shaped like the real uploaded file: a
+0-premium SBM row that previously implied CBOT ≈ 393 now falls back to
+Market Premium and lands at ≈ 300, in line with the period's own average
+CBOT (307.2) instead of ~85 points off; a real-premium row is unaffected
+and still uses its own premium. Confirmed the mixed "ALL" brief path keeps
+CORN rows byte-for-byte identical to before. No exceptions in either path.
+
 ## Unreleased — Contracts tab: commodity filters, CBOT equivalent, formula-based stress, transparency
 
 - **Period Brief & Finance Brief**: both exports now let you pick a single

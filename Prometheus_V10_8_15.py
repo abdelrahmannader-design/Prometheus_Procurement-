@@ -20541,15 +20541,29 @@ class App(tk.Tk):
             wsA = wb.create_sheet("Assumptions")
             wsA["A1"] = "Purchasing Brief — input assumptions"
             wsA["A1"].font = Font(bold=True, size=12)
-            wsA["A2"] = "CORN conversion factor (¢/bu → $/MT)"
-            wsA["B2"] = self._BRIEF_CORN_FACTOR
+            # B2 holds THIS brief's own factor when filtered to a single
+            # commodity (any commodity, not just corn); a mixed "ALL" brief
+            # keeps B2 as CORN's factor and other commodities embed their own
+            # factor directly in their row formula instead.
+            single_commodity = None if comm_filter == "ALL" else comm_filter
+            b2_factor = (cbot_conv_factor(single_commodity, strict=False)
+                         if single_commodity else self._BRIEF_CORN_FACTOR)
+            if single_commodity:
+                wsA["A2"] = f"{single_commodity} conversion factor (CBOT → $/MT)"
+            else:
+                wsA["A2"] = "CORN conversion factor (¢/bu → $/MT)"
+            wsA["B2"] = b2_factor
             wsA["A3"] = "Average local expenses (EGP/MT)"; wsA["B3"] = exp
             wsA["A4"] = f"Latest USD/EGP rate ({latest_fx_d or 'none stored'})"
             wsA["B4"] = latest_fx if latest_fx is not None else ""
             wsA["A6"] = ("Formulas: CIF=(CBOT+premium)×B2 · EGP@port=CIF×FX+B3 · "
                          "mktCIF=(mkt−B3)÷FX · mktPrem=mktCIF÷B2−CBOT · "
                          "FX impact = (B4 − contract FX) × CIF · "
-                         "CBOT Equivalent (Implied) = CIF÷B2−premium")
+                         "CBOT Equivalent (Implied) = CIF÷B2−premium, falling back "
+                         "to Market Premium (orange) when the contract's own "
+                         "premium is 0/blank. Mixed 'ALL' briefs: B2 drives CORN "
+                         "rows only, other commodities embed their own factor "
+                         "per row (e.g. SBM 1.1023 $/short-ton→$/MT).")
             for _r in (2, 3, 4):
                 wsA.cell(row=_r, column=1).font = Font(bold=True)
             wsA.column_dimensions["A"].width = 40
@@ -20586,6 +20600,7 @@ class App(tk.Tk):
             r = hr + 1
             r0 = r
             fx_rows = []   # (row, name) for the FX-impact block
+            mkt_prem_used_flag = {"any": False}
             for i, (d, cid, c) in enumerate(imports, start=1):
                 comm = (c.get("commodity") or "CORN")
                 qty = to_float(c.get("qty_mt"), 0) or 0
@@ -20597,13 +20612,23 @@ class App(tk.Tk):
                 mkt_port = self._brief_market_egp_at_port(comm, d)
                 mkt_cif = ((mkt_port - exp) / fx) if (mkt_port is not None and fx) else None
                 is_corn = comm.upper().startswith("CORN")
-                factor = self._BRIEF_CORN_FACTOR if is_corn else None
-                mkt_prem = ((mkt_cif / factor - cbot)
-                            if (mkt_cif is not None and cbot and factor) else None)
+                factor_any = cbot_conv_factor(comm, strict=False)
+                # B2 holds THIS row's own factor whenever the brief is
+                # filtered to a single commodity; mixed "ALL" briefs only let
+                # CORN rows share B2, other commodities embed their own
+                # factor as a literal in the formula.
+                use_b2 = (single_commodity is not None) or is_corn
+                mkt_prem = ((mkt_cif / factor_any - cbot)
+                            if (mkt_cif is not None and cbot and factor_any) else None)
                 diff_egp = (mkt_port - egp_port) if (mkt_port is not None and egp_port is not None) else None
                 diff_usd = (mkt_cif - cif) if (mkt_cif is not None and cif is not None) else None
                 diff_prem = (mkt_prem - prem) if (mkt_prem is not None and prem is not None) else None
+                # CIF stays the raw deal-entered figure for non-CORN rows,
+                # same as before — only CORN rows re-derive it live from
+                # Avr CBOT + premium (use_b2 only widens which cells the
+                # Market Premium / CBOT Equivalent formulas may reference).
                 can_formula = is_corn and cbot is not None and prem is not None
+                have_mkt_formula = mkt_port is not None and fx is not None and cbot is not None
                 f_exp  = "=Assumptions!$B$3"
                 f_cif  = f"=(K{r}+L{r})*Assumptions!$B$2" if can_formula else cif
                 f_egp  = (f"=J{r}*G{r}+I{r}"
@@ -20611,8 +20636,12 @@ class App(tk.Tk):
                           else egp_port)
                 f_mcif = (f"=(M{r}-I{r})/G{r}"
                           if (mkt_port is not None and fx) else mkt_cif)
-                f_mprm = (f"=N{r}/Assumptions!$B$2-K{r}"
-                          if (mkt_port is not None and fx and can_formula) else mkt_prem)
+                if use_b2 and have_mkt_formula:
+                    f_mprm = f"=N{r}/Assumptions!$B$2-K{r}"
+                elif have_mkt_formula:
+                    f_mprm = f"=N{r}/{factor_any}-K{r}"
+                else:
+                    f_mprm = mkt_prem
                 f_dE   = (f"=M{r}-H{r}"
                           if (mkt_port is not None and egp_port is not None) else diff_egp)
                 f_dU   = (f"=N{r}-J{r}"
@@ -20621,13 +20650,24 @@ class App(tk.Tk):
                           if (mkt_prem is not None and prem is not None) else diff_prem)
                 # CBOT Equivalent (implied): CBOT = CIF/factor - premium — the
                 # CBOT level this contract's own CIF and premium imply, so it
-                # can be sanity-checked against the period's actual average CBOT.
-                factor_any = cbot_conv_factor(comm, strict=False)
-                cbot_equiv_static = ((cif / factor_any - prem)
-                                      if (cif is not None and prem is not None and factor_any) else None)
-                f_cbe = (f"=J{r}/Assumptions!$B$2-L{r}"
-                         if (is_corn and prem is not None and (cif is not None or can_formula))
-                         else cbot_equiv_static)
+                # can be sanity-checked against the period's actual average
+                # CBOT. Prefer the contract's OWN recorded premium; 0/blank
+                # almost always means it wasn't tracked for that deal, so
+                # fall back to the Market Premium (col O, derived from logged
+                # local price + CBOT history) and mark the cell orange.
+                prem_is_real = prem not in (None, 0)
+                if prem_is_real:
+                    prem_col, eff_prem = "L", prem
+                else:
+                    prem_col, eff_prem = "O", mkt_prem
+                used_mkt_prem = (not prem_is_real) and eff_prem is not None
+                if cif is not None and eff_prem is not None:
+                    f_cbe = (f"=J{r}/Assumptions!$B$2-{prem_col}{r}" if use_b2
+                             else f"=J{r}/{factor_any}-{prem_col}{r}")
+                else:
+                    f_cbe = None
+                if used_mkt_prem:
+                    mkt_prem_used_flag["any"] = True
                 vals = [i, d, c.get("supplier", ""), qty, c.get("origin", ""),
                         c.get("note", ""), fx, f_egp, f_exp, f_cif, cbot, prem,
                         mkt_port, f_mcif, f_mprm, f_dE, f_dU, f_dP, f_cbe]
@@ -20644,6 +20684,8 @@ class App(tk.Tk):
                         cell.number_format = _fmt[ci]
                     if isinstance(v, str) and v.startswith("="):
                         cell.font = BLUE
+                    if ci == 19 and used_mkt_prem:
+                        cell.font = Font(color="B36B00", italic=True)
                 if fx is not None and (can_formula or cif is not None):
                     fx_rows.append((r, c.get("name") or cid, qty))
                 r += 1
@@ -20753,14 +20795,22 @@ class App(tk.Tk):
             ws.cell(row=r, column=1,
                     value=f"Contracts: {len(imports)}   ·   Local buys: {len(locals_)}")
             r += 2
-            for txt in [
+            _period_notes = [
                 "FX Impact: contract values are calculated at each contract's "
                 "delivery/contract-date USD rate and compared with the latest "
                 "USD rate (Assumptions!B4). The difference reflects the impact "
                 "of the change in the USD exchange rate.",
                 "A revaluation will be conducted to determine the over price.",
                 "Reviewed and Verified by Finance.",
-            ]:
+            ]
+            if mkt_prem_used_flag["any"]:
+                _period_notes.append(
+                    "Orange \"CBOT Equivalent (Implied)\" cells: that contract's "
+                    "own premium was 0/blank, so the figure falls back to the "
+                    "Market Premium (derived from logged local price + CBOT "
+                    "history for that date) instead — treat it as an estimate, "
+                    "not a recorded deal term.")
+            for txt in _period_notes:
                 ws.cell(row=r, column=1, value=txt).alignment = Alignment(wrap_text=True)
                 ws.merge_cells(start_row=r, start_column=1, end_row=r,
                                end_column=18)
@@ -20837,13 +20887,31 @@ class App(tk.Tk):
             ws["A1"].font = Font(bold=True, size=13)
             ws.merge_cells("A1:R1")
 
+            # A brief filtered to one commodity uses THAT commodity's own
+            # conversion factor for every row (so it's correct for SBM/wheat/
+            # soybean briefs, not just corn). "ALL" (mixed commodities) keeps
+            # B2 as the CORN factor — the only one that can be shared across
+            # rows — and non-CORN rows embed their own factor directly in
+            # their formula instead.
+            single_commodity = None if comm_filter == "ALL" else comm_filter
+            b2_factor = (cbot_conv_factor(single_commodity, strict=False)
+                         if single_commodity else self._BRIEF_CORN_FACTOR)
+
             # Assumptions sheet: the input cells every formula points at.
             wsA = wb.create_sheet("Assumptions")
             wsA["A1"] = "Finance Brief — input assumptions"
             wsA["A1"].font = Font(bold=True, size=12)
-            wsA["A2"] = "CORN conversion factor (¢/bu → $/MT)"
-            wsA["B2"] = self._BRIEF_CORN_FACTOR
-            wsA["C2"] = "House convention 0.3937 (ARG/BRZ/USA). Applies to CORN rows only."
+            if single_commodity:
+                wsA["A2"] = f"{single_commodity} conversion factor (CBOT → $/MT)"
+                wsA["C2"] = (f"House convention {b2_factor:g} for {single_commodity}. "
+                             f"Every row in this brief uses this factor.")
+            else:
+                wsA["A2"] = "CORN conversion factor (¢/bu → $/MT)"
+                wsA["C2"] = ("House convention 0.3937 (ARG/BRZ/USA). Mixed-commodity "
+                             "brief — this drives CORN rows only; other commodities "
+                             "(e.g. SBM 1.1023 $/short-ton→$/MT) use their own factor "
+                             "embedded directly in that row's formula.")
+            wsA["B2"] = b2_factor
             wsA["A3"] = "Average local expenses (EGP/MT)"
             wsA["B3"] = self._basis_expenses_egp_mt()
             wsA["C3"] = "At-port costs inside the local price. Editable in Basis Tracker bar."
@@ -20851,7 +20919,9 @@ class App(tk.Tk):
                          "EGP at port = CIF × FX + expenses   ·   "
                          "market CIF = (market − expenses) ÷ FX   ·   "
                          "market premium = market CIF ÷ factor − CBOT   ·   "
-                         "CBOT Equivalent (Implied) = CIF ÷ factor − premium")
+                         "CBOT Equivalent (Implied) = CIF ÷ factor − premium   ·   "
+                         "premium falls back to Market Premium (orange) when the "
+                         "contract's own premium is 0/blank.")
             for _r in (2, 3):
                 wsA.cell(row=_r, column=1).font = Font(bold=True)
             wsA.column_dimensions["A"].width = 36
@@ -20870,6 +20940,8 @@ class App(tk.Tk):
                 cell.fill = hdr_fill; cell.font = hdr_font
                 cell.alignment = cen; cell.border = border
 
+            mkt_prem_used_flag = {"any": False}
+
             def _emit_group(title, rows, r0):
                 gc = ws.cell(row=r0, column=1, value=title)
                 gc.font = Font(bold=True, size=10)
@@ -20886,18 +20958,31 @@ class App(tk.Tk):
                     cbot = self._brief_avg_cbot(comm, win_lo, win_hi)
                     prem = to_float(c.get("premium_cents"), None)
                     exp = self._BRIEF_LOCAL_EXPENSES_EGP_MT
+                    is_corn = comm.upper().startswith("CORN")
+                    factor_any = cbot_conv_factor(comm, strict=False)
+                    # B2 holds THIS row's own factor whenever the brief is
+                    # filtered to a single commodity (any commodity, not just
+                    # corn); in a mixed "ALL" brief only CORN rows can safely
+                    # share B2, so other commodities embed their factor as a
+                    # literal in the formula instead.
+                    use_b2 = (single_commodity is not None) or is_corn
                     # Price EGP/MT at port = CIF*FX + expenses (sheet formula)
                     egp_port = (cif * fx + exp) if (cif is not None and fx is not None) else None
                     mkt_port = self._brief_market_egp_at_port(comm, c.get("delivery_date", ""))
                     mkt_cif = ((mkt_port - exp) / fx) if (mkt_port is not None and fx) else None
-                    factor = self._BRIEF_CORN_FACTOR if comm.upper().startswith("CORN") else None
-                    mkt_prem = ((mkt_cif / factor - cbot) if (mkt_cif is not None and cbot and factor) else None)
+                    mkt_prem = ((mkt_cif / factor_any - cbot)
+                                if (mkt_cif is not None and cbot and factor_any) else None)
                     diff_egp = (mkt_port - egp_port) if (mkt_port is not None and egp_port is not None) else None
                     diff_usd = (mkt_cif - cif) if (mkt_cif is not None and cif is not None) else None
                     diff_prem = (mkt_prem - prem) if (mkt_prem is not None and prem is not None) else None
 
-                    is_corn = comm.upper().startswith("CORN")
+                    # CIF stays the raw deal-entered figure for non-CORN
+                    # rows, same as before — only CORN rows re-derive it
+                    # live from Avr CBOT + premium (use_b2 only widens which
+                    # cells the Market Premium / CBOT Equivalent formulas
+                    # may reference).
                     can_formula = is_corn and cbot is not None and prem is not None
+                    have_mkt_formula = mkt_port is not None and fx is not None and cbot is not None
                     # Derived numbers become REAL Excel formulas (auditable):
                     f_exp  = "=Assumptions!$B$3"
                     f_cif  = f"=(K{r}+L{r})*Assumptions!$B$2" if can_formula else cif
@@ -20906,9 +20991,12 @@ class App(tk.Tk):
                               else egp_port)
                     f_mcif = (f"=(M{r}-I{r})/G{r}"
                               if (mkt_port is not None and fx) else mkt_cif)
-                    f_mprm = (f"=N{r}/Assumptions!$B$2-K{r}"
-                              if (mkt_port is not None and fx and can_formula)
-                              else mkt_prem)
+                    if use_b2 and have_mkt_formula:
+                        f_mprm = f"=N{r}/Assumptions!$B$2-K{r}"
+                    elif have_mkt_formula:
+                        f_mprm = f"=N{r}/{factor_any}-K{r}"
+                    else:
+                        f_mprm = mkt_prem
                     f_dE   = (f"=M{r}-H{r}"
                               if (mkt_port is not None and egp_port is not None) else diff_egp)
                     f_dU   = (f"=N{r}-J{r}"
@@ -20916,12 +21004,26 @@ class App(tk.Tk):
                     f_dP   = (f"=O{r}-L{r}"
                               if (mkt_prem is not None and prem is not None) else diff_prem)
                     # CBOT Equivalent (implied): CBOT = CIF/factor - premium.
-                    factor_any = cbot_conv_factor(comm, strict=False)
-                    cbot_equiv_static = ((cif / factor_any - prem)
-                                          if (cif is not None and prem is not None and factor_any) else None)
-                    f_cbe = (f"=J{r}/Assumptions!$B$2-L{r}"
-                             if (is_corn and prem is not None and (cif is not None or can_formula))
-                             else cbot_equiv_static)
+                    # Prefer the contract's OWN recorded premium; a premium of
+                    # 0/blank almost always means it wasn't tracked for that
+                    # deal (not that the basis was truly zero) — using it as-is
+                    # would attribute the whole CIF to CBOT. When that happens,
+                    # fall back to the Market Premium (col O), derived
+                    # independently from logged local price + CBOT history, and
+                    # mark the cell (orange) so it reads as a fallback estimate.
+                    prem_is_real = prem not in (None, 0)
+                    if prem_is_real:
+                        prem_col, eff_prem = "L", prem
+                    else:
+                        prem_col, eff_prem = "O", mkt_prem
+                    used_mkt_prem = (not prem_is_real) and eff_prem is not None
+                    if cif is not None and eff_prem is not None:
+                        f_cbe = (f"=J{r}/Assumptions!$B$2-{prem_col}{r}" if use_b2
+                                 else f"=J{r}/{factor_any}-{prem_col}{r}")
+                    else:
+                        f_cbe = None
+                    if used_mkt_prem:
+                        mkt_prem_used_flag["any"] = True
                     vals = [i, c.get("delivery_date", ""), c.get("supplier", ""),
                             qty, c.get("origin", ""), c.get("note", ""),
                             fx, f_egp, f_exp, f_cif, cbot, prem, mkt_port,
@@ -20939,6 +21041,8 @@ class App(tk.Tk):
                             cell.number_format = _fmt[ci]
                         if isinstance(v, str) and v.startswith("="):
                             cell.font = Font(color="1A4FA0")
+                        if ci == 19 and used_mkt_prem:
+                            cell.font = Font(color="B36B00", italic=True)
                     r += 1
                 # group total row — a real SUM the user can audit
                 ws.cell(row=r, column=1, value="TOTAL").font = Font(bold=True)
@@ -20963,16 +21067,24 @@ class App(tk.Tk):
 
             # FX-impact note block (mirrors the sheet's paragraph).
             note_r = nr + 1
+            commodity_note_name = single_commodity if single_commodity else "corn"
             notes = [
                 "FX Impact: The contract value was calculated using the USD "
                 "exchange rate on the contract/delivery date, and compared with "
                 "the latest USD exchange rate. The difference reflects the impact "
                 "of the reduction in the USD exchange rate.",
-                "This represents the preliminary cost of the corn.",
+                f"This represents the preliminary cost of the {commodity_note_name}.",
                 "A revaluation will be conducted within two days to determine "
                 "the over price.",
                 "Reviewed and Verified by Finance.",
             ]
+            if mkt_prem_used_flag["any"]:
+                notes.append(
+                    "Orange \"CBOT Equivalent (Implied)\" cells: that contract's "
+                    "own premium was 0/blank, so the figure falls back to the "
+                    "Market Premium (derived from logged local price + CBOT "
+                    "history for that date) instead — treat it as an estimate, "
+                    "not a recorded deal term.")
             for txt in notes:
                 ws.cell(row=note_r, column=1, value=txt).alignment = Alignment(wrap_text=True)
                 ws.merge_cells(start_row=note_r, start_column=1,
