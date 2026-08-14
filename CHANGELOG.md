@@ -1,5 +1,33 @@
 # Changelog
 
+## Unreleased — Local Purchases CBOT Equivalent: date-matched Market Premium
+
+User-asked follow-up: why net out a *period-average* import premium
+instead of the Market Premium at the specific purchase date, the way the
+Basis Tab already does? Switched to exactly that. For each Local
+Purchases row, the premium netted out of "CBOT Equivalent (Implied)" is
+now tiered:
+
+1. **Date-matched Market Premium** (preferred): Basis Tracker's own
+   Implied-Basis method — the nearest logged local price on/before that
+   purchase's own date, converted to CBOT terms via that date's CBOT/FX,
+   minus that date's CBOT. New "Market Price EGP/MT at port (date)" and
+   "Market Premium (date, ¢/bu)" columns show the number, live-formula
+   linked to CBOT Ref/FX/local-expenses so it's fully auditable.
+2. **This period's average import premium** (orange): falls back here
+   only when no local price history exists for that specific date.
+3. **Zero** (red): falls back here only when neither a date-matched
+   market premium nor any import contract to average is available — the
+   figure is then a zero-basis upper bound, not an estimate.
+
+Verified headlessly: a row with local price history on its date uses the
+live date-matched formula; a row with an import contract for that
+commodity but no price history that day falls back to the period average
+(orange); a row with neither falls back to 0 (red). No exceptions, and
+the earlier fix's real-file numbers (CORN ≈466 vs Avr CBOT ≈450) still
+hold with the date-matched method available. Full regression suite
+re-run clean.
+
 ## Unreleased — Fix: unrealistic Local Purchases CBOT Equivalent
 
 User-flagged: the Local Purchases CBOT Equivalent added last round was
