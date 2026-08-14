@@ -7,6 +7,12 @@ import json
 import os
 import re
 import csv
+import io
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.base import MIMEBase
+from email import encoders
 import datetime as dt
 import math
 import traceback
@@ -3243,6 +3249,7 @@ class App(tk.Tk):
         self._start_home_market_autofetch()
         self._start_daily_fx_fetch()    # auto-store USD/EGP every day
         self._start_cbot_history_fetch() # auto-store CBOT daily closes
+        self.after(60_000, self._ceo_digest_auto_tick)  # hourly CEO email digest check
 
     @staticmethod
     def stripe_tree(tv):
@@ -3963,6 +3970,12 @@ class App(tk.Tk):
         _ent(1, 7, self.lp_cbot_ref_lp_var, w=10)
         _lbl(1, 8, "FX Ref")
         _ent(1, 9, self.lp_fx_ref_lp_var, w=10)
+        _lp_fill_btn = ttk.Button(form, text="⟳", width=2,
+                                  command=self._lp_fill_cbot_fx_from_history)
+        _lp_fill_btn.grid(row=1, column=10, sticky="w", padx=(0, 4), pady=(0, 4))
+        attach_tooltip(_lp_fill_btn,
+                       "Fill CBOT/FX from the nearest logged history on or "
+                       "before the purchase date, for this commodity.")
 
         # Freight / transport quick-pick row
         _lbl(2, 0, "Transport / Freight:")
@@ -4091,6 +4104,7 @@ class App(tk.Tk):
             ("TotalCost", 110,  "e"),
             ("CBOTRef",    80,  "e"),
             ("FXRef",      70,  "e"),
+            ("Basis",      90,  "e"),
             ("VsImport",  115,  "e"),
             ("Notes",     160,  "w"),
         ]
@@ -4099,7 +4113,8 @@ class App(tk.Tk):
             "Commodity":"Commodity","Origin":"Origin","QtyMT":"Qty (MT)",
             "PriceEGP":"Price (EGP/MT)","Transport":"Transport (EGP/MT)",
             "TotalCost":"Total Cost (EGP)","CBOTRef":"CBOT Ref (¢)",
-            "FXRef":"FX Ref","VsImport":"vs Import (EGP/MT)","Notes":"Notes",
+            "FXRef":"FX Ref","Basis":"Implied Basis",
+            "VsImport":"vs Import (EGP/MT)","Notes":"Notes",
         }
         self.lp_purchases_tree = ttk.Treeview(
             tf, columns=[c for c,_,_ in lp_cols],
@@ -5299,6 +5314,32 @@ class App(tk.Tk):
             trans = get_default_local_transport_egp_mt(self.state_obj)
         return trans
 
+    def _lp_fill_cbot_fx_from_history(self):
+        """Fill CBOT Ref / FX Ref from the nearest logged history on or
+        before the purchase date, for the selected commodity."""
+        try:
+            d = parse_date_flex(self.lp_date_lp_var.get())
+            if d is None:
+                messagebox.showerror(APP_NAME, "Enter a valid purchase date first.")
+                return
+            base = (self.lp_commodity_lp_var.get() or "").strip().upper().split("-")[0]
+            if not base:
+                messagebox.showerror(APP_NAME, "Choose a commodity first.")
+                return
+            ch, fxh = self._basis_history_lists(base)
+            cbot, _cbot_date = self._basis_nearest_le(ch, d.isoformat())
+            fx, _fx_date = self._basis_nearest_le(fxh, d.isoformat())
+            if cbot is None and fx is None:
+                messagebox.showinfo(APP_NAME,
+                                    "No CBOT/FX history on or before that date yet.")
+                return
+            if cbot is not None:
+                self.lp_cbot_ref_lp_var.set(f"{cbot:.2f}")
+            if fx is not None:
+                self.lp_fx_ref_lp_var.set(f"{fx:.4f}")
+        except Exception as e:
+            self._surface_error("_lp_fill_cbot_fx_from_history", e, show=True)
+
     def _lp_form_to_dict(self):
         return {
             "date":              self.lp_date_lp_var.get().strip(),
@@ -5511,6 +5552,7 @@ class App(tk.Tk):
         total_imp_qty  = 0.0
         total_imp_paid = 0.0
 
+        exp = self._basis_expenses_egp_mt()
         for rec in lps:
             qty   = to_float(rec.get("qty_mt"), None) or 0
             price = to_float(rec.get("price_egp_mt"), None) or 0
@@ -5529,6 +5571,23 @@ class App(tk.Tk):
             if imp_avg:
                 vs_imp = allin - imp_avg
                 tag    = "cheaper" if vs_imp < 0 else "costlier"
+
+            # Implied basis on the purchase date: use the stored CBOT/FX
+            # reference if the user entered one, else fall back to nearest
+            # logged history on/before that date — same formula Basis
+            # Tracker uses, so the two screens always agree.
+            cbot_val = to_float(rec.get("cbot_ref"), None)
+            fx_val = to_float(rec.get("fx_ref"), None)
+            if cbot_val is None or fx_val is None:
+                ch, fxh = self._basis_history_lists(base)
+                if cbot_val is None:
+                    cbot_val, _cd = self._basis_nearest_le(ch, rec.get("date", ""))
+                if fx_val is None:
+                    fx_val, _fd = self._basis_nearest_le(fxh, rec.get("date", ""))
+            factor = cbot_conv_factor(base, strict=False)
+            basis = (((allin - exp) / fx_val) / factor - cbot_val
+                      if (fx_val and factor and cbot_val is not None) else None)
+
             tv.insert("", "end", iid=str(rec.get("id","")),
                       tags=(tag,), values=(
                 rec.get("id",""), rec.get("date",""),
@@ -5539,6 +5598,7 @@ class App(tk.Tk):
                     if rec.get("cbot_ref") else "",
                 fmt_num(rec.get("fx_ref"), 4)
                     if rec.get("fx_ref") else "",
+                fmt_num(basis, 2) if basis is not None else "—",
                 fmt_num(vs_imp, 0) if vs_imp is not None else "—",
                 rec.get("note",""),
             ))
@@ -5549,7 +5609,7 @@ class App(tk.Tk):
             tv.insert("", "end", iid="__LP_TOTAL__", tags=("total",),
                       values=("","TOTAL","","","",
                               fmt_num(total_lp_qty,0),"","",
-                              fmt_num(total_lp_paid,0),"","","",""))
+                              fmt_num(total_lp_paid,0),"","","","",""))
 
         # import totals
         for c in self.state_obj.get("contracts", {}).values():
@@ -6572,6 +6632,259 @@ class App(tk.Tk):
             "data_gaps": int(data_gaps),
         }
 
+    # ------------------------------------------------------------------
+    # CEO-facing rollups: YTD target pace, FX hedge cover, cash calendar,
+    # category (commodity) performance with year-over-year comparison, and
+    # the open-MTM trend series behind the Home dashboard's trend chart.
+    # ------------------------------------------------------------------
+    def _home_ytd_target_progress(self, commodity="ALL"):
+        """Year-to-date closed-contract realised savings vs the configured
+        annual target, plus a simple run-rate projection to year end."""
+        today = dt.date.today()
+        year_start = dt.date(today.year, 1, 1)
+        next_year_start = dt.date(today.year + 1, 1, 1)
+        f_comm = "All" if (commodity or "ALL").upper() == "ALL" else commodity.upper()
+        rows, _totals = self._sv_collect_savings_rows(f_comm, "All", "All", "Closed")
+        ytd_saving = 0.0
+        for row in rows:
+            dd = parse_date_flex(row.get("realized_date") or row.get("delivery_date") or "")
+            value = to_float(row.get("total_sav"), None)
+            if dd is None or value is None:
+                continue
+            if year_start <= dd <= today:
+                ytd_saving += value
+        target = to_float((self.state_obj.get("ui", {}) or {}).get("annual_savings_target_egp"), None)
+        days_elapsed = (today - year_start).days + 1
+        days_in_year = (next_year_start - year_start).days
+        pace_projection = (ytd_saving / days_elapsed * days_in_year) if days_elapsed else None
+        pct = (ytd_saving / target * 100.0) if target and target > 0 else None
+        return {
+            "year": today.year,
+            "ytd_saving": ytd_saving,
+            "target": target,
+            "pct_of_target": pct,
+            "pace_projection": pace_projection,
+        }
+
+    def _home_fx_hedge_coverage(self, commodity="ALL"):
+        """Share of open exposure with FX secured (Form 4 issued) vs still
+        floating. A real portfolio-level risk metric, not a per-deal one."""
+        contracts = self.state_obj.get("contracts", {}) or {}
+        total_qty = 0.0
+        hedged_qty = 0.0
+        for cid, c in contracts.items():
+            if (c.get("status") or "Open").strip() == "Closed":
+                continue
+            if not self._home_contract_matches_filter(c, commodity):
+                continue
+            qty = to_float(c.get("remaining_mt") or c.get("qty_mt"), 0.0) or 0.0
+            if not qty:
+                continue
+            total_qty += qty
+            if to_float(c.get("form4_fx"), None):
+                hedged_qty += qty
+        pct = (hedged_qty / total_qty * 100.0) if total_qty else None
+        return {
+            "open_qty": total_qty,
+            "hedged_qty": hedged_qty,
+            "unhedged_qty": max(total_qty - hedged_qty, 0.0),
+            "pct": pct,
+        }
+
+    def _home_cash_calendar(self, commodity="ALL"):
+        """Bucket estimated cash outflow (own-after x quantity) for open
+        contracts by how soon delivery is due — a treasury planning view."""
+        today = dt.date.today()
+        buckets = {"due": 0.0, "0_30": 0.0, "31_60": 0.0, "61_90": 0.0, "90_plus": 0.0}
+        counts = {k: 0 for k in buckets}
+        contracts = self.state_obj.get("contracts", {}) or {}
+        fx_mode_sel = getattr(self, "_hd_fx_mode_var", None)
+        fx_mode = fx_mode_sel.get() if fx_mode_sel else "live"
+        for cid, c in contracts.items():
+            if (c.get("status") or "Open").strip() == "Closed":
+                continue
+            if not self._home_contract_matches_filter(c, commodity):
+                continue
+            metrics = self._hd_cost_for_contract(cid, c, use_latest_fx=True, fx_mode=fx_mode)
+            qty = to_float(metrics.get("qty"), 0.0) or 0.0
+            own_after = metrics.get("own_after")
+            if not qty or own_after is None:
+                continue
+            cash = own_after * qty
+            dd = parse_date_flex(c.get("delivery_date") or c.get("storage_start") or "")
+            if dd is None:
+                key = "90_plus"
+            else:
+                days = (dd - today).days
+                if days < 0:
+                    key = "due"
+                elif days <= 30:
+                    key = "0_30"
+                elif days <= 60:
+                    key = "31_60"
+                elif days <= 90:
+                    key = "61_90"
+                else:
+                    key = "90_plus"
+            buckets[key] += cash
+            counts[key] += 1
+        return {"buckets": buckets, "counts": counts, "total": sum(buckets.values())}
+
+    def _home_category_rollup(self):
+        """Per-commodity spend/saving rollup with a YTD vs prior-YTD (YoY)
+        comparison — a one-table procurement P&L by category."""
+        today = dt.date.today()
+        year_start = dt.date(today.year, 1, 1)
+        prior_year_start = dt.date(today.year - 1, 1, 1)
+        try:
+            prior_year_same_day = dt.date(today.year - 1, today.month, today.day)
+        except ValueError:
+            prior_year_same_day = dt.date(today.year - 1, 2, 28)
+        rows = []
+        for comm in self._home_commodity_options():
+            metrics = self._home_exec_metrics(comm, fx_mode="live")
+            comm_rows, _t = self._sv_collect_savings_rows(comm, "All", "All", "Closed")
+            ytd = 0.0
+            prior_ytd = 0.0
+            for row in comm_rows:
+                dd = parse_date_flex(row.get("realized_date") or row.get("delivery_date") or "")
+                value = to_float(row.get("total_sav"), None)
+                if dd is None or value is None:
+                    continue
+                if year_start <= dd <= today:
+                    ytd += value
+                elif prior_year_start <= dd <= prior_year_same_day:
+                    prior_ytd += value
+            yoy_pct = ((ytd - prior_ytd) / abs(prior_ytd) * 100.0) if prior_ytd else None
+            rows.append({
+                "commodity": comm,
+                "closed_qty": metrics["closed_qty"],
+                "realized_saving": metrics["realized_saving"],
+                "realized_per_mt": metrics["realized_per_mt"],
+                "open_qty": metrics["open_qty"],
+                "open_position": metrics["open_position"],
+                "ytd_saving": ytd,
+                "prior_ytd_saving": prior_ytd,
+                "yoy_pct": yoy_pct,
+            })
+        return rows
+
+    def _home_open_mtm_trend_series(self, commodity="ALL", days=60):
+        """Daily total open-MTM edge from the stored open_mtm_daily ledger —
+        feeds the Home Open Exposure Trend chart."""
+        history = self.state_obj.get("open_mtm_daily", []) or []
+        selected = (commodity or "ALL").strip().upper()
+        by_date = {}
+        for rec in history:
+            if not isinstance(rec, dict):
+                continue
+            if selected != "ALL" and (rec.get("base_commodity") or "").upper() != selected:
+                continue
+            d = rec.get("date")
+            val = to_float(rec.get("total_saving_egp"), None)
+            if not d or val is None:
+                continue
+            by_date[d] = by_date.get(d, 0.0) + val
+        keys = sorted(by_date)[-days:]
+        return [(k, by_date[k]) for k in keys]
+
+    def _home_value_since_golive(self, commodity="ALL"):
+        """All-time closed-contract realised savings and the earliest
+        realised date on record — the "value created since go-live" line."""
+        f_comm = "All" if (commodity or "ALL").upper() == "ALL" else commodity.upper()
+        rows, totals = self._sv_collect_savings_rows(f_comm, "All", "All", "Closed")
+        earliest = None
+        for row in rows:
+            if not row.get("is_realized"):
+                continue
+            dd = parse_date_flex(row.get("realized_date") or row.get("delivery_date") or "")
+            if dd is not None and (earliest is None or dd < earliest):
+                earliest = dd
+        return {
+            "total": to_float(totals.get("grand_sav"), 0.0) or 0.0,
+            "count": int(totals.get("counted", 0) or 0),
+            "since": earliest,
+        }
+
+    def _home_forecast_landed_cost(self, commodity="CORN", horizon_days=90):
+        """Transparent linear-trend extrapolation of CBOT + FX history into a
+        projected landed cost. This is a trend line, not a predictive model —
+        every place it is shown says so explicitly."""
+        base = (commodity or "CORN").strip().upper().split("-")[0]
+
+        def _series(records, value_fn, filter_fn=None):
+            pts = []
+            for e in records or []:
+                if filter_fn is not None and not filter_fn(e):
+                    continue
+                d = e.get("date")
+                v = value_fn(e)
+                if d and v is not None:
+                    pts.append((d, v))
+            pts.sort(key=lambda t: t[0])
+            return pts[-60:]
+
+        cbot_hist = _series(
+            self.state_obj.get("cbot_history", []) or [],
+            value_fn=lambda e: to_float(e.get("close", e.get("price")), None),
+            filter_fn=lambda e: (e.get("commodity") or "").upper() == base)
+        fx_hist = _series(
+            self.state_obj.get("fx_history", []) or [],
+            value_fn=lambda e: to_float(e.get("rate"), None))
+
+        def _trend(series):
+            if len(series) < 2:
+                return None
+            try:
+                x0 = dt.date.fromisoformat(series[0][0]).toordinal()
+                xs = [dt.date.fromisoformat(d).toordinal() - x0 for d, _ in series]
+            except Exception:
+                return None
+            ys = [v for _, v in series]
+            n = len(xs)
+            mean_x = sum(xs) / n
+            mean_y = sum(ys) / n
+            denom = sum((x - mean_x) ** 2 for x in xs)
+            if denom == 0:
+                return {"slope": 0.0, "intercept": mean_y, "last_x": xs[-1], "last_y": ys[-1]}
+            slope = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys)) / denom
+            intercept = mean_y - slope * mean_x
+            return {"slope": slope, "intercept": intercept, "last_x": xs[-1], "last_y": ys[-1]}
+
+        cbot_trend = _trend(cbot_hist)
+        fx_trend = _trend(fx_hist)
+        if not cbot_trend or not fx_trend:
+            return None
+
+        factor = cbot_conv_factor(base, strict=False)
+        if not factor:
+            return None
+
+        projected_cbot = cbot_trend["intercept"] + cbot_trend["slope"] * (cbot_trend["last_x"] + horizon_days)
+        projected_fx = fx_trend["intercept"] + fx_trend["slope"] * (fx_trend["last_x"] + horizon_days)
+        current_cbot = cbot_trend["last_y"]
+        current_fx = fx_trend["last_y"]
+
+        fees_egp = 0.0
+        contracts = [c for c in (self.state_obj.get("contracts", {}) or {}).values()
+                     if (c.get("commodity") or "").upper().split("-")[0] == base]
+        if contracts:
+            latest = max(contracts, key=lambda c: c.get("delivery_date") or "")
+            fees_egp = ((to_float(latest.get("discharge_egp_mt"), 0) or 0) +
+                        (to_float(latest.get("clearance_egp_mt"), 0) or 0) +
+                        (to_float(self._contract_freight_egp_mt(latest), 0) or 0))
+
+        return {
+            "commodity": base,
+            "horizon_days": horizon_days,
+            "current_cbot": current_cbot,
+            "projected_cbot": projected_cbot,
+            "current_fx": current_fx,
+            "projected_fx": projected_fx,
+            "current_landed_egp_mt": current_cbot * factor * current_fx + fees_egp,
+            "projected_landed_egp_mt": projected_cbot * factor * projected_fx + fees_egp,
+        }
+
     def _home_select_commodity(self, commodity):
         """Filter the complete Home portfolio, not only the savings table."""
         label = (commodity or "All").strip().upper()
@@ -6746,6 +7059,10 @@ class App(tk.Tk):
             self.hd_kpi_coverage.set("—")
         self.hd_kpi_data_gaps.set(str(metrics["data_gaps"]))
         self._refresh_home_modern_panels(metrics)
+        try:
+            self._refresh_hd_exec_summary()
+        except Exception as exc:
+            log_exception(exc, "_refresh_home_executive_kpis:exec_summary")
 
 
     # ------------------------------------------------------------------
@@ -7158,6 +7475,397 @@ class App(tk.Tk):
             self._hd_modern_quality_lbl.configure(fg="#fb7185")
             self._hd_modern_quality_note.set(f"{gaps} data gaps materially reduce dashboard confidence.")
 
+    def _refresh_hd_exec_summary(self):
+        """Refresh the Executive Summary panel: YTD target pace, FX hedge
+        cover, cash calendar, open-MTM trend and category performance."""
+        if not hasattr(self, "hd_rollup_tree"):
+            return
+        selected = self._home_active_commodity()
+
+        # ── Value created since go-live (hero headline) ──────────────────
+        if hasattr(self, "hd_golive_var"):
+            golive = self._home_value_since_golive(selected)
+            since_txt = f" since {golive['since'].strftime('%b %Y')}" if golive.get("since") else ""
+            self.hd_golive_var.set(
+                f"💎 Value created{since_txt}: {self._home_compact_money(golive['total'])} "
+                f"across {golive['count']} closed contracts")
+
+        # ── YTD target progress ─────────────────────────────────────────
+        ytd = self._home_ytd_target_progress(selected)
+        canvas = self.hd_ytd_progress_canvas
+        canvas.delete("all")
+        cw = canvas.winfo_width()
+        if cw <= 1:
+            cw = int(canvas.cget("width") or 400)
+        ch = int(canvas.cget("height") or 20)
+        if ytd["target"]:
+            pct = max(0.0, ytd["pct_of_target"] or 0.0)
+            self.hd_ytd_target_var.set(
+                f"YTD Realised {self._home_compact_money(ytd['ytd_saving'])} of "
+                f"{self._home_compact_money(ytd['target'])} target ({pct:.0f}%) — {ytd['year']}")
+            fill_w = max(0.0, min(1.0, pct / 100.0)) * cw
+            colour = "#16a34a" if pct >= 100 else ("#2563eb" if pct >= 60 else "#f59e0b")
+            canvas.create_rectangle(0, 0, cw, ch, fill="#e2e8f0", outline="")
+            canvas.create_rectangle(0, 0, fill_w, ch, fill=colour, outline="")
+            canvas.create_text(cw / 2, ch / 2, text=f"{pct:.0f}%",
+                               fill="#0f172a", font=("Segoe UI", 9, "bold"))
+            if ytd["pace_projection"] is not None:
+                diff = ytd["pace_projection"] - ytd["target"]
+                verdict = "on pace to beat" if diff >= 0 else "on pace to miss"
+                self.hd_ytd_pace_var.set(
+                    f"At the current run rate, {ytd['year']} closes at ~"
+                    f"{self._home_compact_money(ytd['pace_projection'])} — {verdict} target by "
+                    f"{self._home_compact_money(abs(diff))}.")
+            else:
+                self.hd_ytd_pace_var.set("")
+        else:
+            self.hd_ytd_target_var.set(
+                f"YTD Realised {self._home_compact_money(ytd['ytd_saving'])} — "
+                f"no annual target set (Setup & Data → Decision Settings).")
+            self.hd_ytd_pace_var.set("")
+
+        # ── Open-MTM trend chart ────────────────────────────────────────
+        series = self._home_open_mtm_trend_series(selected, days=60)
+        vals = [v for _d, v in series]
+        labels = []
+        if series:
+            step = max(1, len(series) // 4)
+            for idx, (d, _v) in enumerate(series):
+                labels.append(d[5:] if (idx % step == 0 or idx == len(series) - 1) else "")
+        positive = (vals[-1] if vals else 0.0) >= 0
+        self._home_draw_line_chart(self.hd_open_trend_canvas, vals, labels, positive=positive)
+
+        # ── FX hedge coverage ────────────────────────────────────────────
+        hedge = self._home_fx_hedge_coverage(selected)
+        if hedge["pct"] is not None:
+            self.hd_hedge_pct_var.set(
+                f"{hedge['pct']:.0f}%  ({hedge['hedged_qty']:,.0f} / {hedge['open_qty']:,.0f} MT)")
+        else:
+            self.hd_hedge_pct_var.set("—  no open exposure")
+
+        # ── Cash calendar ────────────────────────────────────────────────
+        cal = self._home_cash_calendar(selected)
+        b = cal["buckets"]
+        due_txt = f"  (+{self._home_compact_money(b['due'])} overdue)" if b.get("due") else ""
+        self.hd_cash_30_var.set(self._home_compact_money(b["0_30"]) + due_txt)
+        self.hd_cash_60_var.set(self._home_compact_money(b["31_60"]))
+        self.hd_cash_90_var.set(self._home_compact_money(b["61_90"]))
+
+        # ── Category performance rollup ─────────────────────────────────
+        for i in self.hd_rollup_tree.get_children():
+            self.hd_rollup_tree.delete(i)
+        for r in self._home_category_rollup():
+            yoy_txt = f"{r['yoy_pct']:+.0f}% vs last yr" if r["yoy_pct"] is not None else "no prior-year base"
+            self.hd_rollup_tree.insert("", "end", values=(
+                r["commodity"],
+                f"{r['closed_qty']:,.0f}",
+                self._home_compact_money(r["realized_saving"]),
+                f"EGP {r['realized_per_mt']:+,.0f}" if r["realized_per_mt"] is not None else "—",
+                f"{r['open_qty']:,.0f}",
+                self._home_compact_money(r["open_position"]) if r["open_qty"] else "—",
+                self._home_compact_money(r["ytd_saving"]),
+                yoy_txt,
+            ))
+
+        # ── Forward landed-cost trend (simple linear extrapolation) ──────
+        if hasattr(self, "hd_forecast_var"):
+            forecast_commodity = selected if selected != "ALL" else (
+                self._home_commodity_options()[0] if self._home_commodity_options() else "CORN")
+            forecast = self._home_forecast_landed_cost(forecast_commodity, horizon_days=90)
+            if forecast:
+                delta = forecast["projected_landed_egp_mt"] - forecast["current_landed_egp_mt"]
+                direction = "up" if delta >= 0 else "down"
+                self.hd_forecast_var.set(
+                    f"{forecast['commodity']}: currently ~EGP {forecast['current_landed_egp_mt']:,.0f}/MT, "
+                    f"trend-projected ~EGP {forecast['projected_landed_egp_mt']:,.0f}/MT in "
+                    f"{forecast['horizon_days']}d ({direction} EGP {abs(delta):,.0f}/MT).")
+            else:
+                self.hd_forecast_var.set(
+                    "Needs at least 2 logged CBOT and FX data points for this commodity to compute a trend.")
+
+    def _build_ceo_brief_pdf(self, dest):
+        """Render the single-page CEO Brief into `dest` (a filepath string
+        or a file-like/BytesIO object). Shared by the on-screen export
+        button and the email digest sender so both stay in sync."""
+        selected = self._home_active_commodity()
+        scope_label = "All commodities" if selected == "ALL" else selected
+        fx_mode_sel = getattr(self, "_hd_fx_mode_var", None)
+        fx_mode = fx_mode_sel.get() if fx_mode_sel else "live"
+        metrics = self._home_exec_metrics(selected, fx_mode=fx_mode)
+        ytd = self._home_ytd_target_progress(selected)
+        hedge = self._home_fx_hedge_coverage(selected)
+        cal = self._home_cash_calendar(selected)
+        rollup = self._home_category_rollup()
+        golive = self._home_value_since_golive(selected)
+        try:
+            alerts = self.evaluate_alerts()
+        except Exception:
+            alerts = []
+        priority_order = {"High": 0, "Medium": 1, "Low": 2}
+        alerts = sorted(alerts, key=lambda a: priority_order.get(a.get("priority", "Low"), 3))[:6]
+
+        c = canvas.Canvas(dest, pagesize=A4)
+        w, h = A4
+        M_LEFT, M_RIGHT, M_TOP, M_BOTTOM = 1.5 * cm, 1.5 * cm, 1.8 * cm, 1.8 * cm
+
+        def header(title):
+            c.setFont("Helvetica-Bold", 14)
+            c.drawString(M_LEFT, h - M_TOP, title)
+            c.setFont("Helvetica", 8.5)
+            c.drawString(M_LEFT, h - M_TOP - 0.55 * cm,
+                        f"Generated: {now_ts()}  |  Scope: {scope_label}")
+            c.line(M_LEFT, h - M_TOP - 0.75 * cm, w - M_RIGHT, h - M_TOP - 0.75 * cm)
+            return h - M_TOP - 1.3 * cm
+
+        def ensure_room(y, needed=0.6 * cm, title="CEO Brief (continued)"):
+            if y < M_BOTTOM + needed:
+                c.showPage()
+                return header(title)
+            return y
+
+        def section(y, title):
+            y = ensure_room(y, 1.0 * cm)
+            c.setFont("Helvetica-Bold", 10.5)
+            c.drawString(M_LEFT, y, title)
+            return y - 0.55 * cm
+
+        def kv_row(y, k, v):
+            y = ensure_room(y)
+            c.setFont("Helvetica-Bold", 9.5)
+            c.drawString(M_LEFT, y, str(k))
+            c.setFont("Helvetica", 9.5)
+            c.drawRightString(w - M_RIGHT, y, str(v))
+            return y - 0.5 * cm
+
+        y = header("Prometheus Procurement — CEO Brief")
+
+        y = section(y, "Headline")
+        since_txt = f" (since {golive['since'].isoformat()})" if golive.get("since") else ""
+        y = kv_row(y, f"Value created since go-live{since_txt}",
+                   f"{self._home_compact_money(golive['total'])} · {golive['count']} contracts closed")
+        y = kv_row(y, "Realised savings (closed contracts)", self._home_compact_money(metrics["realized_saving"]))
+        y = kv_row(y, "Open indicative exposure (vs local)", self._home_compact_money(metrics["open_position"]))
+        y = kv_row(y, "Open quantity", f"{metrics['open_qty']:,.0f} MT · {metrics['open_count']} contracts")
+        y = kv_row(y, "Lowest coverage",
+                   f"{metrics['coverage_days']:.0f} days" if metrics["coverage_days"] is not None else "—")
+        y = kv_row(y, "Data gaps", str(metrics["data_gaps"]))
+        y -= 0.2 * cm
+
+        y = section(y, "Year-to-Date Target")
+        if ytd["target"]:
+            pct = ytd["pct_of_target"] or 0.0
+            y = kv_row(y, f"YTD realised vs {ytd['year']} target",
+                      f"{self._home_compact_money(ytd['ytd_saving'])} of "
+                      f"{self._home_compact_money(ytd['target'])} ({pct:.0f}%)")
+            if ytd["pace_projection"] is not None:
+                y = kv_row(y, "Run-rate projection to year end",
+                          self._home_compact_money(ytd["pace_projection"]))
+        else:
+            y = kv_row(y, "YTD realised savings", self._home_compact_money(ytd["ytd_saving"]))
+            y = kv_row(y, "Annual target", "Not set")
+        y -= 0.2 * cm
+
+        y = section(y, "FX Cover & Cash Due")
+        y = kv_row(y, "FX hedge coverage (Form 4 secured)",
+                   f"{hedge['pct']:.0f}% of {hedge['open_qty']:,.0f} MT" if hedge["pct"] is not None else "—")
+        b = cal["buckets"]
+        y = kv_row(y, "Cash due (overdue / ≤30d)",
+                   f"{self._home_compact_money(b['due'])} / {self._home_compact_money(b['0_30'])}")
+        y = kv_row(y, "Cash due (31-60d / 61-90d)",
+                   f"{self._home_compact_money(b['31_60'])} / {self._home_compact_money(b['61_90'])}")
+        y -= 0.2 * cm
+
+        y = section(y, "Category Performance (commodity, YoY vs last year)")
+        c.setFont("Helvetica-Bold", 8.5)
+        headers = ["Commodity", "Closed MT", "Realised", "Open MT", "Indicative", "YTD", "YoY"]
+        x_positions = [M_LEFT, M_LEFT + 2.6*cm, M_LEFT + 5.0*cm, M_LEFT + 8.0*cm,
+                       M_LEFT + 10.2*cm, M_LEFT + 13.0*cm, M_LEFT + 15.4*cm]
+        y = ensure_room(y, 0.8 * cm)
+        for x, htext in zip(x_positions, headers):
+            c.drawString(x, y, htext)
+        y -= 0.45 * cm
+        c.setFont("Helvetica", 8.2)
+        for r in rollup:
+            y = ensure_room(y, 0.55 * cm, "Category Performance (continued)")
+            yoy_txt = f"{r['yoy_pct']:+.0f}%" if r["yoy_pct"] is not None else "—"
+            vals = [
+                r["commodity"], f"{r['closed_qty']:,.0f}",
+                self._home_compact_money(r["realized_saving"]),
+                f"{r['open_qty']:,.0f}",
+                self._home_compact_money(r["open_position"]) if r["open_qty"] else "—",
+                self._home_compact_money(r["ytd_saving"]), yoy_txt,
+            ]
+            for x, val in zip(x_positions, vals):
+                c.drawString(x, y, str(val))
+            y -= 0.42 * cm
+        y -= 0.2 * cm
+
+        y = section(y, "Top Open Alerts")
+        if not alerts:
+            y = kv_row(y, "Status", "No urgent alerts in the selected scope")
+        else:
+            for a in alerts:
+                y = ensure_room(y, 0.6 * cm, "Top Open Alerts (continued)")
+                c.setFont("Helvetica-Bold", 8.5)
+                c.drawString(M_LEFT, y, f"[{a.get('priority', '')}]")
+                c.setFont("Helvetica", 8.5)
+                c.drawString(M_LEFT + 1.8 * cm, y, (a.get("issue") or "")[:100])
+                y -= 0.42 * cm
+
+        c.save()
+
+    def _export_ceo_brief_pdf(self):
+        """Export a single-page executive brief: headline KPIs, YTD target
+        pace, FX cover, cash calendar, category performance and the top
+        open alerts — everything a CEO needs without opening the app."""
+        if not _need_reportlab():
+            return
+        try:
+            fp = filedialog.asksaveasfilename(
+                initialdir=get_default_export_dir(),
+                initialfile=f"CEO_Brief_{now_ts()[:10]}.pdf",
+                defaultextension=".pdf", filetypes=[("PDF", "*.pdf")],
+                title="Export CEO Brief")
+            if not fp:
+                return
+            self._build_ceo_brief_pdf(fp)
+            messagebox.showinfo(APP_NAME, f"CEO Brief exported.\n\n{fp}")
+        except Exception as e:
+            log_exception(e, "_export_ceo_brief_pdf")
+            messagebox.showerror(APP_NAME, f"CEO Brief export failed: {e}")
+
+    def _send_ceo_digest_email(self, manual=False):
+        """Build the CEO Brief PDF and email it via the configured SMTP
+        server. Returns (ok: bool, message: str)."""
+        if not _need_reportlab():
+            return False, "PDF export requires reportlab (pip install reportlab)."
+        ui = self.state_obj.get("ui", {}) or {}
+        host = (ui.get("ceo_email_smtp_host") or "").strip()
+        port = int(to_float(ui.get("ceo_email_smtp_port"), 587) or 587)
+        username = (ui.get("ceo_email_username") or "").strip()
+        password = ui.get("ceo_email_password") or ""
+        use_tls = bool(ui.get("ceo_email_use_tls", True))
+        recipients = [r.strip() for r in (ui.get("ceo_email_recipients") or "").split(",") if r.strip()]
+        if not host or not recipients:
+            return False, "Set an SMTP host and at least one recipient in Setup & Data → Data Management first."
+        try:
+            buf = io.BytesIO()
+            self._build_ceo_brief_pdf(buf)
+            pdf_bytes = buf.getvalue()
+
+            selected = self._home_active_commodity()
+            metrics = self._home_exec_metrics(selected, fx_mode="live")
+            ytd = self._home_ytd_target_progress(selected)
+            golive = self._home_value_since_golive(selected)
+
+            msg = MIMEMultipart()
+            msg["Subject"] = f"Prometheus CEO Brief — {dt.date.today().isoformat()}"
+            msg["From"] = username or host
+            msg["To"] = ", ".join(recipients)
+            body_lines = [
+                "Automated CEO Brief from Prometheus Procurement.",
+                "",
+                f"Value created since go-live: {self._home_compact_money(golive['total'])}",
+                f"Realised savings (closed contracts): {self._home_compact_money(metrics['realized_saving'])}",
+                f"Open indicative exposure: {self._home_compact_money(metrics['open_position'])}",
+            ]
+            if ytd["target"]:
+                body_lines.append(
+                    f"YTD vs target: {self._home_compact_money(ytd['ytd_saving'])} of "
+                    f"{self._home_compact_money(ytd['target'])} ({(ytd['pct_of_target'] or 0):.0f}%)")
+            body_lines += ["", "Full details in the attached PDF."]
+            msg.attach(MIMEText("\n".join(body_lines), "plain"))
+
+            part = MIMEBase("application", "pdf")
+            part.set_payload(pdf_bytes)
+            encoders.encode_base64(part)
+            part.add_header("Content-Disposition",
+                            f'attachment; filename="CEO_Brief_{dt.date.today().isoformat()}.pdf"')
+            msg.attach(part)
+
+            with smtplib.SMTP(host, port, timeout=25) as server:
+                server.ehlo()
+                if use_tls:
+                    server.starttls()
+                    server.ehlo()
+                if username and password:
+                    server.login(username, password)
+                server.sendmail(username or host, recipients, msg.as_string())
+
+            ui = self.state_obj.setdefault("ui", {})
+            ui["last_ceo_digest_sent"] = dt.date.today().isoformat()
+            save_state(self.state_obj)
+            return True, f"Sent to {', '.join(recipients)}"
+        except Exception as e:
+            log_exception(e, "_send_ceo_digest_email")
+            return False, str(e)
+
+    def _ceo_digest_auto_tick(self):
+        """Checked hourly while the app is open: sends the CEO digest email
+        automatically once the configured interval has elapsed. There is no
+        background service, so this only fires while Prometheus is running —
+        documented in the Setup & Data panel."""
+        try:
+            ui = self.state_obj.get("ui", {}) or {}
+            if bool(ui.get("ceo_email_auto_send", False)):
+                last = ui.get("last_ceo_digest_sent")
+                interval = int(to_float(ui.get("ceo_email_interval_days"), 7) or 7)
+                due = True
+                if last:
+                    try:
+                        due = (dt.date.today() - dt.date.fromisoformat(last)).days >= interval
+                    except Exception:
+                        due = True
+                if due:
+                    ok, _msg = self._send_ceo_digest_email(manual=False)
+                    if ok and hasattr(self, "_ceo_email_status_var"):
+                        self._ceo_email_status_var.set(self._ceo_email_last_sent_note())
+        except Exception as exc:
+            log_exception(exc, "_ceo_digest_auto_tick")
+        finally:
+            try:
+                self.after(60 * 60 * 1000, self._ceo_digest_auto_tick)
+            except Exception:
+                pass
+
+    def _ceo_email_last_sent_note(self):
+        last = (self.state_obj.get("ui", {}) or {}).get("last_ceo_digest_sent")
+        return f"Last sent: {last}" if last else "Never sent yet."
+
+    def _home_rollup_row_click(self, event):
+        """Category Performance row click: filter Home to that commodity and
+        jump to Contracts with the same commodity pre-filtered, the same way
+        the old commodity cards used to."""
+        tree = self.hd_rollup_tree
+        row_id = tree.identify_row(event.y)
+        if not row_id:
+            return
+        values = tree.item(row_id, "values")
+        if not values:
+            return
+        commodity = str(values[0]).strip()
+        if not commodity:
+            return
+        try:
+            self._home_select_commodity(commodity)
+        except Exception as exc:
+            log_exception(exc, "_home_rollup_row_click:select_commodity")
+        try:
+            if hasattr(self, "contract_search_var"):
+                self.contract_search_var.set(commodity)
+            if hasattr(self, "contract_filter_commodity_var"):
+                self.contract_filter_commodity_var.set("ALL")
+            if hasattr(self, "contract_filter_status_var"):
+                self.contract_filter_status_var.set("ALL")
+            if hasattr(self, "contract_filter_origin_var"):
+                self.contract_filter_origin_var.set("ALL")
+            self.refresh_contracts_tree()
+            self.nb.select(self.tab_contracts_group)
+            if hasattr(self, "_contracts_nb"):
+                self._contracts_nb.select(self.tab_contracts_outer)
+        except Exception as exc:
+            log_exception(exc, "_home_rollup_row_click:jump_to_contracts")
+
     def _build_home_dashboard(self):
         """Build a premium Home tab command center.
 
@@ -7343,9 +8051,9 @@ class App(tk.Tk):
         main = tk.Frame(body, bg="#06101d")
         main.grid(row=0, column=1, sticky="nsew", padx=(0, 12), pady=12)
         main.columnconfigure(0, weight=1)
-        main.rowconfigure(6, weight=1)
         main.rowconfigure(7, weight=1)
         main.rowconfigure(8, weight=1)
+        main.rowconfigure(9, weight=1)
 
         self.hd_market_status_var = tk.StringVar(value="Auto-refresh every 30 minutes. Manual refresh is always available.")
         self.hd_formula_rule_var = tk.StringVar(value="Open CORN MTM CIF = (Latest CBOT + Contract Premium) × 0.3937 · cash landed basis, excl. finance carry (Finance-sheet convention)")
@@ -7355,6 +8063,7 @@ class App(tk.Tk):
         hero.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         hero.columnconfigure(0, weight=1)
         hero.columnconfigure(1, weight=0)
+        hero.columnconfigure(2, weight=0)
         tk.Label(hero, text="CEO Dashboard", bg="#07111f", fg="#f8fafc",
                  font=("Segoe UI", 18, "bold")).grid(row=0, column=0, sticky="w", padx=16, pady=(14, 0))
         tk.Label(hero, text="Executive overview of procurement performance",
@@ -7362,12 +8071,21 @@ class App(tk.Tk):
         tk.Label(hero, textvariable=self.hd_formula_rule_var,
                  bg="#07111f", fg="#60a5fa", font=("Segoe UI", 9, "bold")).grid(row=2, column=0, sticky="w", padx=16, pady=(0, 4))
         tk.Label(hero, textvariable=self.hd_market_status_var,
-                 bg="#07111f", fg="#9fb3c8", font=("Segoe UI", 9)).grid(row=3, column=0, sticky="w", padx=16, pady=(0, 14))
+                 bg="#07111f", fg="#9fb3c8", font=("Segoe UI", 9)).grid(row=3, column=0, sticky="w", padx=16, pady=(0, 4))
+        self.hd_golive_var = tk.StringVar(value="💎 Value created since go-live: —")
+        tk.Label(hero, textvariable=self.hd_golive_var,
+                 bg="#07111f", fg="#4ade80", font=("Segoe UI", 12, "bold")).grid(
+                     row=4, column=0, sticky="w", padx=16, pady=(0, 14))
+        tk.Button(hero, text="📄 CEO Brief (PDF)",
+                  command=self._export_ceo_brief_pdf,
+                  bg="#0f766e", fg="#ecfeff", relief="flat", cursor="hand2",
+                  font=("Segoe UI", 9, "bold"), padx=16, pady=8).grid(
+                      row=0, column=1, rowspan=4, sticky="e", padx=(16, 8), pady=16)
         tk.Button(hero, text="🔄 Refresh Everything",
                   command=lambda: self.refresh_all(fetch_market=True),
                   bg="#2563eb", fg="white", relief="flat", cursor="hand2",
                   font=("Segoe UI", 9, "bold"), padx=16, pady=8).grid(
-                      row=0, column=1, rowspan=4, sticky="e", padx=16, pady=16)
+                      row=0, column=2, rowspan=4, sticky="e", padx=16, pady=16)
 
         # KPI cards: visually separated open MTM and realized numbers.
         kpi_frame = tk.Frame(main, bg="#06101d")
@@ -7468,12 +8186,96 @@ class App(tk.Tk):
         self._hd_reco_lbl.grid(row=4, column=0, sticky="w", padx=12,
                                pady=(0, 8))
 
+        # ── Executive Summary: YTD target pace, FX cover, cash calendar,
+        # open-MTM trend and a category (commodity) performance rollup with
+        # a year-over-year realised comparison. Everything here is derived
+        # from data already captured elsewhere on Home — no new inputs.
+        exec_summary = ttk.LabelFrame(
+            main,
+            text="🎯 Executive Summary — YTD target, FX cover, cash due, category performance",
+            padding=8)
+        exec_summary.grid(row=4, column=0, sticky="ew", pady=(0, 10))
+        exec_summary.columnconfigure(0, weight=2)
+        exec_summary.columnconfigure(1, weight=1)
+
+        es_left = tk.Frame(exec_summary, bg="#ffffff")
+        es_left.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        es_left.columnconfigure(0, weight=1)
+        self.hd_ytd_target_var = tk.StringVar(
+            value="Set an annual savings target in Setup & Data → Decision Settings.")
+        ttk.Label(es_left, textvariable=self.hd_ytd_target_var,
+                  font=(FONT_FAMILY, FS_BODY, "bold"),
+                  wraplength=560, justify="left").grid(row=0, column=0, sticky="w")
+        self.hd_ytd_progress_canvas = tk.Canvas(
+            es_left, height=20, width=400, bg="#e2e8f0", highlightthickness=0)
+        self.hd_ytd_progress_canvas.grid(row=1, column=0, sticky="ew", pady=(4, 4))
+        self.hd_ytd_pace_var = tk.StringVar(value="")
+        ttk.Label(es_left, textvariable=self.hd_ytd_pace_var,
+                  font=(FONT_FAMILY, FS_BODY), foreground=CLR["muted"],
+                  wraplength=560, justify="left").grid(row=2, column=0, sticky="w", pady=(0, 8))
+        ttk.Label(es_left, text="Open Exposure Trend — daily open MTM edge (last 60 stored days)",
+                  font=(FONT_FAMILY, FS_BODY, "bold")).grid(row=3, column=0, sticky="w")
+        self.hd_open_trend_canvas = tk.Canvas(
+            es_left, height=110, width=560, bg="#0b1728", highlightthickness=0)
+        self.hd_open_trend_canvas.grid(row=4, column=0, sticky="ew", pady=(4, 0))
+        ttk.Label(es_left,
+                  text="Forward Landed-Cost Trend (90d) — linear extrapolation, not a forecast guarantee",
+                  font=(FONT_FAMILY, FS_BODY, "bold")).grid(row=5, column=0, sticky="w", pady=(8, 0))
+        self.hd_forecast_var = tk.StringVar(value="Refresh to compute.")
+        ttk.Label(es_left, textvariable=self.hd_forecast_var,
+                  font=(FONT_FAMILY, FS_BODY), foreground=CLR["muted"],
+                  wraplength=560, justify="left").grid(row=6, column=0, sticky="w", pady=(2, 0))
+
+        es_right = tk.Frame(exec_summary, bg="#ffffff")
+        es_right.grid(row=0, column=1, sticky="nsew")
+        es_right.columnconfigure(0, weight=1)
+        es_right.columnconfigure(1, weight=1)
+
+        def _es_tile(row, col, title, var):
+            box = tk.Frame(es_right, bg="#f4f7fb", highlightthickness=1,
+                           highlightbackground="#d7e2ee")
+            box.grid(row=row, column=col, sticky="nsew", padx=3, pady=3)
+            tk.Label(box, text=title, bg="#f4f7fb", fg="#5f6b7a",
+                     font=("Segoe UI", 8, "bold")).pack(anchor="w", padx=8, pady=(6, 0))
+            tk.Label(box, textvariable=var, bg="#f4f7fb", fg="#0f172a",
+                     font=("Segoe UI", 12, "bold")).pack(anchor="w", padx=8, pady=(0, 6))
+
+        self.hd_hedge_pct_var = tk.StringVar(value="—")
+        self.hd_cash_30_var   = tk.StringVar(value="—")
+        self.hd_cash_60_var   = tk.StringVar(value="—")
+        self.hd_cash_90_var   = tk.StringVar(value="—")
+        _es_tile(0, 0, "FX Hedge Coverage", self.hd_hedge_pct_var)
+        _es_tile(0, 1, "Cash Due ≤ 30d", self.hd_cash_30_var)
+        _es_tile(1, 0, "Cash Due 31-60d", self.hd_cash_60_var)
+        _es_tile(1, 1, "Cash Due 61-90d", self.hd_cash_90_var)
+        ttk.Label(es_right,
+                  text="Hedge cover = open MT with Form 4 FX secured. "
+                       "Cash due = estimated own-after landed cost by delivery window.",
+                  font=(FONT_FAMILY, 8), foreground=CLR["muted"],
+                  wraplength=260, justify="left").grid(
+                      row=2, column=0, columnspan=2, sticky="w", padx=3, pady=(4, 0))
+
+        ttk.Label(exec_summary,
+                  text="Category Performance — by commodity, with year-over-year realised comparison  "
+                       "(click a row to open its filtered contract list)",
+                  font=(FONT_FAMILY, FS_BODY, "bold")).grid(
+                      row=1, column=0, columnspan=2, sticky="w", pady=(10, 2))
+        roll_cols = [
+            ("Commodity", 100, "w"), ("Closed_MT", 90, "e"), ("Realised_EGP", 120, "e"),
+            ("Saving_MT", 95, "e"), ("Open_MT", 90, "e"), ("Indicative_EGP", 120, "e"),
+            ("YTD_EGP", 120, "e"), ("YoY_vs_last_year", 130, "e"),
+        ]
+        self.hd_rollup_tree = self._hd_make_tree(exec_summary, roll_cols, height=6, row=2)
+        self.hd_rollup_tree.master.grid_configure(columnspan=2)
+        self.hd_rollup_tree.configure(cursor="hand2")
+        self.hd_rollup_tree.bind("<Button-1>", self._home_rollup_row_click, add="+")
+
         # V8.2: market intelligence beside CBOT — curve + movement, not just latest price.
         market_intel = ttk.LabelFrame(
             main,
             text="📈 Futures & Market Movement — free/public prototype feeds; source + as-of shown",
             padding=8)
-        market_intel.grid(row=4, column=0, sticky="ew", pady=(0, 10))
+        market_intel.grid(row=5, column=0, sticky="ew", pady=(0, 10))
         market_intel.columnconfigure(0, weight=1)
         market_intel.rowconfigure(1, weight=1)
         market_intel.rowconfigure(2, weight=1)
@@ -7517,7 +8319,7 @@ class App(tk.Tk):
 
         # Action Center
         action = ttk.LabelFrame(main, text="🚨 Action Center — highest priority issues first", padding=8)
-        action.grid(row=5, column=0, sticky="ew", pady=(0, 10))
+        action.grid(row=6, column=0, sticky="ew", pady=(0, 10))
         action.columnconfigure(0, weight=1)
         action.rowconfigure(0, weight=1)
         action_cols = [("Priority", 90, "w"), ("Issue", 390, "w"), ("Action", 560, "w")]
@@ -7528,7 +8330,7 @@ class App(tk.Tk):
 
         # Open exposure table
         exp = ttk.LabelFrame(main, text="Open Mark-to-Market — CIF result + live CBOT formula on every refresh", padding=8)
-        exp.grid(row=6, column=0, sticky="nsew", pady=(0, 10))
+        exp.grid(row=7, column=0, sticky="nsew", pady=(0, 10))
         exp.columnconfigure(0, weight=1)
         exp.rowconfigure(2, weight=1)
 
@@ -7631,7 +8433,7 @@ class App(tk.Tk):
 
         # Realized savings scorecard — with commodity filter
         sc = ttk.LabelFrame(main, text="💰 Realized Savings Scorecard — CLOSED contracts only", padding=8)
-        sc.grid(row=7, column=0, sticky="nsew", pady=(0, 10))
+        sc.grid(row=8, column=0, sticky="nsew", pady=(0, 10))
         sc.columnconfigure(0, weight=1)
         sc.rowconfigure(1, weight=1)
 
@@ -7676,7 +8478,7 @@ class App(tk.Tk):
 
         # Scenario engine
         se = ttk.LabelFrame(main, text="🎯 Scenario Engine — edit premium/CIF/fees/freight and compare instantly", padding=8)
-        se.grid(row=8, column=0, sticky="nsew", pady=(0, 10))
+        se.grid(row=9, column=0, sticky="nsew", pady=(0, 10))
         se.columnconfigure(0, weight=1)
         se.rowconfigure(1, weight=1)
 
@@ -8802,6 +9604,25 @@ class App(tk.Tk):
         if not fx_today:
             alerts.append(("High", "No USD/EGP saved for today", "Enter FX on the left or click Fetch Live Prices."))
 
+        # ── YTD savings pace vs annual target ───────────────────────────
+        # Flags when the current realised-savings run rate would land
+        # materially (>=15%) short of the configured annual target.
+        try:
+            ytd_check = self._home_ytd_target_progress(selected_commodity)
+            target = ytd_check.get("target")
+            pace = ytd_check.get("pace_projection")
+            if target and pace is not None and pace < target * 0.85:
+                shortfall = target - pace
+                alerts.append((
+                    "High",
+                    f"YTD savings pace projects {self._home_compact_money(pace)} by "
+                    f"{ytd_check['year']} year end — {self._home_compact_money(shortfall)} "
+                    f"short of the {self._home_compact_money(target)} target",
+                    "Review the pipeline: price more open lots, tighten fees, or "
+                    "revisit the annual target in Setup & Data."))
+        except Exception as exc:
+            log_exception(exc, "_refresh_hd_command_center:ytd_pace_alert")
+
         # ── Consumption — low stock / reorder alerts ───────────────────
         try:
             comms_cfg = sorted(self.state_obj.get("commodities", {}).keys())
@@ -9423,8 +10244,22 @@ class App(tk.Tk):
         dv["pf_det_frt"].set(f"EGP {frt:,.0f}" if frt else "—")
         dv["pf_det_own"].set(f"EGP {own:,.0f}/MT" if own else "—")
 
-        btn_row = ttk.Frame(p)
-        btn_row.grid(row=5, column=0, sticky="w", pady=(8, 0))
+        # `p` here used to reference an undefined name (only _build_performance's
+        # local `p = self.tab_performance` existed) — the resulting NameError
+        # silently killed this method every time a contract was selected, so
+        # the button below was never (re)created. Also avoid re-gridding a
+        # fresh Frame into row 5 on every selection (it collided with
+        # pf_notes_var, and old frames were never destroyed) by reusing one
+        # button row on its own row.
+        old_btn_row = getattr(self, "_pf_btn_row", None)
+        if old_btn_row is not None:
+            try:
+                old_btn_row.destroy()
+            except Exception:
+                pass
+        btn_row = ttk.Frame(self.tab_performance)
+        btn_row.grid(row=6, column=0, sticky="w", pady=(8, 0))
+        self._pf_btn_row = btn_row
         ttk.Button(btn_row, text="📥  Export Performance Excel",
                    command=self.export_performance_excel).pack(side="left", padx=(0,8))
         ttk.Button(btn_row, text="🔬  Export Full Contract Intelligence",
@@ -10839,7 +11674,7 @@ class App(tk.Tk):
                 ("Supplier",      r["supplier"],           None),
                 ("Commodity",     r["commodity"],          None),
                 ("Origin",        r["origin"],             None),
-                ("Vessel",        r["vessel"] or "—",      None),
+                ("Vessel",        r.get("vessel") or "—",  None),
                 ("Quantity (MT)", r["qty_mt"],             "#,##0"),
             ]
             params_right = [
@@ -10992,22 +11827,21 @@ class App(tk.Tk):
             OA_REF = f"$E${ROW_OA}"     # absolute ref to own-after input cell
             QTY_REF = f"$E${ROW_QTY}"  # absolute ref to qty cell
 
-            pre_fill = PatternFill("solid", fgColor="F5F5F5")
-            pre_font = Font(name="Calibri", size=10, color="AAAAAA", italic=True)
-
-            # Track first post-delivery row for cumulative formula
+            # Track first row for the cumulative-saving formula. run_performance()
+            # only produces post-delivery observations (post_pairs), so every
+            # row here is post-delivery — there is no pre-delivery row shape.
             first_post_dr = None
 
-            for di, row_d in enumerate(r["rows"]):
-                dr     = DATA_FIRST + di
-                is_pre = row_d.get("is_pre", False)
+            for di, row_t in enumerate(r["rows"]):
+                dr = DATA_FIRST + di
+                label, local, _oa, _sav_mt, _cum_avg, _signal = row_t
 
                 # Col A: Date
-                c = ws.cell(dr, 1, row_d["date"])
+                c = ws.cell(dr, 1, label)
                 c.alignment = left_al
 
                 # Col B: Local price (raw)
-                c = ws.cell(dr, 2, row_d["local"])
+                c = ws.cell(dr, 2, local)
                 c.number_format = "#,##0"
                 c.alignment = right_al
 
@@ -11023,50 +11857,30 @@ class App(tk.Tk):
                 c.alignment = right_al
                 c.font = bold
 
-                # Col E: Cumulative — blank/dash for pre-delivery
-                if is_pre:
-                    c = ws.cell(dr, 5, "—")
-                    c.alignment = center
-                elif first_post_dr is None:
-                    # First post-delivery row: start fresh cumulative
+                # Col E: Cumulative saving
+                if first_post_dr is None:
                     first_post_dr = dr
                     c = ws.cell(dr, 5, f"=D{dr}*{QTY_REF}")
-                    c.number_format = "+#,##0;[Red]-#,##0"
-                    c.alignment = right_al
                 else:
                     c = ws.cell(dr, 5, f"=E{dr-1}+D{dr}*{QTY_REF}")
-                    c.number_format = "+#,##0;[Red]-#,##0"
-                    c.alignment = right_al
+                c.number_format = "+#,##0;[Red]-#,##0"
+                c.alignment = right_al
 
                 # Col F: Signal
-                if is_pre:
-                    c = ws.cell(dr, 6, "pre-delivery")
-                    c.alignment = center
-                else:
-                    c = ws.cell(dr, 6)
-                    c.value = (f'=IF(D{dr}>200,"BUY / PRICE",'
-                               f'IF(D{dr}>0,"MARGINAL","WAIT"))')
-                    c.alignment = center
+                c = ws.cell(dr, 6)
+                c.value = (f'=IF(D{dr}>200,"BUY / PRICE",'
+                           f'IF(D{dr}>0,"MARGINAL","WAIT"))')
+                c.alignment = center
 
                 # Col G: Gap %
-                if is_pre:
-                    c = ws.cell(dr, 7, "—")
-                    c.alignment = center
-                else:
-                    c = ws.cell(dr, 7, f"=IF(B{dr}<>0,D{dr}/B{dr},0)")
-                    c.number_format = "0.0%;[Red]-0.0%"
-                    c.alignment = center
+                c = ws.cell(dr, 7, f"=IF(B{dr}<>0,D{dr}/B{dr},0)")
+                c.number_format = "0.0%;[Red]-0.0%"
+                c.alignment = center
 
                 # Row styling
                 for col_n in range(1, 8):
                     cell = ws.cell(dr, col_n)
                     cell.border = brd
-                    if is_pre:
-                        # Only override if not already set to something specific
-                        if cell.font.color.rgb in ("000000", "FF000000",
-                                                    "555555", "FF555555"):
-                            cell.font = pre_font
-                        cell.fill = pre_fill
 
             # ── Average row — post-delivery only ─────────────────────────
             AVG_ROW = DATA_LAST + 1
@@ -11108,41 +11922,39 @@ class App(tk.Tk):
 
             # Darker red fill on entire row when saving < 0
             # (applied via conditional formatting on col D, affecting A:G)
-            neg_dxf = DifferentialStyle(
-                fill=PatternFill(patternType="solid", bgColor="FDECEA"))
-            pos_dxf = DifferentialStyle(
-                fill=PatternFill(patternType="solid", bgColor="E8F7E8"))
+            # FormulaRule() is a factory function, not the Rule class — it
+            # builds its own DifferentialStyle from font/border/fill kwargs
+            # and does not accept a pre-built dxf= argument.
+            neg_fill = PatternFill(patternType="solid", bgColor="FDECEA")
+            pos_fill = PatternFill(patternType="solid", bgColor="E8F7E8")
 
             from openpyxl.formatting.rule import FormulaRule
             ws.conditional_formatting.add(
                 f"A{DATA_FIRST}:G{DATA_LAST}",
                 FormulaRule(formula=[f"$D{DATA_FIRST}<0"],
-                            dxf=neg_dxf, stopIfTrue=False))
+                            fill=neg_fill, stopIfTrue=False))
             ws.conditional_formatting.add(
                 f"A{DATA_FIRST}:G{DATA_LAST}",
                 FormulaRule(formula=[f"$D{DATA_FIRST}>200"],
-                            dxf=pos_dxf, stopIfTrue=False))
+                            fill=pos_fill, stopIfTrue=False))
 
             # Signal column: green for BUY, red for WAIT
-            buy_dxf  = DifferentialStyle(
-                font=Font(name="Calibri", bold=True, color="1A7A1A"))
-            wait_dxf = DifferentialStyle(
-                font=Font(name="Calibri", bold=True, color="C0392B"))
-            marg_dxf = DifferentialStyle(
-                font=Font(name="Calibri", bold=True, color="B36000"))
+            buy_font  = Font(name="Calibri", bold=True, color="1A7A1A")
+            wait_font = Font(name="Calibri", bold=True, color="C0392B")
+            marg_font = Font(name="Calibri", bold=True, color="B36000")
 
             ws.conditional_formatting.add(
                 f"F{DATA_FIRST}:F{DATA_LAST}",
                 FormulaRule(formula=[f'F{DATA_FIRST}="BUY / PRICE"'],
-                            dxf=buy_dxf))
+                            font=buy_font))
             ws.conditional_formatting.add(
                 f"F{DATA_FIRST}:F{DATA_LAST}",
                 FormulaRule(formula=[f'F{DATA_FIRST}="WAIT"'],
-                            dxf=wait_dxf))
+                            font=wait_font))
             ws.conditional_formatting.add(
                 f"F{DATA_FIRST}:F{DATA_LAST}",
                 FormulaRule(formula=[f'F{DATA_FIRST}="MARGINAL"'],
-                            dxf=marg_dxf))
+                            font=marg_font))
 
             # ── Line chart ────────────────────────────────────────────
             chart = LineChart()
@@ -11287,19 +12099,26 @@ class App(tk.Tk):
 
             # ── Contract summary box ──────────────────────────────────
             row = 5
+            # r["rows"] entries are (label, local, oa, sav_mt, cum_avg, signal);
+            # label is an ISO date with an optional "  ◀ DELIVERY"/"  ◀ TODAY"
+            # marker appended, so split() isolates the date.
+            row_dates = [row_t[0].split()[0] for row_t in r["rows"]]
+            d_from = row_dates[0] if row_dates else "—"
+            d_to = row_dates[-1] if row_dates else "—"
+            n_points = len(r["rows"])
             summary_items = [
                 ("Contract Ref",   r["contract_ref"]),
                 ("Supplier",       r["supplier"]),
                 ("Commodity",      r["commodity"]),
                 ("Origin",         r["origin"]),
-                ("Vessel",         r["vessel"] or "—"),
+                ("Vessel",         r.get("vessel") or "—"),
                 ("Quantity (MT)",  r["qty_mt"]),
                 ("CIF Price",      f"${r['cif_usd']:.2f}/MT" if r["cif_usd"] else "—"),
                 ("Delivery FX",    f"{r['delivery_fx']:.4f} EGP/$" if r["delivery_fx"] else "—"),
                 ("Discharge",      f"EGP {r['discharge']:,.0f}/MT" if r["discharge"] else "—"),
                 ("Clearance",      f"EGP {r['clearance']:,.0f}/MT" if r["clearance"] else "—"),
                 ("Own-after Cost", f"EGP {r['own_after_egp']:,.0f}/MT"),
-                ("Analysis Period",f"{r['d_from']}  →  {r['d_to']}  ({r['n_points']} price points)"),
+                ("Analysis Period",f"{d_from}  →  {d_to}  ({n_points} price points)"),
             ]
 
             ws.merge_cells(f"A{row}:B{row}")
@@ -11332,9 +12151,9 @@ class App(tk.Tk):
             kpi_row = row + len(left_items) + 1
             kpis = [
                 ("Own-after (EGP/MT)",  r["own_after_egp"],   num_fmt,  False),
-                ("Avg Local (EGP/MT)",  r["avg_local"],        num_fmt,  False),
+                ("Avg Local (EGP/MT)",  r["avg_local_egp"],    num_fmt,  False),
                 ("Avg Saving/MT",       r["avg_sav_mt"],       num_fmt,  True),
-                ("Total Saving (EGP)",  r["cum_sav_egp"],      num_fmt,  True),
+                ("Total Saving (EGP)",  r["total_saving"],     num_fmt,  True),
             ]
             ws.merge_cells(f"A{kpi_row}:H{kpi_row}")
             cell(kpi_row, 1, "KEY RESULTS",
@@ -11392,26 +12211,28 @@ class App(tk.Tk):
                 ws.column_dimensions[get_column_letter(ci)].width = width
             ws.row_dimensions[data_start].height = 30
 
-            # Data rows
+            # Data rows. r["rows"] entries are the same
+            # (label, local, oa, sav_mt, cum_avg, signal) tuples run_performance()
+            # produces for the formula-based sheet above.
             chart_local     = []
             chart_own_after = []
-            for di, row_d in enumerate(r["rows"]):
-                dr  = data_start + 1 + di
-                sav = row_d["sav_mt"]
-                gap = (sav / row_d["local"]) if row_d["local"] else None
+            for di, row_t in enumerate(r["rows"]):
+                dr = data_start + 1 + di
+                label, local, own_after, sav, cum_sav, signal = row_t
+                gap = (sav / local) if local else None
 
                 is_pos = sav >= 0
                 row_fill = pos_fill if sav > 200 else (
                            white   if sav > 0    else neg_fill)
 
                 values_to_write = [
-                    (row_d["date"],     None,      left_al),
-                    (row_d["local"],    num_fmt,   right),
-                    (row_d["own_after"],num_fmt,   right),
-                    (sav,               num_fmt,   right),
-                    (row_d["cum_sav"],  num_fmt,   right),
-                    (row_d["signal"],   None,      center),
-                    (gap,               pct_fmt,   center),
+                    (label,      None,      left_al),
+                    (local,      num_fmt,   right),
+                    (own_after,  num_fmt,   right),
+                    (sav,        num_fmt,   right),
+                    (cum_sav,    num_fmt,   right),
+                    (signal,     None,      center),
+                    (gap,        pct_fmt,   center),
                 ]
                 for ci, (val, fmt, aln) in enumerate(values_to_write, 1):
                     c = ws.cell(dr, ci, val)
@@ -11424,16 +12245,16 @@ class App(tk.Tk):
                     if fmt:
                         c.number_format = fmt
 
-                chart_local.append(row_d["local"])
-                chart_own_after.append(row_d["own_after"])
+                chart_local.append(local)
+                chart_own_after.append(own_after)
 
             # Average / total row
             avg_row = data_start + 1 + len(r["rows"])
-            cell(avg_row, 1, f"AVERAGE  ({r['n_points']} points)",
+            cell(avg_row, 1, f"AVERAGE  ({n_points} points)",
                  font=bold, fill=tot_fill, border=brd_h, alignment=left_al)
             for ci, val in enumerate([
-                r["avg_local"], r["own_after_egp"],
-                r["avg_sav_mt"], r["cum_sav_egp"], None, None
+                r["avg_local_egp"], r["own_after_egp"],
+                r["avg_sav_mt"], r["total_saving"], None, None
             ], 2):
                 c = ws.cell(avg_row, ci, val)
                 c.fill          = tot_fill
@@ -11452,10 +12273,10 @@ class App(tk.Tk):
             # Write chart series data
             ws.cell(data_start, chart_data_col,     "Local")
             ws.cell(data_start, chart_data_col + 1, "Own-after")
-            for di, row_d in enumerate(r["rows"]):
+            for di, (local, own_after) in enumerate(zip(chart_local, chart_own_after)):
                 dr = data_start + 1 + di
-                ws.cell(dr, chart_data_col,     row_d["local"])
-                ws.cell(dr, chart_data_col + 1, row_d["own_after"])
+                ws.cell(dr, chart_data_col,     local)
+                ws.cell(dr, chart_data_col + 1, own_after)
             # Hide chart data columns visually
             ws.column_dimensions[get_column_letter(chart_data_col)].width     = 0
             ws.column_dimensions[get_column_letter(chart_data_col+1)].width   = 0
@@ -11574,6 +12395,33 @@ class App(tk.Tk):
                   foreground=CLR["muted"]).grid(row=1, column=0, columnspan=3,
                                                 sticky="w", pady=(4, 0))
 
+        ttk.Label(settings, text="Annual savings target (EGP)").grid(
+            row=2, column=0, sticky="w", pady=(8, 0), padx=(0, 8))
+        self._annual_target_var = tk.StringVar(
+            value=str(self.state_obj.get("ui", {}).get("annual_savings_target_egp") or ""))
+        ttk.Entry(settings, textvariable=self._annual_target_var, width=16).grid(
+            row=2, column=1, sticky="w", padx=(0, 8), pady=(8, 0))
+
+        def _save_annual_target():
+            ui = self.state_obj.setdefault("ui", {})
+            v = to_float(self._annual_target_var.get(), None)
+            if v is None or v <= 0:
+                messagebox.showerror(APP_NAME, "Enter a positive annual savings target in EGP.")
+                return
+            ui["annual_savings_target_egp"] = round(v, 2)
+            save_state(self.state_obj)
+            messagebox.showinfo(APP_NAME, "Annual savings target saved.")
+            try:
+                self._refresh_hd_exec_summary()
+            except Exception as exc:
+                log_exception(exc, "_save_annual_target:refresh")
+        ttk.Button(settings, text="Save Target", command=_save_annual_target).grid(
+            row=2, column=2, sticky="w", pady=(8, 0))
+        ttk.Label(settings,
+                  text="Drives the YTD Target Progress bar on Home. Compared against closed-contract realised savings for the calendar year.",
+                  foreground=CLR["muted"]).grid(row=2, column=3, columnspan=2,
+                                                sticky="w", padx=(8, 0), pady=(8, 0))
+
         ttk.Label(settings, text="Alert: CBOT day move ≥ (%)").grid(
             row=3, column=0, sticky="w", pady=(8, 0), padx=(0, 8))
         self._al_cbot_var = tk.StringVar(
@@ -11675,6 +12523,88 @@ class App(tk.Tk):
                   text=DATA_SOURCE_POLICY["note"],
                   foreground=CLR["danger"], wraplength=1150).grid(row=2, column=0, columnspan=4,
                                                 sticky="w", pady=(6, 0))
+
+        # ── CEO Email Digest ─────────────────────────────────────────────
+        email_ui = self.state_obj.get("ui", {}) or {}
+        email_frame = ttk.LabelFrame(
+            p, text="📧 CEO Email Digest — send the CEO Brief PDF by email", padding=10)
+        email_frame.grid(row=4, column=0, sticky="ew", pady=(0, 10))
+        for i in range(6):
+            email_frame.columnconfigure(i, weight=0)
+
+        ttk.Label(email_frame, text="SMTP host").grid(row=0, column=0, sticky="w")
+        self._ceo_email_host_var = tk.StringVar(value=email_ui.get("ceo_email_smtp_host", ""))
+        ttk.Entry(email_frame, textvariable=self._ceo_email_host_var, width=26).grid(
+            row=0, column=1, sticky="w", padx=(4, 12))
+        ttk.Label(email_frame, text="Port").grid(row=0, column=2, sticky="w")
+        self._ceo_email_port_var = tk.StringVar(value=str(email_ui.get("ceo_email_smtp_port", 587)))
+        ttk.Entry(email_frame, textvariable=self._ceo_email_port_var, width=8).grid(
+            row=0, column=3, sticky="w", padx=(4, 12))
+        self._ceo_email_tls_var = tk.BooleanVar(value=bool(email_ui.get("ceo_email_use_tls", True)))
+        ttk.Checkbutton(email_frame, text="Use STARTTLS", variable=self._ceo_email_tls_var).grid(
+            row=0, column=4, sticky="w")
+
+        ttk.Label(email_frame, text="Username").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        self._ceo_email_user_var = tk.StringVar(value=email_ui.get("ceo_email_username", ""))
+        ttk.Entry(email_frame, textvariable=self._ceo_email_user_var, width=26).grid(
+            row=1, column=1, sticky="w", padx=(4, 12), pady=(6, 0))
+        ttk.Label(email_frame, text="Password").grid(row=1, column=2, sticky="w", pady=(6, 0))
+        self._ceo_email_pass_var = tk.StringVar(value=email_ui.get("ceo_email_password", ""))
+        ttk.Entry(email_frame, textvariable=self._ceo_email_pass_var, width=20, show="*").grid(
+            row=1, column=3, columnspan=2, sticky="w", padx=(4, 12), pady=(6, 0))
+
+        ttk.Label(email_frame, text="Recipients (comma-separated)").grid(
+            row=2, column=0, sticky="w", pady=(6, 0))
+        self._ceo_email_recipients_var = tk.StringVar(value=email_ui.get("ceo_email_recipients", ""))
+        ttk.Entry(email_frame, textvariable=self._ceo_email_recipients_var, width=50).grid(
+            row=2, column=1, columnspan=4, sticky="ew", padx=(4, 12), pady=(6, 0))
+
+        self._ceo_email_auto_var = tk.BooleanVar(value=bool(email_ui.get("ceo_email_auto_send", False)))
+        ttk.Checkbutton(email_frame, text="Auto-send while the app is open, every",
+                        variable=self._ceo_email_auto_var).grid(
+                            row=3, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        self._ceo_email_interval_var = tk.StringVar(value=str(email_ui.get("ceo_email_interval_days", 7)))
+        ttk.Entry(email_frame, textvariable=self._ceo_email_interval_var, width=5).grid(
+            row=3, column=2, sticky="w", pady=(8, 0))
+        ttk.Label(email_frame, text="day(s)").grid(row=3, column=3, sticky="w", pady=(8, 0))
+
+        def _save_ceo_email_settings():
+            eui = self.state_obj.setdefault("ui", {})
+            eui["ceo_email_smtp_host"] = self._ceo_email_host_var.get().strip()
+            port = to_float(self._ceo_email_port_var.get(), 587) or 587
+            eui["ceo_email_smtp_port"] = int(port)
+            eui["ceo_email_username"] = self._ceo_email_user_var.get().strip()
+            eui["ceo_email_password"] = self._ceo_email_pass_var.get()
+            eui["ceo_email_recipients"] = self._ceo_email_recipients_var.get().strip()
+            eui["ceo_email_use_tls"] = bool(self._ceo_email_tls_var.get())
+            eui["ceo_email_auto_send"] = bool(self._ceo_email_auto_var.get())
+            interval = to_float(self._ceo_email_interval_var.get(), 7) or 7
+            eui["ceo_email_interval_days"] = max(1, int(interval))
+            save_state(self.state_obj)
+            messagebox.showinfo(APP_NAME, "Email digest settings saved.")
+
+        def _send_test_ceo_email():
+            _save_ceo_email_settings()
+            ok, msg = self._send_ceo_digest_email(manual=True)
+            if ok:
+                messagebox.showinfo(APP_NAME, f"CEO Brief email sent.\n\n{msg}")
+            else:
+                messagebox.showerror(APP_NAME, f"Failed to send: {msg}")
+            self._ceo_email_status_var.set(self._ceo_email_last_sent_note())
+
+        ttk.Button(email_frame, text="Save Email Settings",
+                   command=_save_ceo_email_settings).grid(row=4, column=0, sticky="w", pady=(10, 0))
+        ttk.Button(email_frame, text="Send Test Brief Now",
+                   command=_send_test_ceo_email).grid(row=4, column=1, sticky="w", pady=(10, 0))
+        self._ceo_email_status_var = tk.StringVar(value=self._ceo_email_last_sent_note())
+        ttk.Label(email_frame, textvariable=self._ceo_email_status_var,
+                  foreground=CLR["muted"]).grid(row=4, column=2, columnspan=3, sticky="w", pady=(10, 0))
+        ttk.Label(email_frame,
+                  text="Uses an app password, not your real account password, for Gmail/Outlook/etc. "
+                       "\"Auto-send\" only fires while Prometheus is running — there is no background "
+                       "service, so if the app isn't open on the due day it sends at the next launch.",
+                  foreground=CLR["muted"], wraplength=1150).grid(
+                      row=5, column=0, columnspan=6, sticky="w", pady=(6, 0))
 
         imports = ttk.LabelFrame(p, text="Imports — reduce manual daily feeding", padding=10)
         imports.grid(row=1, column=0, sticky="ew", pady=(0, 10))
@@ -12516,7 +13446,8 @@ class App(tk.Tk):
         sup_cols = [
             ("Rank",         50,"center"), ("Supplier",   150,"w"),
             ("Contracts",    75,"center"), ("Total MT",   90,"e"),
-            ("Avg CBOT Edge ¢",110,"e"),   ("Avg Premium ¢",100,"e"),
+            ("Avg CBOT",     95,"e"),      ("Avg CBOT Edge ¢",110,"e"),
+            ("Avg Premium ¢",100,"e"),
             ("Avg vs Local EGP/MT",130,"e"),("Total Saving EGP",130,"e"),
             ("Win Rate",     85,"center"), ("Best Contract",140,"w"),
             ("Grade",        80,"center"),
@@ -12561,7 +13492,7 @@ class App(tk.Tk):
 
         from collections import defaultdict
         sup_data = defaultdict(lambda: {
-            "contracts":0, "qty":0, "cbot_edges":[], "premiums":[],
+            "contracts":0, "qty":0, "cbot_edges":[], "impl_cbots":[], "premiums":[],
             "vs_local":[], "total_sav":0, "wins":0, "n_local":0,
             "best_contract":None, "best_sav":-1e18,
         })
@@ -12582,6 +13513,8 @@ class App(tk.Tk):
             sd["qty"]       += r.get("qty") or 0
             if r.get("cbot_edge") is not None:
                 sd["cbot_edges"].append(r["cbot_edge"])
+            if r.get("impl_cbot") is not None:
+                sd["impl_cbots"].append(r["impl_cbot"])
             if r.get("premium") is not None:
                 sd["premiums"].append(r["premium"])
             if r.get("local_edge") is not None:
@@ -12598,17 +13531,18 @@ class App(tk.Tk):
         rows = []
         for sup, sd in sup_data.items():
             avg_edge   = sum(sd["cbot_edges"])/len(sd["cbot_edges"]) if sd["cbot_edges"] else None
+            avg_cbot   = sum(sd["impl_cbots"])/len(sd["impl_cbots"]) if sd["impl_cbots"] else None
             avg_prem   = sum(sd["premiums"])/len(sd["premiums"]) if sd["premiums"] else None
             avg_local  = sum(sd["vs_local"])/len(sd["vs_local"]) if sd["vs_local"] else None
             win_rate   = sd["wins"]/sd["n_local"]*100 if sd["n_local"] else None
-            rows.append((sup, sd["contracts"], sd["qty"], avg_edge, avg_prem,
+            rows.append((sup, sd["contracts"], sd["qty"], avg_edge, avg_cbot, avg_prem,
                          avg_local, sd["total_sav"], win_rate,
                          sd["best_contract"]))
 
         # Rank by avg CBOT edge (the unbiased metric)
         rows.sort(key=lambda x: (x[3] if x[3] is not None else -999), reverse=True)
 
-        for rank, (sup, n, qty, edge, prem, avg_local, tot_sav, win_rate, best) in enumerate(rows, 1):
+        for rank, (sup, n, qty, edge, avg_cbot, prem, avg_local, tot_sav, win_rate, best) in enumerate(rows, 1):
             if   rank == 1:                grade, tag = "A+", "A"
             elif edge and edge > 0:        grade, tag = "A",  "A"
             elif edge and edge > -10:      grade, tag = "B",  "B"
@@ -12617,6 +13551,7 @@ class App(tk.Tk):
 
             tv.insert("", "end", tags=(tag,), values=(
                 rank, sup, n, fmt_num(qty,0),
+                f"{avg_cbot:,.2f}" if avg_cbot is not None else "—",
                 f"{edge:+.2f}" if edge is not None else "—",
                 f"{prem:.2f}" if prem is not None else "—",
                 f"{avg_local:+,.0f}" if avg_local is not None else "—",
@@ -12626,11 +13561,19 @@ class App(tk.Tk):
 
         if rows:
             best_sup = rows[0][0]
-            self._sup_notes_var.set(
-                f"🏆 Best supplier by CBOT timing: {best_sup}  "
-                f"(avg edge {rows[0][3]:+.2f}¢/bu — consistently prices below market)  |  "
-                f"Ranked by avg CBOT edge, not total volume, to remove the bias "
-                f"toward suppliers you simply bought more from.")
+            best_edge = rows[0][3]
+            if best_edge is not None:
+                self._sup_notes_var.set(
+                    f"🏆 Best supplier by CBOT timing: {best_sup}  "
+                    f"(avg edge {best_edge:+.2f}¢/bu — consistently prices below market)  |  "
+                    f"Ranked by avg CBOT edge, not total volume, to remove the bias "
+                    f"toward suppliers you simply bought more from.")
+            else:
+                self._sup_notes_var.set(
+                    f"🏆 Top-ranked supplier: {best_sup}  |  "
+                    f"No CBOT edge data available yet for full ranking confidence.  |  "
+                    f"Ranked by avg CBOT edge, not total volume, to remove the bias "
+                    f"toward suppliers you simply bought more from.")
         else:
             self._sup_notes_var.set(
                 f"📭 No closed {f_comm} contracts found "
@@ -12667,12 +13610,12 @@ class App(tk.Tk):
 
             cols = [c[0] for c in [
                 ("Rank",8),("Supplier",22),("Contracts",10),("Total MT",12),
-                ("Avg CBOT Edge ¢",14),("Avg Premium ¢",13),
+                ("Avg CBOT",13),("Avg CBOT Edge ¢",14),("Avg Premium ¢",13),
                 ("Avg vs Local EGP/MT",16),("Total Saving EGP",16),
                 ("Win Rate",10),("Best Contract",18),("Grade",8)]]
             for ci,(h,w) in enumerate([
                 ("Rank",8),("Supplier",22),("Contracts",10),("Total MT",12),
-                ("Avg CBOT Edge ¢",14),("Avg Premium ¢",13),
+                ("Avg CBOT",13),("Avg CBOT Edge ¢",14),("Avg Premium ¢",13),
                 ("Avg vs Local EGP/MT",16),("Total Saving EGP",16),
                 ("Win Rate",10),("Best Contract",18),("Grade",8)],1):
                 c = ws.cell(row=1, column=ci, value=h)
@@ -17723,6 +18666,14 @@ class App(tk.Tk):
         tv.configure(yscrollcommand=ysb.set)
 
     def export_stress_excel(self):
+        """Formula-based stress test export.
+
+        Base CBOT/FX/premium/qty/local/fees/factor live on the Assumptions
+        sheet as plain input cells (B2:B8). Every case row and every grid
+        cell is a live Excel formula built from those cells plus each row's
+        fixed shock magnitude, so editing an assumption recalculates the
+        whole sheet — exactly what a plain Python-computed export can't do.
+        """
         res = self._last_stress
         try:
             if not res or res.get("error"):
@@ -17744,40 +18695,94 @@ class App(tk.Tk):
             ws = wb.active
             ws.title = "Stress Test"
             inp = res["inputs"]
+
+            wsA = wb.create_sheet("Assumptions")
+            wsA["A1"] = "Stress Test — input assumptions (edit B2:B8)"
+            wsA["A1"].font = Font(bold=True, size=12)
+            assumption_rows = [
+                ("Base CBOT (¢/bu)", inp["cbot"], "#,##0.00"),
+                ("Base FX (EGP/USD)", inp["fx"], "#,##0.0000"),
+                ("Base Premium (¢/bu or $/st)", inp["premium_cents"], "#,##0.0"),
+                ("Quantity (MT)", inp["qty_mt"], "#,##0"),
+                ("Local price (EGP/MT)", inp["local_egp_mt"], "#,##0"),
+                ("Fees — discharge+clearance+freight (EGP/MT)", inp["fees_egp_mt"], "#,##0"),
+                ("Conversion factor (¢/bu → $/MT)", inp["factor"], "0.0000"),
+            ]
+            for i, (label, value, fmt) in enumerate(assumption_rows, start=2):
+                wsA.cell(row=i, column=1, value=label).font = Font(bold=True)
+                c = wsA.cell(row=i, column=2, value=value)
+                c.number_format = fmt
+            wsA["A10"] = ("Formula: Landed EGP/MT = ((shocked CBOT + shocked premium) "
+                          "× factor × shocked FX) + fees")
+            wsA["A11"] = "Saving EGP/MT = Local price − Landed EGP/MT   ·   Total EGP = Saving × Qty"
+            wsA["A12"] = ("CBOT/FX shocks are % moves off B2/B3; premium shocks are ¢ "
+                          "moves off B4 — every case and grid cell below is a live "
+                          "formula built from these plus each row's fixed shock size.")
+            wsA.column_dimensions["A"].width = 44
+            wsA.column_dimensions["B"].width = 14
+
+            def _saving_formula(cbot_shock, fx_shock, prem_shock):
+                return (f"=Assumptions!$B$6-(((Assumptions!$B$2*(1+{cbot_shock})+"
+                        f"(Assumptions!$B$4+{prem_shock}))*Assumptions!$B$8*"
+                        f"(Assumptions!$B$3*(1+{fx_shock})))+Assumptions!$B$7)")
+
+            def _total_formula(cbot_shock, fx_shock, prem_shock):
+                return f"=({_saving_formula(cbot_shock, fx_shock, prem_shock)[1:]})*Assumptions!$B$5"
+
+            def _cbot_formula(cbot_shock):
+                return f"=Assumptions!$B$2*(1+{cbot_shock})"
+
+            def _fx_formula(fx_shock):
+                return f"=Assumptions!$B$3*(1+{fx_shock})"
+
+            def _premium_formula(prem_shock):
+                return f"=Assumptions!$B$4+{prem_shock}"
+
+            def _landed_formula(cbot_shock, fx_shock, prem_shock):
+                return (f"=((Assumptions!$B$2*(1+{cbot_shock})+"
+                        f"(Assumptions!$B$4+{prem_shock}))*Assumptions!$B$8*"
+                        f"(Assumptions!$B$3*(1+{fx_shock})))+Assumptions!$B$7")
+
             ws["A1"] = (f"Stress Test — {inp['commodity']}   ·   engine "
                         f"v{res['version']}   ·   {res['ts']}")
             ws["A1"].font = Font(bold=True, size=13)
-            ws["A2"] = ("Assumptions: CBOT {c:,.2f} · FX {f:.4f} · premium "
-                        "{p:,.1f} · qty {q:,.0f} MT · local {l:,.0f} EGP/MT · "
-                        "fees {fe:,.0f} EGP/MT · factor {fa}"
-                        .format(c=inp["cbot"], f=inp["fx"],
-                                p=inp["premium_cents"], q=inp["qty_mt"],
-                                l=inp["local_egp_mt"], fe=inp["fees_egp_mt"],
-                                fa=inp["factor"]))
+            ws["A2"] = ("Formula-based: edit Assumptions!B2:B8 (CBOT, FX, premium, "
+                        "qty, local, fees, factor) and every case and grid cell "
+                        "below recalculates automatically.")
             ws["A3"] = ("Market data is prototype/public-feed grade unless "
                         "manually verified — not a licensed live feed.")
             r = 5
             ws.cell(row=r, column=1, value="Case").font = Font(bold=True)
-            for ci, h in enumerate(["Saving EGP/MT", "Total EGP", "CBOT",
-                                    "FX", "Premium", "Landed EGP/MT"], start=2):
+            for ci, h in enumerate(["Saving EGP/MT", "Total EGP", "Δ Saving vs Base %",
+                                    "CBOT", "FX", "Premium", "Landed EGP/MT"], start=2):
                 ws.cell(row=r, column=ci, value=h).font = Font(bold=True)
-            for key, label in (("best", "Best"), ("base", "Base"),
-                               ("adverse", "Adverse")):
-                r += 1
+            case_order = (("best", "Best"), ("base", "Base"), ("adverse", "Adverse"))
+            case_rows = {key: r + 1 + i for i, (key, _label) in enumerate(case_order)}
+            base_saving_cell = f"B{case_rows['base']}"
+            for key, label in case_order:
+                r = case_rows[key]
                 row = res[key]
+                cs, fs, ps = row["cbot_shock"], row["fx_shock"], row["prem_shock"]
                 ws.cell(row=r, column=1, value=label)
-                ws.cell(row=r, column=2, value=row["saving_egp_mt"]
-                        ).number_format = "#,##0"
-                ws.cell(row=r, column=3, value=row["saving_total_egp"]
-                        ).number_format = "#,##0"
-                ws.cell(row=r, column=4, value=row["cbot"]).number_format = "#,##0.00"
-                ws.cell(row=r, column=5, value=row["fx"]).number_format = "#,##0.0000"
-                ws.cell(row=r, column=6, value=row["premium"]).number_format = "#,##0.0"
-                ws.cell(row=r, column=7, value=row["landed_egp_mt"]
-                        ).number_format = "#,##0"
+                c_sav = ws.cell(row=r, column=2, value=_saving_formula(cs, fs, ps))
+                c_sav.number_format = "#,##0"
+                c_tot = ws.cell(row=r, column=3, value=_total_formula(cs, fs, ps))
+                c_tot.number_format = "#,##0"
+                if key == "base":
+                    ws.cell(row=r, column=4, value="—")
+                else:
+                    c_delta = ws.cell(
+                        row=r, column=4,
+                        value=f"=(B{r}-{base_saving_cell})/ABS({base_saving_cell})*100")
+                    c_delta.number_format = "+#,##0.0;[Red]-#,##0.0"
+                ws.cell(row=r, column=5, value=_cbot_formula(cs)).number_format = "#,##0.00"
+                ws.cell(row=r, column=6, value=_fx_formula(fs)).number_format = "#,##0.0000"
+                ws.cell(row=r, column=7, value=_premium_formula(ps)).number_format = "#,##0.0"
+                ws.cell(row=r, column=8, value=_landed_formula(cs, fs, ps)).number_format = "#,##0"
+            r = case_rows["adverse"]
             r += 2
             ws.cell(row=r, column=1,
-                    value=f"High Risk: {'YES' if res['high_risk'] else 'No'}"
+                    value=f"High Risk (at export-time assumptions): {'YES' if res['high_risk'] else 'No'}"
                     ).font = Font(bold=True,
                                   color="B00020" if res["high_risk"] else "1A7A1A")
             r += 1
@@ -17792,12 +18797,28 @@ class App(tk.Tk):
                            f"{res['be_fx'] if res['be_fx'] is not None else 'Not available'}"
                            f"   (buffer {res['fx_buffer']} / "
                            f"{res['fx_buffer_pct']}%)"))
+            r += 1
+            ws.cell(row=r, column=1,
+                    value=("Note: Best/Base/Adverse and the two break-evens above reflect "
+                           "the shock combination identified as such when this was exported. "
+                           "Editing Assumptions recalculates their values using that same "
+                           "combination — it does not re-search the grid for a new best/worst "
+                           "corner. The full grid below always recalculates every cell live."),
+                    ).alignment = Alignment(wrap_text=True)
+            ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=8)
+            ws.row_dimensions[r].height = 30
             r += 2
-            # scenario matrices, one block per premium shock
+            # scenario matrices, one block per premium shock — every cell a
+            # live formula referencing Assumptions!B2:B8 plus this cell's
+            # fixed CBOT/FX/premium shock.
+            base_premium = to_float(inp.get("premium_cents"), None)
             for ps in res.get("prem_shocks_used", STRESS_PREM_SHOCKS):
-                _ps_lbl = (f"premium shock {ps:+,.0f}"
-                           if not res.get("premium_locked")
-                           else "premium LOCKED by contract (base only)")
+                if res.get("premium_locked"):
+                    _ps_lbl = "premium LOCKED by contract (base only)"
+                else:
+                    pct_txt = (f" ({ps / base_premium * 100:+.0f}% of base premium)"
+                               if base_premium else "")
+                    _ps_lbl = f"premium shock {ps:+,.0f}¢{pct_txt}"
                 ws.cell(row=r, column=1,
                         value=f"Saving EGP/MT — {_ps_lbl}"
                         ).font = Font(bold=True)
@@ -17818,7 +18839,7 @@ class App(tk.Tk):
                                    and x["fx_shock"] == fs
                                    and x["prem_shock"] == ps)
                         cell = ws.cell(row=r, column=j,
-                                       value=row["saving_egp_mt"])
+                                       value=_saving_formula(cs, fs, ps))
                         cell.number_format = "#,##0"
                         if row["classification"] == "Material Loss":
                             cell.font = Font(color="FFFFFF", bold=True)
@@ -17826,11 +18847,11 @@ class App(tk.Tk):
                         elif row["saving_egp_mt"] < 0:
                             cell.font = Font(color="991B1B")
                 r += 2
-            for col, w in (("A", 16), ("B", 14), ("C", 14), ("D", 12),
-                           ("E", 12), ("F", 12), ("G", 14)):
+            for col, w in (("A", 16), ("B", 14), ("C", 14), ("D", 16),
+                           ("E", 12), ("F", 12), ("G", 12), ("H", 14)):
                 ws.column_dimensions[col].width = w
             wb.save(fp)
-            messagebox.showinfo(APP_NAME, f"Stress test exported:\n{fp}")
+            messagebox.showinfo(APP_NAME, f"Stress test exported with live formulas:\n{fp}")
         except Exception as e:
             self._surface_error("export_stress_excel", e, show=True)
 
@@ -19419,6 +20440,13 @@ class App(tk.Tk):
                                                         sticky="w")
             ttk.Entry(frm, textvariable=t_var, width=14).grid(row=2, column=1,
                                                               sticky="w")
+            ttk.Label(frm, text="Commodity").grid(row=3, column=0, sticky="w",
+                                                   pady=4)
+            comm_var = tk.StringVar(value="ALL")
+            comm_cb = ttk.Combobox(
+                frm, textvariable=comm_var, state="readonly", width=14,
+                values=["ALL"] + self._home_commodity_options())
+            comm_cb.grid(row=3, column=1, sticky="w")
 
             def _preset(*_):
                 today = dt.date.today()
@@ -19448,9 +20476,9 @@ class App(tk.Tk):
                 chosen["go"] = True
                 win.destroy()
             ttk.Button(frm, text="Create brief", command=_ok).grid(
-                row=3, column=0, pady=(10, 0), sticky="w")
+                row=4, column=0, pady=(10, 0), sticky="w")
             ttk.Button(frm, text="Cancel", command=win.destroy).grid(
-                row=3, column=1, pady=(10, 0), sticky="w")
+                row=4, column=1, pady=(10, 0), sticky="w")
             self.wait_window(win)
             if not chosen["go"]:
                 return
@@ -19459,6 +20487,7 @@ class App(tk.Tk):
                 messagebox.showerror(APP_NAME, "Invalid period dates.")
                 return
             lo_s, hi_s = lo.isoformat(), hi.isoformat()
+            comm_filter = (comm_var.get() or "ALL").strip().upper()
 
             exp = self._basis_expenses_egp_mt()
             # latest FX for the revaluation block
@@ -19472,23 +20501,36 @@ class App(tk.Tk):
 
             imports = []
             for cid, c in (self.state_obj.get("contracts", {}) or {}).items():
+                if comm_filter != "ALL" and (c.get("commodity") or "").strip().upper().split("-")[0] != comm_filter:
+                    continue
                 dd = parse_date_flex(c.get("delivery_date"))
                 if dd is None or not (lo <= dd <= hi):
                     continue
                 imports.append((dd.isoformat(), cid, c))
             imports.sort(key=lambda t: t[0])
+            # Local purchases have no recorded premium of their own, so their
+            # CBOT Equivalent nets out THIS period's average import premium
+            # per commodity instead of assuming a zero basis.
+            _prem_sums: dict[str, list] = {}
+            for _d, _cid, _c in imports:
+                _base_c = (_c.get("commodity") or "").strip().upper().split("-")[0]
+                _p = to_float(_c.get("premium_cents"), None)
+                if _base_c and _p is not None:
+                    _prem_sums.setdefault(_base_c, []).append(_p)
+            avg_prem_by_comm = {k: sum(v) / len(v) for k, v in _prem_sums.items()}
             locals_ = []
             for rec in (self.state_obj.get("local_purchases", []) or []):
+                if comm_filter != "ALL" and (rec.get("commodity") or "").strip().upper().split("-")[0] != comm_filter:
+                    continue
                 d = parse_date_flex(rec.get("date"))
                 if d is None or not (lo <= d <= hi):
                     continue
-                locals_.append((d.isoformat(), rec.get("commodity", ""),
-                                to_float(rec.get("qty_mt"), 0) or 0,
-                                to_float(rec.get("price_egp_mt"), None)))
-            locals_.sort()
+                locals_.append((d.isoformat(), rec))
+            locals_.sort(key=lambda t: t[0])
             if not imports and not locals_:
+                scope = "" if comm_filter == "ALL" else f" for {comm_filter}"
                 messagebox.showinfo(APP_NAME,
-                                    f"No purchases found between {lo_s} and {hi_s}.")
+                                    f"No purchases found between {lo_s} and {hi_s}{scope}.")
                 return
 
             fp = filedialog.asksaveasfilename(
@@ -19507,15 +20549,53 @@ class App(tk.Tk):
             wsA = wb.create_sheet("Assumptions")
             wsA["A1"] = "Purchasing Brief — input assumptions"
             wsA["A1"].font = Font(bold=True, size=12)
-            wsA["A2"] = "CORN conversion factor (¢/bu → $/MT)"
-            wsA["B2"] = self._BRIEF_CORN_FACTOR
+            # B2 holds THIS brief's own factor when filtered to a single
+            # commodity (any commodity, not just corn); a mixed "ALL" brief
+            # keeps B2 as CORN's factor and other commodities embed their own
+            # factor directly in their row formula instead.
+            single_commodity = None if comm_filter == "ALL" else comm_filter
+            b2_factor = (cbot_conv_factor(single_commodity, strict=False)
+                         if single_commodity else self._BRIEF_CORN_FACTOR)
+            if single_commodity:
+                wsA["A2"] = f"{single_commodity} conversion factor (CBOT → $/MT)"
+            else:
+                wsA["A2"] = "CORN conversion factor (¢/bu → $/MT)"
+            wsA["B2"] = b2_factor
             wsA["A3"] = "Average local expenses (EGP/MT)"; wsA["B3"] = exp
             wsA["A4"] = f"Latest USD/EGP rate ({latest_fx_d or 'none stored'})"
             wsA["B4"] = latest_fx if latest_fx is not None else ""
-            wsA["A6"] = ("Formulas: CIF=(CBOT+premium)×B2 · EGP@port=CIF×FX+B3 · "
+            if single_commodity:
+                wsA["A5"] = f"Fallback: avg {single_commodity} import premium (¢/bu)"
+                wsA["B5"] = avg_prem_by_comm.get(single_commodity, 0.0)
+                wsA["C5"] = ("From the Import Purchases rows above. Local Purchases' "
+                             "CBOT Equivalent prefers a date-matched Market Premium "
+                             "(from logged local price + CBOT/FX history on that "
+                             "purchase's own date, same method as Basis Tracker's "
+                             "Implied Basis); this period-average only steps in "
+                             "(orange) when no local price history exists for that "
+                             "date. Edit it to test a different assumed basis.")
+            else:
+                wsA["A5"] = "Fallback: avg import premium this period (¢/bu, per commodity)"
+                wsA["B5"] = ""
+                wsA["C5"] = ("Mixed-commodity brief — each Local Purchases row falls "
+                             "back (orange) to its own commodity's period-average "
+                             "import premium, embedded directly in that row's "
+                             "formula, only when no local price history exists for "
+                             "that row's specific date.")
+            wsA["A7"] = ("Formulas: CIF=(CBOT+premium)×B2 · EGP@port=CIF×FX+B3 · "
                          "mktCIF=(mkt−B3)÷FX · mktPrem=mktCIF÷B2−CBOT · "
-                         "FX impact = (B4 − contract FX) × CIF")
-            for _r in (2, 3, 4):
+                         "FX impact = (B4 − contract FX) × CIF · "
+                         "CBOT Equivalent (Implied) = CIF÷B2−premium, falling back "
+                         "to Market Premium (orange) when the contract's own "
+                         "premium is 0/blank. Mixed 'ALL' briefs: B2 drives CORN "
+                         "rows only, other commodities embed their own factor "
+                         "per row (e.g. SBM 1.1023 $/short-ton→$/MT). Local "
+                         "Purchases CBOT Equivalent (Implied) = ((price+transport"
+                         "−B3)÷FX)÷factor − Market Premium (date) — that purchase's "
+                         "own date's local-price-implied basis (Basis Tracker "
+                         "method), falling back to the avg import premium (B5, "
+                         "orange) then 0 (red).")
+            for _r in (2, 3, 4, 5):
                 wsA.cell(row=_r, column=1).font = Font(bold=True)
             wsA.column_dimensions["A"].width = 40
             wsA.column_dimensions["B"].width = 12
@@ -19529,7 +20609,8 @@ class App(tk.Tk):
             BLUE = Font(color="1A4FA0")
             BOLD = Font(bold=True)
 
-            ws["A1"] = f"Purchasing Brief   {lo_s} → {hi_s}"
+            scope_label = "" if comm_filter == "ALL" else f"   ·   {comm_filter}"
+            ws["A1"] = f"Purchasing Brief   {lo_s} → {hi_s}{scope_label}"
             ws["A1"].font = Font(bold=True, size=13)
             ws.merge_cells("A1:R1")
 
@@ -19538,7 +20619,7 @@ class App(tk.Tk):
                        "CIF USD/MT", "Avr CBOT", "Premium over July EGP/MT",
                        "Market price EGP/MT at port", "Market CIF USD/MT",
                        "Market Premium over July", "Diff EGP/MT", "Diff USD/MT",
-                       "Diff Premium"]
+                       "Diff Premium", "CBOT Equivalent (Implied)"]
             hr = 3
             for ci, h in enumerate(headers, start=1):
                 cell = ws.cell(row=hr, column=ci, value=h)
@@ -19550,6 +20631,7 @@ class App(tk.Tk):
             r = hr + 1
             r0 = r
             fx_rows = []   # (row, name) for the FX-impact block
+            mkt_prem_used_flag = {"any": False}
             for i, (d, cid, c) in enumerate(imports, start=1):
                 comm = (c.get("commodity") or "CORN")
                 qty = to_float(c.get("qty_mt"), 0) or 0
@@ -19561,13 +20643,23 @@ class App(tk.Tk):
                 mkt_port = self._brief_market_egp_at_port(comm, d)
                 mkt_cif = ((mkt_port - exp) / fx) if (mkt_port is not None and fx) else None
                 is_corn = comm.upper().startswith("CORN")
-                factor = self._BRIEF_CORN_FACTOR if is_corn else None
-                mkt_prem = ((mkt_cif / factor - cbot)
-                            if (mkt_cif is not None and cbot and factor) else None)
+                factor_any = cbot_conv_factor(comm, strict=False)
+                # B2 holds THIS row's own factor whenever the brief is
+                # filtered to a single commodity; mixed "ALL" briefs only let
+                # CORN rows share B2, other commodities embed their own
+                # factor as a literal in the formula.
+                use_b2 = (single_commodity is not None) or is_corn
+                mkt_prem = ((mkt_cif / factor_any - cbot)
+                            if (mkt_cif is not None and cbot and factor_any) else None)
                 diff_egp = (mkt_port - egp_port) if (mkt_port is not None and egp_port is not None) else None
                 diff_usd = (mkt_cif - cif) if (mkt_cif is not None and cif is not None) else None
                 diff_prem = (mkt_prem - prem) if (mkt_prem is not None and prem is not None) else None
+                # CIF stays the raw deal-entered figure for non-CORN rows,
+                # same as before — only CORN rows re-derive it live from
+                # Avr CBOT + premium (use_b2 only widens which cells the
+                # Market Premium / CBOT Equivalent formulas may reference).
                 can_formula = is_corn and cbot is not None and prem is not None
+                have_mkt_formula = mkt_port is not None and fx is not None and cbot is not None
                 f_exp  = "=Assumptions!$B$3"
                 f_cif  = f"=(K{r}+L{r})*Assumptions!$B$2" if can_formula else cif
                 f_egp  = (f"=J{r}*G{r}+I{r}"
@@ -19575,21 +20667,46 @@ class App(tk.Tk):
                           else egp_port)
                 f_mcif = (f"=(M{r}-I{r})/G{r}"
                           if (mkt_port is not None and fx) else mkt_cif)
-                f_mprm = (f"=N{r}/Assumptions!$B$2-K{r}"
-                          if (mkt_port is not None and fx and can_formula) else mkt_prem)
+                if use_b2 and have_mkt_formula:
+                    f_mprm = f"=N{r}/Assumptions!$B$2-K{r}"
+                elif have_mkt_formula:
+                    f_mprm = f"=N{r}/{factor_any}-K{r}"
+                else:
+                    f_mprm = mkt_prem
                 f_dE   = (f"=M{r}-H{r}"
                           if (mkt_port is not None and egp_port is not None) else diff_egp)
                 f_dU   = (f"=N{r}-J{r}"
                           if (mkt_cif is not None and cif is not None) else diff_usd)
                 f_dP   = (f"=O{r}-L{r}"
                           if (mkt_prem is not None and prem is not None) else diff_prem)
+                # CBOT Equivalent (implied): CBOT = CIF/factor - premium — the
+                # CBOT level this contract's own CIF and premium imply, so it
+                # can be sanity-checked against the period's actual average
+                # CBOT. Prefer the contract's OWN recorded premium; 0/blank
+                # almost always means it wasn't tracked for that deal, so
+                # fall back to the Market Premium (col O, derived from logged
+                # local price + CBOT history) and mark the cell orange.
+                prem_is_real = prem not in (None, 0)
+                if prem_is_real:
+                    prem_col, eff_prem = "L", prem
+                else:
+                    prem_col, eff_prem = "O", mkt_prem
+                used_mkt_prem = (not prem_is_real) and eff_prem is not None
+                if cif is not None and eff_prem is not None:
+                    f_cbe = (f"=J{r}/Assumptions!$B$2-{prem_col}{r}" if use_b2
+                             else f"=J{r}/{factor_any}-{prem_col}{r}")
+                else:
+                    f_cbe = None
+                if used_mkt_prem:
+                    mkt_prem_used_flag["any"] = True
                 vals = [i, d, c.get("supplier", ""), qty, c.get("origin", ""),
                         c.get("note", ""), fx, f_egp, f_exp, f_cif, cbot, prem,
-                        mkt_port, f_mcif, f_mprm, f_dE, f_dU, f_dP]
+                        mkt_port, f_mcif, f_mprm, f_dE, f_dU, f_dP, f_cbe]
                 _fmt = {4: "#,##0", 7: "#,##0.00", 8: "#,##0", 9: "#,##0",
                         10: "#,##0.00", 11: "#,##0.00", 12: "#,##0.00",
                         13: "#,##0", 14: "#,##0.00", 15: "#,##0.0",
-                        16: "#,##0", 17: "#,##0.00", 18: "#,##0.0"}
+                        16: "#,##0", 17: "#,##0.00", 18: "#,##0.0",
+                        19: "#,##0.00"}
                 for ci, v in enumerate(vals, start=1):
                     cell = ws.cell(row=r, column=ci, value=v)
                     cell.border = border
@@ -19598,6 +20715,8 @@ class App(tk.Tk):
                         cell.number_format = _fmt[ci]
                     if isinstance(v, str) and v.startswith("="):
                         cell.font = BLUE
+                    if ci == 19 and used_mkt_prem:
+                        cell.font = Font(color="B36B00", italic=True)
                 if fx is not None and (can_formula or cif is not None):
                     fx_rows.append((r, c.get("name") or cid, qty))
                 r += 1
@@ -19608,7 +20727,7 @@ class App(tk.Tk):
                              value=f"=SUM(D{r0}:D{r-1})" if r - 1 >= r0 else 0)
                 tq.font = Font(bold=True, color="1A4FA0")
                 tq.number_format = "#,##0"
-                for ci in range(1, 19):
+                for ci in range(1, 20):
                     ws.cell(row=r, column=ci).fill = grp_fill
                 imp_tot_row = r
                 r += 2
@@ -19654,26 +20773,114 @@ class App(tk.Tk):
                 fx_tot_row = None
 
             # ── Local purchases ───────────────────────────────────────
+            # CBOT Equivalent (Implied) for a local buy has no CIF/premium to
+            # work from, so it's the flat conversion of the all-in local
+            # price into CBOT terms: ((price+transport − expenses) ÷ FX) ÷
+            # factor — the CBOT print a zero-basis flat deal would need to
+            # justify this local price. CBOT Ref/FX fall back to the nearest
+            # logged history on/before the purchase date when not recorded
+            # on the purchase itself (marked gray when estimated this way).
+            GRAY = Font(color="808080", italic=True)
+            local_gray_used_flag = {"any": False}
+            local_avg_prem_flag = {"any": False}
+            local_no_prem_flag = {"any": False}
             loc_tot_row = None
             if locals_:
                 ws.cell(row=r, column=1, value="LOCAL PURCHASES").font = BOLD
                 r += 1
-                for ci, h in enumerate(["Date", "Commodity", "Qty MT",
-                                        "Price EGP/MT", "Value EGP"], start=1):
+                loc_headers = ["Date", "Commodity", "Qty MT", "Price EGP/MT",
+                               "Transport EGP/MT", "All-in EGP/MT",
+                               "Local expenses EGP/MT", "FX", "CBOT Ref",
+                               "Market Price EGP/MT at port (date)",
+                               "Market Premium (date, ¢/bu)",
+                               "CBOT Equivalent (Implied)", "Value EGP"]
+                for ci, h in enumerate(loc_headers, start=1):
                     cell = ws.cell(row=r, column=ci, value=h)
                     cell.fill = hdr_fill; cell.font = hdr_font
                     cell.alignment = cen; cell.border = border
                 r += 1
                 loc0 = r
-                for d, comm, qty, px in locals_:
+                for d, rec in locals_:
+                    comm = rec.get("commodity", "")
+                    base = (comm or "").strip().upper().split("-")[0]
+                    qty = to_float(rec.get("qty_mt"), 0) or 0
+                    px = to_float(rec.get("price_egp_mt"), None)
+                    trans = to_float(rec.get("transport_egp_mt"), 0) or 0
+                    cbot_val = to_float(rec.get("cbot_ref"), None)
+                    fx_val = to_float(rec.get("fx_ref"), None)
+                    cbot_from_history = cbot_val is None
+                    fx_from_history = fx_val is None
+                    if cbot_val is None or fx_val is None:
+                        ch, fxh = self._basis_history_lists(base)
+                        if cbot_val is None:
+                            cbot_val, _cd = self._basis_nearest_le(ch, d)
+                        if fx_val is None:
+                            fx_val, _fd = self._basis_nearest_le(fxh, d)
+                    factor_any = cbot_conv_factor(base, strict=False)
+                    use_b2 = (single_commodity is not None) or base == "CORN"
+                    mkt_port_d = self._brief_market_egp_at_port(base, d)
+                    avg_prem_loc = avg_prem_by_comm.get(base)
+
                     ws.cell(row=r, column=1, value=d)
                     ws.cell(row=r, column=2, value=comm)
                     ws.cell(row=r, column=3, value=qty).number_format = "#,##0"
                     if px is not None:
                         ws.cell(row=r, column=4, value=px).number_format = "#,##0"
-                        vc = ws.cell(row=r, column=5, value=f"=C{r}*D{r}")
+                    ws.cell(row=r, column=5, value=trans).number_format = "#,##0"
+                    if px is not None:
+                        ac = ws.cell(row=r, column=6, value=f"=D{r}+E{r}")
+                        ac.number_format = "#,##0"; ac.font = BLUE
+                    ec = ws.cell(row=r, column=7, value="=Assumptions!$B$3")
+                    ec.number_format = "#,##0"; ec.font = BLUE
+                    if cbot_val is not None:
+                        cc = ws.cell(row=r, column=9, value=cbot_val)
+                        cc.number_format = "#,##0.00"
+                        if cbot_from_history:
+                            cc.font = GRAY
+                            local_gray_used_flag["any"] = True
+                    if fx_val is not None:
+                        fc = ws.cell(row=r, column=8, value=fx_val)
+                        fc.number_format = "#,##0.0000"
+                        if fx_from_history:
+                            fc.font = GRAY
+                            local_gray_used_flag["any"] = True
+                    if mkt_port_d is not None:
+                        ws.cell(row=r, column=10, value=mkt_port_d).number_format = "#,##0"
+
+                    # Market Premium (date): tier 1 = this purchase's own
+                    # date, from logged local price history + that date's
+                    # CBOT/FX (Basis Tracker's Implied-Basis formula). Tier 2
+                    # = this period's average import premium (orange) when
+                    # no local price history exists for that date. Tier 3 =
+                    # 0 (red) when neither is available.
+                    if mkt_port_d is not None and cbot_val and fx_val and factor_any:
+                        mp_formula = (f"=(J{r}-G{r})/H{r}/Assumptions!$B$2-I{r}" if use_b2
+                                      else f"=(J{r}-G{r})/H{r}/{factor_any}-I{r}")
+                        pc = ws.cell(row=r, column=11, value=mp_formula)
+                        prem_tier = 1
+                    elif avg_prem_loc is not None:
+                        pc = ws.cell(row=r, column=11,
+                                      value="=Assumptions!$B$5" if use_b2 else avg_prem_loc)
+                        prem_tier = 2
+                    else:
+                        pc = ws.cell(row=r, column=11, value=0.0)
+                        prem_tier = 3
+                    pc.number_format = "#,##0.0"
+                    if prem_tier == 2:
+                        pc.font = Font(color="B36B00", italic=True)
+                        local_avg_prem_flag["any"] = True
+                    elif prem_tier == 3:
+                        pc.font = Font(color="B00020", italic=True)
+                        local_no_prem_flag["any"] = True
+                    if px is not None and fx_val and factor_any:
+                        cbe_formula = (f"=(F{r}-G{r})/H{r}/Assumptions!$B$2-K{r}" if use_b2
+                                       else f"=(F{r}-G{r})/H{r}/{factor_any}-K{r}")
+                        cec = ws.cell(row=r, column=12, value=cbe_formula)
+                        cec.number_format = "#,##0.00"; cec.font = BLUE
+                    if px is not None:
+                        vc = ws.cell(row=r, column=13, value=f"=C{r}*D{r}")
                         vc.number_format = "#,##0"; vc.font = BLUE
-                    for ci in range(1, 6):
+                    for ci in range(1, 14):
                         ws.cell(row=r, column=ci).border = border
                     r += 1
                 ws.cell(row=r, column=1, value="TOTAL local").font = BOLD
@@ -19683,7 +20890,7 @@ class App(tk.Tk):
                              value=f"=SUMPRODUCT(C{loc0}:C{r-1},D{loc0}:D{r-1})"
                                    f"/SUM(C{loc0}:C{r-1})")
                 wa.font = Font(bold=True, color="1A4FA0"); wa.number_format = "#,##0"
-                tv = ws.cell(row=r, column=5, value=f"=SUM(E{loc0}:E{r-1})")
+                tv = ws.cell(row=r, column=13, value=f"=SUM(M{loc0}:M{r-1})")
                 tv.font = Font(bold=True, color="1A4FA0"); tv.number_format = "#,##0"
                 loc_tot_row = r
                 r += 2
@@ -19702,25 +20909,51 @@ class App(tk.Tk):
             if loc_tot_row:
                 ws.cell(row=r, column=1, value="Local volume MT / value EGP")
                 ws.cell(row=r, column=3, value=f"=C{loc_tot_row}").font = BLUE
-                ws.cell(row=r, column=4, value=f"=E{loc_tot_row}").font = BLUE
+                ws.cell(row=r, column=4, value=f"=M{loc_tot_row}").font = BLUE
                 r += 1
             ws.cell(row=r, column=1,
                     value=f"Contracts: {len(imports)}   ·   Local buys: {len(locals_)}")
             r += 2
-            for txt in [
+            _period_notes = [
                 "FX Impact: contract values are calculated at each contract's "
                 "delivery/contract-date USD rate and compared with the latest "
                 "USD rate (Assumptions!B4). The difference reflects the impact "
                 "of the change in the USD exchange rate.",
                 "A revaluation will be conducted to determine the over price.",
                 "Reviewed and Verified by Finance.",
-            ]:
+            ]
+            if mkt_prem_used_flag["any"]:
+                _period_notes.append(
+                    "Orange \"CBOT Equivalent (Implied)\" cells: that contract's "
+                    "own premium was 0/blank, so the figure falls back to the "
+                    "Market Premium (derived from logged local price + CBOT "
+                    "history for that date) instead — treat it as an estimate, "
+                    "not a recorded deal term.")
+            if local_gray_used_flag["any"]:
+                _period_notes.append(
+                    "Gray CBOT Ref/FX cells in Local Purchases: not recorded on "
+                    "the purchase itself, so the nearest logged history on/before "
+                    "the purchase date was used instead.")
+            if local_avg_prem_flag["any"]:
+                _period_notes.append(
+                    "Orange \"Market Premium (date)\" cells in Local Purchases: "
+                    "no logged local price history for that specific date, so "
+                    "this period's average import premium for that commodity "
+                    "was used instead of a date-matched market premium.")
+            if local_no_prem_flag["any"]:
+                _period_notes.append(
+                    "Red \"Market Premium (date)\" cells in Local Purchases: "
+                    "neither local price history for that date nor an import "
+                    "contract for that commodity to average from, so 0 was "
+                    "used — that row's CBOT Equivalent is a zero-basis upper "
+                    "bound, not a real estimate.")
+            for txt in _period_notes:
                 ws.cell(row=r, column=1, value=txt).alignment = Alignment(wrap_text=True)
                 ws.merge_cells(start_row=r, start_column=1, end_row=r,
                                end_column=18)
                 r += 1
 
-            widths = [4, 11, 14, 8, 9, 10, 7, 14, 12, 10, 9, 13, 14, 12, 13, 11, 10, 11]
+            widths = [4, 11, 14, 8, 9, 10, 7, 14, 12, 10, 9, 13, 14, 12, 13, 11, 10, 11, 20]
             for i2, w in enumerate(widths, start=1):
                 ws.column_dimensions[get_column_letter(i2)].width = w
             wb.save(fp)
@@ -19742,10 +20975,56 @@ class App(tk.Tk):
                 messagebox.showinfo(APP_NAME, "No contracts to brief.")
                 return
 
+            # ── Commodity picker ────────────────────────────────────────
+            win = tk.Toplevel(self)
+            win.title("Finance brief — choose commodity")
+            win.transient(self); win.grab_set()
+            frm = ttk.Frame(win, padding=12); frm.grid(row=0, column=0)
+            ttk.Label(frm, text="Commodity").grid(row=0, column=0, sticky="w",
+                                                   padx=(0, 8))
+            comm_var = tk.StringVar(value="ALL")
+            ttk.Combobox(frm, textvariable=comm_var, state="readonly", width=14,
+                         values=["ALL"] + self._home_commodity_options()).grid(
+                             row=0, column=1, sticky="w")
+            chosen = {"go": False}
+
+            def _ok():
+                chosen["go"] = True
+                win.destroy()
+            ttk.Button(frm, text="Create brief", command=_ok).grid(
+                row=1, column=0, pady=(10, 0), sticky="w")
+            ttk.Button(frm, text="Cancel", command=win.destroy).grid(
+                row=1, column=1, pady=(10, 0), sticky="w")
+            self.wait_window(win)
+            if not chosen["go"]:
+                return
+            comm_filter = (comm_var.get() or "ALL").strip().upper()
+            if comm_filter != "ALL":
+                contracts = {cid: c for cid, c in contracts.items()
+                             if (c.get("commodity") or "").strip().upper().split("-")[0] == comm_filter}
+                if not contracts:
+                    messagebox.showinfo(APP_NAME, f"No {comm_filter} contracts to brief.")
+                    return
+
             # Window = min..max delivery date across contracts (sheet header).
             dates = [c.get("delivery_date", "") for c in contracts.values()
                      if c.get("delivery_date")]
             win_lo, win_hi = (min(dates), max(dates)) if dates else ("", "")
+
+            # Local purchases have no recorded premium of their own, so their
+            # CBOT Equivalent nets out THIS period's average import premium
+            # per commodity (from the contracts above) instead of assuming a
+            # zero basis — otherwise the whole local-market basis gets
+            # misread as CBOT and the figure runs 150-200+ points too high.
+            avg_prem_by_comm: dict[str, float] = {}
+            _prem_sums: dict[str, list] = {}
+            for c in contracts.values():
+                base_c = (c.get("commodity") or "").strip().upper().split("-")[0]
+                p = to_float(c.get("premium_cents"), None)
+                if base_c and p is not None:
+                    _prem_sums.setdefault(base_c, []).append(p)
+            for base_c, plist in _prem_sums.items():
+                avg_prem_by_comm[base_c] = sum(plist) / len(plist)
 
             wb = Workbook(); ws = wb.active; ws.title = "Finance Brief"
             thin = Side(style="thin", color="808080")
@@ -19755,25 +21034,70 @@ class App(tk.Tk):
             hdr_font = Font(bold=True, color="FFFFFF", size=9)
             cen = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
-            ws["A1"] = f"Corn Comparison Brief   {win_lo} to {win_hi}"
+            title_scope = "Corn Comparison Brief" if comm_filter == "ALL" else f"{comm_filter} Comparison Brief"
+            ws["A1"] = f"{title_scope}   {win_lo} to {win_hi}"
             ws["A1"].font = Font(bold=True, size=13)
             ws.merge_cells("A1:R1")
+
+            # A brief filtered to one commodity uses THAT commodity's own
+            # conversion factor for every row (so it's correct for SBM/wheat/
+            # soybean briefs, not just corn). "ALL" (mixed commodities) keeps
+            # B2 as the CORN factor — the only one that can be shared across
+            # rows — and non-CORN rows embed their own factor directly in
+            # their formula instead.
+            single_commodity = None if comm_filter == "ALL" else comm_filter
+            b2_factor = (cbot_conv_factor(single_commodity, strict=False)
+                         if single_commodity else self._BRIEF_CORN_FACTOR)
 
             # Assumptions sheet: the input cells every formula points at.
             wsA = wb.create_sheet("Assumptions")
             wsA["A1"] = "Finance Brief — input assumptions"
             wsA["A1"].font = Font(bold=True, size=12)
-            wsA["A2"] = "CORN conversion factor (¢/bu → $/MT)"
-            wsA["B2"] = self._BRIEF_CORN_FACTOR
-            wsA["C2"] = "House convention 0.3937 (ARG/BRZ/USA). Applies to CORN rows only."
+            if single_commodity:
+                wsA["A2"] = f"{single_commodity} conversion factor (CBOT → $/MT)"
+                wsA["C2"] = (f"House convention {b2_factor:g} for {single_commodity}. "
+                             f"Every row in this brief uses this factor.")
+            else:
+                wsA["A2"] = "CORN conversion factor (¢/bu → $/MT)"
+                wsA["C2"] = ("House convention 0.3937 (ARG/BRZ/USA). Mixed-commodity "
+                             "brief — this drives CORN rows only; other commodities "
+                             "(e.g. SBM 1.1023 $/short-ton→$/MT) use their own factor "
+                             "embedded directly in that row's formula.")
+            wsA["B2"] = b2_factor
             wsA["A3"] = "Average local expenses (EGP/MT)"
             wsA["B3"] = self._basis_expenses_egp_mt()
             wsA["C3"] = "At-port costs inside the local price. Editable in Basis Tracker bar."
+            if single_commodity:
+                wsA["A4"] = f"Fallback: avg {single_commodity} import premium (¢/bu)"
+                wsA["B4"] = avg_prem_by_comm.get(single_commodity, 0.0)
+                wsA["C4"] = ("From the Import contract rows above. Local Purchases' "
+                             "CBOT Equivalent prefers a date-matched Market Premium "
+                             "(from logged local price + CBOT/FX history on that "
+                             "purchase's own date, same method as Basis Tracker's "
+                             "Implied Basis); this period-average only steps in "
+                             "(orange) when no local price history exists for that "
+                             "date. Edit it to test a different assumed basis.")
+            else:
+                wsA["A4"] = "Fallback: avg import premium this period (¢/bu, per commodity)"
+                wsA["B4"] = ""
+                wsA["C4"] = ("Mixed-commodity brief — each Local Purchases row falls "
+                             "back (orange) to its own commodity's period-average "
+                             "import premium, embedded directly in that row's "
+                             "formula, only when no local price history exists for "
+                             "that row's specific date.")
             wsA["A5"] = ("Row formulas:  CIF = (CBOT + premium) × factor   ·   "
                          "EGP at port = CIF × FX + expenses   ·   "
                          "market CIF = (market − expenses) ÷ FX   ·   "
-                         "market premium = market CIF ÷ factor − CBOT")
-            for _r in (2, 3):
+                         "market premium = market CIF ÷ factor − CBOT   ·   "
+                         "CBOT Equivalent (Implied) = CIF ÷ factor − premium   ·   "
+                         "premium falls back to Market Premium (orange) when the "
+                         "contract's own premium is 0/blank   ·   Local Purchases "
+                         "CBOT Equivalent (Implied) = ((price+transport−expenses)"
+                         "÷FX)÷factor − Market Premium (date) — where Market "
+                         "Premium (date) is that purchase's own date's local-price-"
+                         "implied basis (Basis Tracker method), falling back to the "
+                         "avg import premium (B4, orange) then 0 (red).")
+            for _r in (2, 3, 4):
                 wsA.cell(row=_r, column=1).font = Font(bold=True)
             wsA.column_dimensions["A"].width = 36
             wsA.column_dimensions["B"].width = 12
@@ -19784,12 +21108,14 @@ class App(tk.Tk):
                        "CIF USD/MT", "Avr CBOT", "Premium over July EGP/MT",
                        "Market price EGP/MT at port", "Market CIF USD/MT",
                        "Market Premium over July", "Diff EGP/MT", "Diff USD/MT",
-                       "Diff Premium"]
+                       "Diff Premium", "CBOT Equivalent (Implied)"]
             hr = 3
             for ci, h in enumerate(headers, start=1):
                 cell = ws.cell(row=hr, column=ci, value=h)
                 cell.fill = hdr_fill; cell.font = hdr_font
                 cell.alignment = cen; cell.border = border
+
+            mkt_prem_used_flag = {"any": False}
 
             def _emit_group(title, rows, r0):
                 gc = ws.cell(row=r0, column=1, value=title)
@@ -19807,18 +21133,31 @@ class App(tk.Tk):
                     cbot = self._brief_avg_cbot(comm, win_lo, win_hi)
                     prem = to_float(c.get("premium_cents"), None)
                     exp = self._BRIEF_LOCAL_EXPENSES_EGP_MT
+                    is_corn = comm.upper().startswith("CORN")
+                    factor_any = cbot_conv_factor(comm, strict=False)
+                    # B2 holds THIS row's own factor whenever the brief is
+                    # filtered to a single commodity (any commodity, not just
+                    # corn); in a mixed "ALL" brief only CORN rows can safely
+                    # share B2, so other commodities embed their factor as a
+                    # literal in the formula instead.
+                    use_b2 = (single_commodity is not None) or is_corn
                     # Price EGP/MT at port = CIF*FX + expenses (sheet formula)
                     egp_port = (cif * fx + exp) if (cif is not None and fx is not None) else None
                     mkt_port = self._brief_market_egp_at_port(comm, c.get("delivery_date", ""))
                     mkt_cif = ((mkt_port - exp) / fx) if (mkt_port is not None and fx) else None
-                    factor = self._BRIEF_CORN_FACTOR if comm.upper().startswith("CORN") else None
-                    mkt_prem = ((mkt_cif / factor - cbot) if (mkt_cif is not None and cbot and factor) else None)
+                    mkt_prem = ((mkt_cif / factor_any - cbot)
+                                if (mkt_cif is not None and cbot and factor_any) else None)
                     diff_egp = (mkt_port - egp_port) if (mkt_port is not None and egp_port is not None) else None
                     diff_usd = (mkt_cif - cif) if (mkt_cif is not None and cif is not None) else None
                     diff_prem = (mkt_prem - prem) if (mkt_prem is not None and prem is not None) else None
 
-                    is_corn = comm.upper().startswith("CORN")
+                    # CIF stays the raw deal-entered figure for non-CORN
+                    # rows, same as before — only CORN rows re-derive it
+                    # live from Avr CBOT + premium (use_b2 only widens which
+                    # cells the Market Premium / CBOT Equivalent formulas
+                    # may reference).
                     can_formula = is_corn and cbot is not None and prem is not None
+                    have_mkt_formula = mkt_port is not None and fx is not None and cbot is not None
                     # Derived numbers become REAL Excel formulas (auditable):
                     f_exp  = "=Assumptions!$B$3"
                     f_cif  = f"=(K{r}+L{r})*Assumptions!$B$2" if can_formula else cif
@@ -19827,23 +21166,48 @@ class App(tk.Tk):
                               else egp_port)
                     f_mcif = (f"=(M{r}-I{r})/G{r}"
                               if (mkt_port is not None and fx) else mkt_cif)
-                    f_mprm = (f"=N{r}/Assumptions!$B$2-K{r}"
-                              if (mkt_port is not None and fx and can_formula)
-                              else mkt_prem)
+                    if use_b2 and have_mkt_formula:
+                        f_mprm = f"=N{r}/Assumptions!$B$2-K{r}"
+                    elif have_mkt_formula:
+                        f_mprm = f"=N{r}/{factor_any}-K{r}"
+                    else:
+                        f_mprm = mkt_prem
                     f_dE   = (f"=M{r}-H{r}"
                               if (mkt_port is not None and egp_port is not None) else diff_egp)
                     f_dU   = (f"=N{r}-J{r}"
                               if (mkt_cif is not None and cif is not None) else diff_usd)
                     f_dP   = (f"=O{r}-L{r}"
                               if (mkt_prem is not None and prem is not None) else diff_prem)
+                    # CBOT Equivalent (implied): CBOT = CIF/factor - premium.
+                    # Prefer the contract's OWN recorded premium; a premium of
+                    # 0/blank almost always means it wasn't tracked for that
+                    # deal (not that the basis was truly zero) — using it as-is
+                    # would attribute the whole CIF to CBOT. When that happens,
+                    # fall back to the Market Premium (col O), derived
+                    # independently from logged local price + CBOT history, and
+                    # mark the cell (orange) so it reads as a fallback estimate.
+                    prem_is_real = prem not in (None, 0)
+                    if prem_is_real:
+                        prem_col, eff_prem = "L", prem
+                    else:
+                        prem_col, eff_prem = "O", mkt_prem
+                    used_mkt_prem = (not prem_is_real) and eff_prem is not None
+                    if cif is not None and eff_prem is not None:
+                        f_cbe = (f"=J{r}/Assumptions!$B$2-{prem_col}{r}" if use_b2
+                                 else f"=J{r}/{factor_any}-{prem_col}{r}")
+                    else:
+                        f_cbe = None
+                    if used_mkt_prem:
+                        mkt_prem_used_flag["any"] = True
                     vals = [i, c.get("delivery_date", ""), c.get("supplier", ""),
                             qty, c.get("origin", ""), c.get("note", ""),
                             fx, f_egp, f_exp, f_cif, cbot, prem, mkt_port,
-                            f_mcif, f_mprm, f_dE, f_dU, f_dP]
+                            f_mcif, f_mprm, f_dE, f_dU, f_dP, f_cbe]
                     _fmt = {4: "#,##0", 7: "#,##0.00", 8: "#,##0", 9: "#,##0",
                             10: "#,##0.00", 11: "#,##0.00", 12: "#,##0.00",
                             13: "#,##0", 14: "#,##0.00", 15: "#,##0.0",
-                            16: "#,##0", 17: "#,##0.00", 18: "#,##0.0"}
+                            16: "#,##0", 17: "#,##0.00", 18: "#,##0.0",
+                            19: "#,##0.00"}
                     for ci, v in enumerate(vals, start=1):
                         cell = ws.cell(row=r, column=ci, value=v)
                         cell.border = border
@@ -19852,13 +21216,15 @@ class App(tk.Tk):
                             cell.number_format = _fmt[ci]
                         if isinstance(v, str) and v.startswith("="):
                             cell.font = Font(color="1A4FA0")
+                        if ci == 19 and used_mkt_prem:
+                            cell.font = Font(color="B36B00", italic=True)
                     r += 1
                 # group total row — a real SUM the user can audit
                 ws.cell(row=r, column=1, value="TOTAL").font = Font(bold=True)
                 tc = ws.cell(row=r, column=4,
                              value=f"=SUM(D{r0 + 1}:D{r - 1})" if r - 1 > r0 else tot_qty)
                 tc.font = Font(bold=True); tc.number_format = "#,##0"
-                for ci in range(1, 19):
+                for ci in range(1, 20):
                     ws.cell(row=r, column=ci).fill = grp_fill
                 return r + 2
 
@@ -19874,25 +21240,180 @@ class App(tk.Tk):
             if imports and others:
                 nr = _emit_group("Contract", others, nr)
 
+            # ── Local Purchases — CBOT Equivalent (Implied) too ─────────
+            # A local buy has no CIF/premium, so its CBOT Equivalent nets out
+            # a premium the same way the Basis Tracker computes Implied
+            # Basis: Market Price at Port on/before the purchase's OWN date
+            # (from logged local price history) converted to CBOT terms via
+            # that date's CBOT/FX, minus that date's CBOT — i.e. the market's
+            # own basis on that specific day, not a period-wide average.
+            # Falls back to this period's average import premium (orange)
+            # when no local price history exists for that date, then to 0
+            # (red) when neither is available. CBOT Ref/FX fall back to the
+            # nearest logged history on/before the purchase date when not
+            # recorded on the purchase itself (marked gray).
+            local_recs = [rec for rec in (self.state_obj.get("local_purchases", []) or [])
+                          if comm_filter == "ALL" or
+                          (rec.get("commodity") or "").strip().upper().split("-")[0] == comm_filter]
+            local_recs.sort(key=lambda rec: rec.get("date", ""))
+            local_prem_used_flag = {"any": False}
+            local_avg_prem_flag = {"any": False}
+            local_no_prem_flag = {"any": False}
+            if local_recs:
+                gc = ws.cell(row=nr, column=1, value="Local Purchases")
+                gc.font = Font(bold=True, size=10); gc.fill = grp_fill
+                ws.merge_cells(start_row=nr, start_column=1, end_row=nr, end_column=18)
+                lr = nr + 1
+                loc_headers = ["No", "Date", "Supplier", "QTY", "Origin", "Notes",
+                               "FX", "Price EGP/MT", "Transport EGP/MT",
+                               "All-in EGP/MT", "Local expenses EGP/MT",
+                               "CBOT Ref", "Market Price EGP/MT at port (date)",
+                               "Market Premium (date, ¢/bu)",
+                               "CBOT Equivalent (Implied)"]
+                for ci, h in enumerate(loc_headers, start=1):
+                    cell = ws.cell(row=lr, column=ci, value=h)
+                    cell.fill = hdr_fill; cell.font = hdr_font
+                    cell.alignment = cen; cell.border = border
+                lr += 1
+                lr0 = lr
+                for i, rec in enumerate(local_recs, start=1):
+                    comm = rec.get("commodity", "")
+                    base = (comm or "").strip().upper().split("-")[0]
+                    d = rec.get("date", "")
+                    qty = to_float(rec.get("qty_mt"), 0) or 0
+                    px = to_float(rec.get("price_egp_mt"), None)
+                    trans = to_float(rec.get("transport_egp_mt"), 0) or 0
+                    cbot_val = to_float(rec.get("cbot_ref"), None)
+                    fx_val = to_float(rec.get("fx_ref"), None)
+                    cbot_from_history = cbot_val is None
+                    fx_from_history = fx_val is None
+                    if cbot_val is None or fx_val is None:
+                        ch, fxh = self._basis_history_lists(base)
+                        if cbot_val is None:
+                            cbot_val, _cd = self._basis_nearest_le(ch, d)
+                        if fx_val is None:
+                            fx_val, _fd = self._basis_nearest_le(fxh, d)
+                    factor_any_loc = cbot_conv_factor(base, strict=False)
+                    use_b2_loc = (single_commodity is not None) or base == "CORN"
+                    mkt_port_d = self._brief_market_egp_at_port(base, d)
+                    avg_prem_loc = avg_prem_by_comm.get(base)
+
+                    ws.cell(row=lr, column=1, value=i)
+                    ws.cell(row=lr, column=2, value=d)
+                    ws.cell(row=lr, column=3, value=rec.get("supplier", ""))
+                    ws.cell(row=lr, column=4, value=qty).number_format = "#,##0"
+                    ws.cell(row=lr, column=5, value=rec.get("origin", ""))
+                    ws.cell(row=lr, column=6, value=rec.get("note", ""))
+                    if fx_val is not None:
+                        fc = ws.cell(row=lr, column=7, value=fx_val)
+                        fc.number_format = "#,##0.0000"
+                        if fx_from_history:
+                            fc.font = Font(color="808080", italic=True)
+                            local_prem_used_flag["any"] = True
+                    if px is not None:
+                        ws.cell(row=lr, column=8, value=px).number_format = "#,##0"
+                    ws.cell(row=lr, column=9, value=trans).number_format = "#,##0"
+                    if px is not None:
+                        ac = ws.cell(row=lr, column=10, value=f"=H{lr}+I{lr}")
+                        ac.number_format = "#,##0"; ac.font = Font(color="1A4FA0")
+                    ec = ws.cell(row=lr, column=11, value="=Assumptions!$B$3")
+                    ec.number_format = "#,##0"; ec.font = Font(color="1A4FA0")
+                    if cbot_val is not None:
+                        cc = ws.cell(row=lr, column=12, value=cbot_val)
+                        cc.number_format = "#,##0.00"
+                        if cbot_from_history:
+                            cc.font = Font(color="808080", italic=True)
+                            local_prem_used_flag["any"] = True
+                    if mkt_port_d is not None:
+                        ws.cell(row=lr, column=13, value=mkt_port_d).number_format = "#,##0"
+
+                    # Market Premium (date): tier 1 = this purchase's own date,
+                    # from logged local price history + that date's CBOT/FX
+                    # (Basis Tracker's own Implied-Basis formula). Tier 2 =
+                    # this period's average import premium (orange) when no
+                    # local price history exists for that date. Tier 3 = 0
+                    # (red) when neither is available.
+                    if mkt_port_d is not None and cbot_val and fx_val and factor_any_loc:
+                        mp_formula = (f"=(M{lr}-K{lr})/G{lr}/Assumptions!$B$2-L{lr}" if use_b2_loc
+                                      else f"=(M{lr}-K{lr})/G{lr}/{factor_any_loc}-L{lr}")
+                        pc = ws.cell(row=lr, column=14, value=mp_formula)
+                        prem_tier = 1
+                    elif avg_prem_loc is not None:
+                        pc = ws.cell(row=lr, column=14,
+                                      value="=Assumptions!$B$4" if use_b2_loc else avg_prem_loc)
+                        prem_tier = 2
+                    else:
+                        pc = ws.cell(row=lr, column=14, value=0.0)
+                        prem_tier = 3
+                    pc.number_format = "#,##0.0"
+                    if prem_tier == 2:
+                        pc.font = Font(color="B36B00", italic=True)
+                        local_avg_prem_flag["any"] = True
+                    elif prem_tier == 3:
+                        pc.font = Font(color="B00020", italic=True)
+                        local_no_prem_flag["any"] = True
+                    if px is not None and fx_val and factor_any_loc:
+                        cbe_formula = (f"=(J{lr}-K{lr})/G{lr}/Assumptions!$B$2-N{lr}" if use_b2_loc
+                                       else f"=(J{lr}-K{lr})/G{lr}/{factor_any_loc}-N{lr}")
+                        cec = ws.cell(row=lr, column=15, value=cbe_formula)
+                        cec.number_format = "#,##0.00"; cec.font = Font(color="1A4FA0")
+                    for ci in range(1, 16):
+                        ws.cell(row=lr, column=ci).border = border
+                        ws.cell(row=lr, column=ci).alignment = Alignment(horizontal="center")
+                    lr += 1
+                ws.cell(row=lr, column=1, value="TOTAL").font = Font(bold=True)
+                tqc = ws.cell(row=lr, column=4,
+                              value=f"=SUM(D{lr0}:D{lr - 1})" if lr - 1 >= lr0 else 0)
+                tqc.font = Font(bold=True); tqc.number_format = "#,##0"
+                for ci in range(1, 20):
+                    ws.cell(row=lr, column=ci).fill = grp_fill
+                nr = lr + 2
+
             # FX-impact note block (mirrors the sheet's paragraph).
             note_r = nr + 1
+            commodity_note_name = single_commodity if single_commodity else "corn"
             notes = [
                 "FX Impact: The contract value was calculated using the USD "
                 "exchange rate on the contract/delivery date, and compared with "
                 "the latest USD exchange rate. The difference reflects the impact "
                 "of the reduction in the USD exchange rate.",
-                "This represents the preliminary cost of the corn.",
+                f"This represents the preliminary cost of the {commodity_note_name}.",
                 "A revaluation will be conducted within two days to determine "
                 "the over price.",
                 "Reviewed and Verified by Finance.",
             ]
+            if local_prem_used_flag["any"]:
+                notes.append(
+                    "Gray CBOT Ref/FX cells in Local Purchases: not recorded on "
+                    "the purchase itself, so the nearest logged history on/before "
+                    "the purchase date was used instead.")
+            if local_avg_prem_flag["any"]:
+                notes.append(
+                    "Orange \"Market Premium (date)\" cells in Local Purchases: "
+                    "no logged local price history for that specific date, so "
+                    "this period's average import premium for that commodity "
+                    "was used instead of a date-matched market premium.")
+            if local_no_prem_flag["any"]:
+                notes.append(
+                    "Red \"Market Premium (date)\" cells in Local Purchases: "
+                    "neither local price history for that date nor an import "
+                    "contract for that commodity to average from, so 0 was "
+                    "used — that row's CBOT Equivalent is a zero-basis upper "
+                    "bound, not a real estimate.")
+            if mkt_prem_used_flag["any"]:
+                notes.append(
+                    "Orange \"CBOT Equivalent (Implied)\" cells: that contract's "
+                    "own premium was 0/blank, so the figure falls back to the "
+                    "Market Premium (derived from logged local price + CBOT "
+                    "history for that date) instead — treat it as an estimate, "
+                    "not a recorded deal term.")
             for txt in notes:
                 ws.cell(row=note_r, column=1, value=txt).alignment = Alignment(wrap_text=True)
                 ws.merge_cells(start_row=note_r, start_column=1,
                                end_row=note_r, end_column=18)
                 note_r += 1
 
-            widths = [4, 11, 14, 8, 9, 10, 7, 14, 12, 10, 9, 13, 14, 12, 13, 11, 10, 11]
+            widths = [4, 11, 14, 8, 9, 10, 7, 14, 12, 10, 9, 13, 14, 12, 13, 11, 10, 11, 20]
             for i, w in enumerate(widths, start=1):
                 ws.column_dimensions[get_column_letter(i)].width = w
 
@@ -20024,6 +21545,7 @@ class App(tk.Tk):
         cbot_impact_egp = 0.0
         cbot_impact_known = False
         cbot_gaps = []
+        cbot_detail = []
         for comm, qty in unpriced_by_comm.items():
             px = latest_cbot.get(comm)
             try:
@@ -20035,7 +21557,10 @@ class App(tk.Tk):
                 continue
             cbot_impact_known = True
             move_usd_mt = px * (cbot_shock_pct / 100.0) * factor
-            cbot_impact_egp += move_usd_mt * qty * fx_now
+            impact_egp = move_usd_mt * qty * fx_now
+            cbot_impact_egp += impact_egp
+            cbot_detail.append({"commodity": comm, "cbot": px, "factor": factor,
+                                 "qty": qty, "impact_egp": impact_egp})
 
         total_impact_egp = (fx_impact_egp or 0.0) + (cbot_impact_egp if cbot_impact_known else 0.0)
         return {
@@ -20044,6 +21569,7 @@ class App(tk.Tk):
             "fx_impact_egp": fx_impact_egp,
             "unpriced_by_comm": unpriced_by_comm,
             "cbot_impact_egp": cbot_impact_egp if cbot_impact_known else None,
+            "cbot_detail": cbot_detail,
             "cbot_gaps": cbot_gaps,
             "total_impact_egp": total_impact_egp,
         }
@@ -22991,7 +24517,9 @@ class App(tk.Tk):
         from openpyxl import Workbook
         from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
         from openpyxl.utils import get_column_letter
+        from openpyxl.chart import LineChart, Reference
 
+        rows = sorted(rows, key=lambda r: r.get("date") or "")
         wb = Workbook()
         ws = wb.active
         ws.title = "Basis Data"
@@ -23065,6 +24593,33 @@ class App(tk.Tk):
             max_len = max(len(str(ws.cell(row=r, column=ci).value or ""))
                           for r in range(1, ws.max_row + 1))
             ws.column_dimensions[letter].width = min(max(max_len + 2, 10), 36)
+
+        # ── Line chart with markers: basis (or SBM equivalent price) over
+        # time, one point per date. Columns M (Contract Basis / Contract Eq)
+        # and N (Implied Basis / Local Eq) are the same columns for both
+        # report types — only their header labels differ.
+        if len(rows) >= 2:
+            last_data_row = header_row + len(rows)
+            chart = LineChart()
+            chart.title = ("SBM Equivalent Price Over Time" if is_sbm_report
+                            else "Implied Basis Over Time")
+            chart.style = 12
+            chart.x_axis.title = "Date"
+            chart.y_axis.title = ("Contract Eq / Local Eq (USD/ST)" if is_sbm_report
+                                   else "Basis (application units)")
+            chart.height = 10
+            chart.width = 26
+            chart.add_data(Reference(ws, min_col=13, max_col=14,
+                                      min_row=header_row, max_row=last_data_row),
+                            titles_from_data=True)
+            chart.set_categories(Reference(ws, min_col=1, min_row=header_row + 1,
+                                            max_row=last_data_row))
+            for series, colour in zip(chart.series, ("F59E0B", "1F3864")):
+                series.marker.symbol = "circle"
+                series.marker.size = 6
+                series.smooth = False
+                series.graphicalProperties.line.solidFill = colour
+            ws.add_chart(chart, f"A{last_data_row + 3}")
 
         assumptions = wb.create_sheet("Assumptions")
         assumptions["A1"] = "Comparison formulas and governance"
@@ -23923,13 +25478,21 @@ class App(tk.Tk):
             row=0, column=3, sticky="w", padx=(0, 16))
         ttk.Button(stress, text="Run Stress Test",
                    command=self._run_exposure_stress_test).grid(row=0, column=4, sticky="w")
+        ttk.Label(stress,
+                  text="Formula — FX impact = FX-unsecured open USD exposure × FX shock% × "
+                       "current FX rate. CBOT impact = Σ per unpriced commodity of "
+                       "(latest CBOT × CBOT shock% × conversion factor × unpriced MT × current FX rate). "
+                       "Both are linear (first-order) approximations, not a full re-price.",
+                  foreground=CLR["muted"], wraplength=1150,
+                  justify="left").grid(row=1, column=0, columnspan=5, sticky="w",
+                                       pady=(6, 0))
         self._stress_result_var = tk.StringVar(
             value="Positive shocks = EGP devaluation / higher CBOT. "
                   "Enter both and click Run.")
         ttk.Label(stress, textvariable=self._stress_result_var,
-                  foreground=CLR["muted"], wraplength=1150,
-                  justify="left").grid(row=1, column=0, columnspan=5, sticky="w",
-                                       pady=(6, 0))
+                  foreground=CLR["text"], wraplength=1150,
+                  justify="left").grid(row=2, column=0, columnspan=5, sticky="w",
+                                       pady=(4, 0))
 
         cols = [("Priority", 70), ("Issue", 560), ("Action", 420)]
         self.exp_alert_tree = ttk.Treeview(p, columns=[c for c, _ in cols],
@@ -23957,19 +25520,21 @@ class App(tk.Tk):
             if st["fx_now"] is None:
                 self._stress_result_var.set("No FX history saved — can't run the stress test yet.")
                 return
-            parts = [f"FX {fx_shock:+.1f}% on ${st['fx_exposed_usd']:,.0f} FX-unsecured "
-                     f"exposure: {st['fx_impact_egp']:+,.0f} EGP"]
-            if st["cbot_impact_egp"] is not None:
-                comms = ", ".join(f"{c} {q:,.0f}MT" for c, q in st["unpriced_by_comm"].items()
-                                  if c not in st["cbot_gaps"])
-                parts.append(f"CBOT {cbot_shock:+.1f}% on unpriced ({comms or 'none'}): "
-                             f"{st['cbot_impact_egp']:+,.0f} EGP")
-            elif st["unpriced_by_comm"]:
-                parts.append("CBOT impact unavailable — missing CBOT history for the unpriced commodities.")
+            lines = [
+                f"FX impact = ${st['fx_exposed_usd']:,.0f} exposed × {fx_shock:+.1f}% × "
+                f"{st['fx_now']:,.4f} EGP/USD = {st['fx_impact_egp']:+,.0f} EGP"]
+            for d in st["cbot_detail"]:
+                move_usd_mt = d["cbot"] * (cbot_shock / 100.0) * d["factor"]
+                lines.append(
+                    f"CBOT impact ({d['commodity']}) = {d['cbot']:,.2f}¢/bu × {cbot_shock:+.1f}% × "
+                    f"{d['factor']:.4f} factor = {move_usd_mt:+,.2f} USD/MT × {d['qty']:,.0f} MT × "
+                    f"{st['fx_now']:,.4f} EGP/USD = {d['impact_egp']:+,.0f} EGP")
+            if not st["cbot_detail"] and st["unpriced_by_comm"]:
+                lines.append("CBOT impact unavailable — missing CBOT history for the unpriced commodities.")
             if st["cbot_gaps"]:
-                parts.append(f"(no CBOT price on file for: {', '.join(st['cbot_gaps'])})")
-            parts.append(f"Combined landed-cost impact: {st['total_impact_egp']:+,.0f} EGP")
-            self._stress_result_var.set("   ·   ".join(parts))
+                lines.append(f"(no CBOT price on file for: {', '.join(st['cbot_gaps'])})")
+            lines.append(f"Combined landed-cost impact: {st['total_impact_egp']:+,.0f} EGP")
+            self._stress_result_var.set("\n".join(lines))
         except Exception as e:
             self._surface_error("_run_exposure_stress_test", e, show=True)
 
@@ -27024,6 +28589,32 @@ class App(tk.Tk):
         except Exception as exc:
             self._surface_error("_export_contracts_excel", exc, show=True)
 
+    def _contract_market_at_date(self, cid, c, ref_date, mode):
+        """CBOT + FX for a contract at one reference date, and the implied
+        market price in USD/MT and EGP/MT. Reuses the same resolvers the
+        Basis Tracker uses (_basis_contract_cbot/_basis_contract_fx) so a
+        "market at pricing/delivery date" figure here always agrees with
+        Basis Tracker's own numbers for the same contract and date."""
+        base = (c.get("commodity") or "").strip().upper().split("-")[0]
+        empty = {"cbot": None, "cbot_date": "", "fx": None, "fx_date": "",
+                 "factor": None, "market_usd_mt": None, "market_egp_mt": None}
+        if not base or not ref_date:
+            return empty
+        ch, fxh = self._basis_history_lists(base)
+        factor = cbot_conv_factor(base, strict=False)
+        premium = to_float(c.get("premium_cents"), 0.0) or 0.0
+        cif = self._contract_cif_usd(c, cid)
+        fees_egp = ((to_float(c.get("discharge_egp_mt"), 0) or 0) +
+                    (to_float(c.get("clearance_egp_mt"), 0) or 0))
+        cbot, cbot_date, _cbot_src = self._basis_contract_cbot(
+            cid, c, base, ref_date, ch, factor, premium, cif, mode=mode)
+        fx, fx_date, _fx_src = self._basis_contract_fx(
+            cid, c, ref_date, fxh, cif, fees_egp, mode=mode)
+        market_usd_mt = (cbot + premium) * factor if (cbot is not None and factor) else None
+        market_egp_mt = market_usd_mt * fx if (market_usd_mt is not None and fx) else None
+        return {"cbot": cbot, "cbot_date": cbot_date, "fx": fx, "fx_date": fx_date,
+                "factor": factor, "market_usd_mt": market_usd_mt, "market_egp_mt": market_egp_mt}
+
     def _contract_comparison_rows(self, cid_a, cid_b):
         contracts = self.state_obj.get("contracts", {}) or {}
         if cid_a not in contracts or cid_b not in contracts:
@@ -27075,27 +28666,225 @@ class App(tk.Tk):
         return a, b, rows
 
     def _build_contract_comparison_workbook(self, cid_a, cid_b):
+        """Formula-based two-contract comparison workbook.
+
+        Inputs (CIF, FX, fees, CBOT-at-date, local price) are written as
+        plain values; every derived figure (Contract Goods, Own-After,
+        Market Price at each reference date, Saving, Total Saving) is a
+        live Excel formula referencing those input cells in the same
+        column, so editing an input recalculates the rest of that
+        contract's column automatically.
+        """
         from openpyxl import Workbook
         from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
         from openpyxl.utils import get_column_letter
-        a, b, rows = self._contract_comparison_rows(cid_a, cid_b)
+        from openpyxl.chart import BarChart, Reference
+
+        contracts = self.state_obj.get("contracts", {}) or {}
+        if cid_a not in contracts or cid_b not in contracts:
+            raise ValueError("Choose two valid contracts.")
+        c_a, c_b = contracts[cid_a], contracts[cid_b]
+        a = self._contract_export_row(cid_a, c_a)
+        b = self._contract_export_row(cid_b, c_b)
+
+        a_pd, _src = self._basis_reference_date_for_contract(c_a, mode="PRICING")
+        a_dd, _src = self._basis_reference_date_for_contract(c_a, mode="DELIVERY")
+        b_pd, _src = self._basis_reference_date_for_contract(c_b, mode="PRICING")
+        b_dd, _src = self._basis_reference_date_for_contract(c_b, mode="DELIVERY")
+        a_pm = self._contract_market_at_date(cid_a, c_a, a_pd, "PRICING")
+        a_dm = self._contract_market_at_date(cid_a, c_a, a_dd, "DELIVERY")
+        b_pm = self._contract_market_at_date(cid_b, c_b, b_pd, "PRICING")
+        b_dm = self._contract_market_at_date(cid_b, c_b, b_dd, "DELIVERY")
+        factor_a = a_pm["factor"] or a_dm["factor"]
+        factor_b = b_pm["factor"] or b_dm["factor"]
+
+        def _values(row, pm, dm, pricing_date, delivery_date, factor):
+            return {
+                "contract": row["contract"], "commodity": row["commodity"],
+                "supplier": row["supplier"], "origin": row["origin"],
+                "delivery_date": row["delivery_date"],
+                "pricing_ref_date": pricing_date or "—",
+                "qty_mt": row["qty_mt"], "remaining_mt": row["remaining_mt"],
+                "unpriced_qty_mt": row["unpriced_qty_mt"],
+                "cif_usd_mt": row["cif_usd_mt"], "premium": row["premium"],
+                "contract_fx": row["contract_fx"], "factor": factor,
+                "discharge_egp_mt": row["discharge_egp_mt"],
+                "clearance_egp_mt": row["clearance_egp_mt"],
+                "freight_egp_mt": row["freight_egp_mt"],
+                "contract_goods_egp_mt": row["contract_goods_egp_mt"],
+                "own_after_egp_mt": row["own_after_egp_mt"],
+                "local_egp_mt": row["local_egp_mt"],
+                "cbot_pricing": pm["cbot"], "fx_pricing": pm["fx"],
+                "market_usd_pricing": pm["market_usd_mt"],
+                "market_egp_pricing": pm["market_egp_mt"],
+                "delivery_ref_date": delivery_date or "—",
+                "cbot_delivery": dm["cbot"], "fx_delivery": dm["fx"],
+                "market_usd_delivery": dm["market_usd_mt"],
+                "market_egp_delivery": dm["market_egp_mt"],
+                "saving_egp_mt": row["saving_egp_mt"],
+                "total_saving_egp": row["total_saving_egp"],
+                "data_quality": row["data_quality"],
+            }
+
+        a_values = _values(a, a_pm, a_dm, a_pd, a_dd, factor_a)
+        b_values = _values(b, b_pm, b_dm, b_pd, b_dd, factor_b)
+
+        # (section, label, kind, key, number_format, lower_is_better)
+        # kind: "text" (no comparison/formula) | "num" (input value) |
+        # "formula" (Excel formula referencing other rows in the same column)
+        ROWS = [
+            ("IDENTITY", "Contract", "text", "contract", None, None),
+            ("IDENTITY", "Commodity", "text", "commodity", None, None),
+            ("IDENTITY", "Supplier", "text", "supplier", None, None),
+            ("IDENTITY", "Origin", "text", "origin", None, None),
+            ("DATES", "Delivery Date", "text", "delivery_date", None, None),
+            ("DATES", "Pricing Reference Date", "text", "pricing_ref_date", None, None),
+            ("VOLUME", "Quantity MT", "num", "qty_mt", "#,##0", False),
+            ("VOLUME", "Remaining MT", "num", "remaining_mt", "#,##0", True),
+            ("VOLUME", "Unpriced MT", "num", "unpriced_qty_mt", "#,##0", True),
+            ("PRICE", "CIF USD/MT", "num", "cif_usd_mt", "#,##0.00", True),
+            ("PRICE", "Basis / Premium", "num", "premium", "#,##0.00", True),
+            ("PRICE", "Contract FX (EGP/USD)", "num", "contract_fx", "#,##0.0000", True),
+            ("PRICE", "Conversion Factor", "num", "factor", "#,##0.0000", None),
+            ("PRICE", "Discharge EGP/MT", "num", "discharge_egp_mt", "#,##0", True),
+            ("PRICE", "Clearance EGP/MT", "num", "clearance_egp_mt", "#,##0", True),
+            ("PRICE", "Freight EGP/MT", "num", "freight_egp_mt", "#,##0", True),
+            ("PRICE", "Contract Goods EGP/MT", "formula", "contract_goods_egp_mt", "#,##0", True),
+            ("PRICE", "Own-After EGP/MT", "formula", "own_after_egp_mt", "#,##0", True),
+            ("MARKET", "Matched Local EGP/MT", "num", "local_egp_mt", "#,##0", None),
+            ("MARKET", "CBOT @ Pricing Date", "num", "cbot_pricing", "#,##0.00", None),
+            ("MARKET", "FX @ Pricing Date", "num", "fx_pricing", "#,##0.0000", None),
+            ("MARKET", "Market Price @ Pricing (USD/MT)", "formula", "market_usd_pricing", "#,##0.00", None),
+            ("MARKET", "Market Price @ Pricing (EGP/MT)", "formula", "market_egp_pricing", "#,##0", None),
+            ("MARKET", "Delivery Reference Date", "text", "delivery_ref_date", None, None),
+            ("MARKET", "CBOT @ Delivery Date", "num", "cbot_delivery", "#,##0.00", None),
+            ("MARKET", "FX @ Delivery Date", "num", "fx_delivery", "#,##0.0000", None),
+            ("MARKET", "Market Price @ Delivery (USD/MT)", "formula", "market_usd_delivery", "#,##0.00", None),
+            ("MARKET", "Market Price @ Delivery (EGP/MT)", "formula", "market_egp_delivery", "#,##0", None),
+            ("OUTCOME", "Saving / Position EGP/MT", "formula", "saving_egp_mt", "+#,##0;[Red]-#,##0", False),
+            ("OUTCOME", "Total Saving / Position EGP", "formula", "total_saving_egp", "+#,##0;[Red]-#,##0", False),
+            ("QUALITY", "Data Quality", "text", "data_quality", None, None),
+        ]
+
+        HEADER_ROW = 4
+        DATA_FIRST = 5
+        row_of = {spec[3]: DATA_FIRST + i for i, spec in enumerate(ROWS)}
+
+        FORMULAS = {
+            "contract_goods_egp_mt": lambda col: f"={col}{row_of['cif_usd_mt']}*{col}{row_of['contract_fx']}",
+            "own_after_egp_mt": lambda col: (
+                f"={col}{row_of['contract_goods_egp_mt']}+{col}{row_of['discharge_egp_mt']}"
+                f"+{col}{row_of['clearance_egp_mt']}+{col}{row_of['freight_egp_mt']}"),
+            "market_usd_pricing": lambda col: f"=({col}{row_of['cbot_pricing']}+{col}{row_of['premium']})*{col}{row_of['factor']}",
+            "market_egp_pricing": lambda col: f"={col}{row_of['market_usd_pricing']}*{col}{row_of['fx_pricing']}",
+            "market_usd_delivery": lambda col: f"=({col}{row_of['cbot_delivery']}+{col}{row_of['premium']})*{col}{row_of['factor']}",
+            "market_egp_delivery": lambda col: f"={col}{row_of['market_usd_delivery']}*{col}{row_of['fx_delivery']}",
+            "saving_egp_mt": lambda col: f"={col}{row_of['local_egp_mt']}-{col}{row_of['own_after_egp_mt']}",
+            "total_saving_egp": lambda col: f"={col}{row_of['saving_egp_mt']}*{col}{row_of['qty_mt']}",
+        }
+
         wb = Workbook(); ws = wb.active; ws.title = "Contract Comparison"
         navy = "0B1F3A"; blue = "2563EB"; pale = "EAF2FF"
         thin = Side(style="thin", color="D8E1EC"); border = Border(left=thin, right=thin, top=thin, bottom=thin)
         ws["A1"] = "PROMETHEUS PROCUREMENT — CONTRACT COMPARISON"; ws["A1"].font = Font(bold=True, size=15, color=navy)
         ws["A2"] = f"Generated: {now_ts()}"
+        ws["A3"] = ("Formula-based: edit the input cells (CIF, FX, fees, CBOT/FX at each "
+                    "reference date, local price) and Contract Goods, Own-After, Market "
+                    "Price, Saving and Total Saving recalculate automatically.")
+        ws["A3"].font = Font(italic=True, color="64748B")
         headers = ["Section", "Metric", f"A · {cid_a}", f"B · {cid_b}", "Comparison"]
         for col, label in enumerate(headers, 1):
-            c = ws.cell(4, col, label); c.fill = PatternFill("solid", fgColor=navy); c.font = Font(bold=True, color="FFFFFF"); c.border = border; c.alignment = Alignment(horizontal="center")
-        for ridx, row in enumerate(rows, 5):
-            for cidx, value in enumerate(row, 1):
-                c = ws.cell(ridx, cidx, value); c.border = border; c.alignment = Alignment(vertical="center", wrap_text=True)
-            if ridx == 5 or rows[ridx-5][0] != rows[ridx-6][0]:
-                for cidx in range(1, 6): ws.cell(ridx, cidx).fill = PatternFill("solid", fgColor=pale)
-                ws.cell(ridx, 1).font = Font(bold=True, color=blue)
-        for col, width in enumerate([14, 27, 28, 28, 30], 1): ws.column_dimensions[get_column_letter(col)].width = width
-        ws.freeze_panes = "A5"
-        return wb, (a, b, rows)
+            c = ws.cell(HEADER_ROW, col, label); c.fill = PatternFill("solid", fgColor=navy); c.font = Font(bold=True, color="FFFFFF"); c.border = border; c.alignment = Alignment(horizontal="center")
+
+        def _compare_text(lower_better, av, bv, suffix=""):
+            if lower_better is None:
+                return ""
+            av_f = to_float(av, None); bv_f = to_float(bv, None)
+            if av_f is None or bv_f is None:
+                return "Need data"
+            delta = bv_f - av_f
+            if abs(delta) < 0.005:
+                return "Equal"
+            winner = "A" if ((av_f < bv_f) == lower_better) else "B"
+            return f"{winner} better by {abs(delta):,.2f}{suffix}"
+
+        prior_section = None
+        for section, label, kind, key, num_fmt, lower_better in ROWS:
+            r = row_of[key]
+            ws.cell(r, 1, section)
+            ws.cell(r, 2, label)
+            av, bv = a_values[key], b_values[key]
+            if kind == "text":
+                ws.cell(r, 3, av if av not in (None, "") else "—")
+                ws.cell(r, 4, bv if bv not in (None, "") else "—")
+                ws.cell(r, 5, "")
+            else:
+                if kind == "formula":
+                    cell_a = ws.cell(r, 3, FORMULAS[key]("C"))
+                    cell_b = ws.cell(r, 4, FORMULAS[key]("D"))
+                else:
+                    cell_a = ws.cell(r, 3, av)
+                    cell_b = ws.cell(r, 4, bv)
+                if num_fmt:
+                    cell_a.number_format = num_fmt
+                    cell_b.number_format = num_fmt
+                ws.cell(r, 5, _compare_text(lower_better, av, bv))
+            for cidx in range(1, 6):
+                cell = ws.cell(r, cidx)
+                cell.border = border
+                cell.alignment = Alignment(vertical="center", wrap_text=True)
+            if section != prior_section:
+                for cidx in range(1, 6):
+                    ws.cell(r, cidx).fill = PatternFill("solid", fgColor=pale)
+                ws.cell(r, 1).font = Font(bold=True, color=blue)
+                prior_section = section
+
+        for col, width in enumerate([14, 32, 24, 24, 32], 1):
+            ws.column_dimensions[get_column_letter(col)].width = width
+        ws.freeze_panes = f"A{DATA_FIRST}"
+
+        # ── Chart data block (mirrors the live formula cells above, so the
+        # chart stays in sync if inputs are edited) + clustered bar chart ──
+        CHART_COL_LABEL, CHART_COL_A, CHART_COL_B = 7, 8, 9
+        chart_metrics = [
+            ("Contract Goods EGP/MT", "contract_goods_egp_mt"),
+            ("Own-After EGP/MT", "own_after_egp_mt"),
+            ("Matched Local EGP/MT", "local_egp_mt"),
+            ("Market @ Pricing EGP/MT", "market_egp_pricing"),
+            ("Market @ Delivery EGP/MT", "market_egp_delivery"),
+            ("Saving / MT EGP", "saving_egp_mt"),
+        ]
+        for cidx, label in ((CHART_COL_LABEL, "Metric"), (CHART_COL_A, f"A · {cid_a}"), (CHART_COL_B, f"B · {cid_b}")):
+            c = ws.cell(HEADER_ROW, cidx, label)
+            c.fill = PatternFill("solid", fgColor=navy); c.font = Font(bold=True, color="FFFFFF")
+            c.border = border; c.alignment = Alignment(horizontal="center")
+        for i, (label, key) in enumerate(chart_metrics, 1):
+            r = HEADER_ROW + i
+            ws.cell(r, CHART_COL_LABEL, label).border = border
+            cell_a = ws.cell(r, CHART_COL_A, f"=C{row_of[key]}")
+            cell_b = ws.cell(r, CHART_COL_B, f"=D{row_of[key]}")
+            cell_a.number_format = cell_b.number_format = "#,##0"
+            cell_a.border = cell_b.border = border
+        ws.column_dimensions[get_column_letter(CHART_COL_LABEL)].width = 26
+        ws.column_dimensions[get_column_letter(CHART_COL_A)].width = 16
+        ws.column_dimensions[get_column_letter(CHART_COL_B)].width = 16
+
+        chart_last_row = HEADER_ROW + len(chart_metrics)
+        chart = BarChart()
+        chart.type = "col"
+        chart.grouping = "clustered"
+        chart.style = 10
+        chart.title = "Key EGP/MT Metrics — A vs B"
+        chart.y_axis.title = "EGP / MT"
+        chart.height = 9
+        chart.width = 19
+        chart.add_data(Reference(ws, min_col=CHART_COL_A, max_col=CHART_COL_B,
+                                  min_row=HEADER_ROW, max_row=chart_last_row), titles_from_data=True)
+        chart.set_categories(Reference(ws, min_col=CHART_COL_LABEL,
+                                        min_row=HEADER_ROW + 1, max_row=chart_last_row))
+        ws.add_chart(chart, f"G{chart_last_row + 3}")
+
+        return wb, (a_values, b_values, ROWS)
 
     def _export_contract_comparison_excel(self, cid_a, cid_b, parent=None):
         if not _need_openpyxl():
