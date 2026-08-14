@@ -20515,10 +20515,8 @@ class App(tk.Tk):
                 d = parse_date_flex(rec.get("date"))
                 if d is None or not (lo <= d <= hi):
                     continue
-                locals_.append((d.isoformat(), rec.get("commodity", ""),
-                                to_float(rec.get("qty_mt"), 0) or 0,
-                                to_float(rec.get("price_egp_mt"), None)))
-            locals_.sort()
+                locals_.append((d.isoformat(), rec))
+            locals_.sort(key=lambda t: t[0])
             if not imports and not locals_:
                 scope = "" if comm_filter == "ALL" else f" for {comm_filter}"
                 messagebox.showinfo(APP_NAME,
@@ -20563,7 +20561,10 @@ class App(tk.Tk):
                          "to Market Premium (orange) when the contract's own "
                          "premium is 0/blank. Mixed 'ALL' briefs: B2 drives CORN "
                          "rows only, other commodities embed their own factor "
-                         "per row (e.g. SBM 1.1023 $/short-ton→$/MT).")
+                         "per row (e.g. SBM 1.1023 $/short-ton→$/MT). Local "
+                         "Purchases CBOT Equivalent (Implied) = ((price+transport"
+                         "−B3)÷FX)÷factor — no premium to net out, so it's the "
+                         "flat CBOT a zero-basis deal would need.")
             for _r in (2, 3, 4):
                 wsA.cell(row=_r, column=1).font = Font(bold=True)
             wsA.column_dimensions["A"].width = 40
@@ -20742,26 +20743,80 @@ class App(tk.Tk):
                 fx_tot_row = None
 
             # ── Local purchases ───────────────────────────────────────
+            # CBOT Equivalent (Implied) for a local buy has no CIF/premium to
+            # work from, so it's the flat conversion of the all-in local
+            # price into CBOT terms: ((price+transport − expenses) ÷ FX) ÷
+            # factor — the CBOT print a zero-basis flat deal would need to
+            # justify this local price. CBOT Ref/FX fall back to the nearest
+            # logged history on/before the purchase date when not recorded
+            # on the purchase itself (marked gray when estimated this way).
+            GRAY = Font(color="808080", italic=True)
+            local_gray_used_flag = {"any": False}
             loc_tot_row = None
             if locals_:
                 ws.cell(row=r, column=1, value="LOCAL PURCHASES").font = BOLD
                 r += 1
-                for ci, h in enumerate(["Date", "Commodity", "Qty MT",
-                                        "Price EGP/MT", "Value EGP"], start=1):
+                loc_headers = ["Date", "Commodity", "Qty MT", "Price EGP/MT",
+                               "Transport EGP/MT", "All-in EGP/MT",
+                               "Local expenses EGP/MT", "FX", "CBOT Ref",
+                               "CBOT Equivalent (Implied)", "Value EGP"]
+                for ci, h in enumerate(loc_headers, start=1):
                     cell = ws.cell(row=r, column=ci, value=h)
                     cell.fill = hdr_fill; cell.font = hdr_font
                     cell.alignment = cen; cell.border = border
                 r += 1
                 loc0 = r
-                for d, comm, qty, px in locals_:
+                for d, rec in locals_:
+                    comm = rec.get("commodity", "")
+                    base = (comm or "").strip().upper().split("-")[0]
+                    qty = to_float(rec.get("qty_mt"), 0) or 0
+                    px = to_float(rec.get("price_egp_mt"), None)
+                    trans = to_float(rec.get("transport_egp_mt"), 0) or 0
+                    cbot_val = to_float(rec.get("cbot_ref"), None)
+                    fx_val = to_float(rec.get("fx_ref"), None)
+                    cbot_from_history = cbot_val is None
+                    fx_from_history = fx_val is None
+                    if cbot_val is None or fx_val is None:
+                        ch, fxh = self._basis_history_lists(base)
+                        if cbot_val is None:
+                            cbot_val, _cd = self._basis_nearest_le(ch, d)
+                        if fx_val is None:
+                            fx_val, _fd = self._basis_nearest_le(fxh, d)
+                    factor_any = cbot_conv_factor(base, strict=False)
+                    use_b2 = (single_commodity is not None) or base == "CORN"
+
                     ws.cell(row=r, column=1, value=d)
                     ws.cell(row=r, column=2, value=comm)
                     ws.cell(row=r, column=3, value=qty).number_format = "#,##0"
                     if px is not None:
                         ws.cell(row=r, column=4, value=px).number_format = "#,##0"
-                        vc = ws.cell(row=r, column=5, value=f"=C{r}*D{r}")
+                    ws.cell(row=r, column=5, value=trans).number_format = "#,##0"
+                    if px is not None:
+                        ac = ws.cell(row=r, column=6, value=f"=D{r}+E{r}")
+                        ac.number_format = "#,##0"; ac.font = BLUE
+                    ec = ws.cell(row=r, column=7, value="=Assumptions!$B$3")
+                    ec.number_format = "#,##0"; ec.font = BLUE
+                    if cbot_val is not None:
+                        cc = ws.cell(row=r, column=9, value=cbot_val)
+                        cc.number_format = "#,##0.00"
+                        if cbot_from_history:
+                            cc.font = GRAY
+                            local_gray_used_flag["any"] = True
+                    if fx_val is not None:
+                        fc = ws.cell(row=r, column=8, value=fx_val)
+                        fc.number_format = "#,##0.0000"
+                        if fx_from_history:
+                            fc.font = GRAY
+                            local_gray_used_flag["any"] = True
+                    if px is not None and fx_val and factor_any:
+                        cbe_formula = (f"=(F{r}-G{r})/H{r}/Assumptions!$B$2" if use_b2
+                                       else f"=(F{r}-G{r})/H{r}/{factor_any}")
+                        cec = ws.cell(row=r, column=10, value=cbe_formula)
+                        cec.number_format = "#,##0.00"; cec.font = BLUE
+                    if px is not None:
+                        vc = ws.cell(row=r, column=11, value=f"=C{r}*D{r}")
                         vc.number_format = "#,##0"; vc.font = BLUE
-                    for ci in range(1, 6):
+                    for ci in range(1, 12):
                         ws.cell(row=r, column=ci).border = border
                     r += 1
                 ws.cell(row=r, column=1, value="TOTAL local").font = BOLD
@@ -20771,7 +20826,7 @@ class App(tk.Tk):
                              value=f"=SUMPRODUCT(C{loc0}:C{r-1},D{loc0}:D{r-1})"
                                    f"/SUM(C{loc0}:C{r-1})")
                 wa.font = Font(bold=True, color="1A4FA0"); wa.number_format = "#,##0"
-                tv = ws.cell(row=r, column=5, value=f"=SUM(E{loc0}:E{r-1})")
+                tv = ws.cell(row=r, column=11, value=f"=SUM(K{loc0}:K{r-1})")
                 tv.font = Font(bold=True, color="1A4FA0"); tv.number_format = "#,##0"
                 loc_tot_row = r
                 r += 2
@@ -20790,7 +20845,7 @@ class App(tk.Tk):
             if loc_tot_row:
                 ws.cell(row=r, column=1, value="Local volume MT / value EGP")
                 ws.cell(row=r, column=3, value=f"=C{loc_tot_row}").font = BLUE
-                ws.cell(row=r, column=4, value=f"=E{loc_tot_row}").font = BLUE
+                ws.cell(row=r, column=4, value=f"=K{loc_tot_row}").font = BLUE
                 r += 1
             ws.cell(row=r, column=1,
                     value=f"Contracts: {len(imports)}   ·   Local buys: {len(locals_)}")
@@ -20810,6 +20865,11 @@ class App(tk.Tk):
                     "Market Premium (derived from logged local price + CBOT "
                     "history for that date) instead — treat it as an estimate, "
                     "not a recorded deal term.")
+            if local_gray_used_flag["any"]:
+                _period_notes.append(
+                    "Gray CBOT Ref/FX cells in Local Purchases: not recorded on "
+                    "the purchase itself, so the nearest logged history on/before "
+                    "the purchase date was used instead.")
             for txt in _period_notes:
                 ws.cell(row=r, column=1, value=txt).alignment = Alignment(wrap_text=True)
                 ws.merge_cells(start_row=r, start_column=1, end_row=r,
@@ -20921,7 +20981,10 @@ class App(tk.Tk):
                          "market premium = market CIF ÷ factor − CBOT   ·   "
                          "CBOT Equivalent (Implied) = CIF ÷ factor − premium   ·   "
                          "premium falls back to Market Premium (orange) when the "
-                         "contract's own premium is 0/blank.")
+                         "contract's own premium is 0/blank   ·   Local Purchases "
+                         "CBOT Equivalent (Implied) = ((price+transport−expenses)"
+                         "÷FX)÷factor — no premium to net out, so it's the flat "
+                         "CBOT a zero-basis deal would need.")
             for _r in (2, 3):
                 wsA.cell(row=_r, column=1).font = Font(bold=True)
             wsA.column_dimensions["A"].width = 36
@@ -21065,6 +21128,97 @@ class App(tk.Tk):
             if imports and others:
                 nr = _emit_group("Contract", others, nr)
 
+            # ── Local Purchases — CBOT Equivalent (Implied) too ─────────
+            # A local buy has no CIF/premium, so its CBOT Equivalent is the
+            # flat conversion of the all-in local price into CBOT terms:
+            # ((price+transport − expenses) ÷ FX) ÷ factor — the CBOT print
+            # a zero-basis flat deal would need to justify that local price.
+            # CBOT Ref/FX fall back to the nearest logged history on/before
+            # the purchase date when not recorded on the purchase itself
+            # (marked gray when estimated this way).
+            local_recs = [rec for rec in (self.state_obj.get("local_purchases", []) or [])
+                          if comm_filter == "ALL" or
+                          (rec.get("commodity") or "").strip().upper().split("-")[0] == comm_filter]
+            local_recs.sort(key=lambda rec: rec.get("date", ""))
+            local_prem_used_flag = {"any": False}
+            if local_recs:
+                gc = ws.cell(row=nr, column=1, value="Local Purchases")
+                gc.font = Font(bold=True, size=10); gc.fill = grp_fill
+                ws.merge_cells(start_row=nr, start_column=1, end_row=nr, end_column=18)
+                lr = nr + 1
+                loc_headers = ["No", "Date", "Supplier", "QTY", "Origin", "Notes",
+                               "FX", "Price EGP/MT", "Transport EGP/MT",
+                               "All-in EGP/MT", "Local expenses EGP/MT",
+                               "CBOT Ref", "CBOT Equivalent (Implied)"]
+                for ci, h in enumerate(loc_headers, start=1):
+                    cell = ws.cell(row=lr, column=ci, value=h)
+                    cell.fill = hdr_fill; cell.font = hdr_font
+                    cell.alignment = cen; cell.border = border
+                lr += 1
+                lr0 = lr
+                for i, rec in enumerate(local_recs, start=1):
+                    comm = rec.get("commodity", "")
+                    base = (comm or "").strip().upper().split("-")[0]
+                    d = rec.get("date", "")
+                    qty = to_float(rec.get("qty_mt"), 0) or 0
+                    px = to_float(rec.get("price_egp_mt"), None)
+                    trans = to_float(rec.get("transport_egp_mt"), 0) or 0
+                    cbot_val = to_float(rec.get("cbot_ref"), None)
+                    fx_val = to_float(rec.get("fx_ref"), None)
+                    cbot_from_history = cbot_val is None
+                    fx_from_history = fx_val is None
+                    if cbot_val is None or fx_val is None:
+                        ch, fxh = self._basis_history_lists(base)
+                        if cbot_val is None:
+                            cbot_val, _cd = self._basis_nearest_le(ch, d)
+                        if fx_val is None:
+                            fx_val, _fd = self._basis_nearest_le(fxh, d)
+                    factor_any_loc = cbot_conv_factor(base, strict=False)
+                    use_b2_loc = (single_commodity is not None) or base == "CORN"
+
+                    ws.cell(row=lr, column=1, value=i)
+                    ws.cell(row=lr, column=2, value=d)
+                    ws.cell(row=lr, column=3, value=rec.get("supplier", ""))
+                    ws.cell(row=lr, column=4, value=qty).number_format = "#,##0"
+                    ws.cell(row=lr, column=5, value=rec.get("origin", ""))
+                    ws.cell(row=lr, column=6, value=rec.get("note", ""))
+                    if fx_val is not None:
+                        fc = ws.cell(row=lr, column=7, value=fx_val)
+                        fc.number_format = "#,##0.0000"
+                        if fx_from_history:
+                            fc.font = Font(color="808080", italic=True)
+                            local_prem_used_flag["any"] = True
+                    if px is not None:
+                        ws.cell(row=lr, column=8, value=px).number_format = "#,##0"
+                    ws.cell(row=lr, column=9, value=trans).number_format = "#,##0"
+                    if px is not None:
+                        ac = ws.cell(row=lr, column=10, value=f"=H{lr}+I{lr}")
+                        ac.number_format = "#,##0"; ac.font = Font(color="1A4FA0")
+                    ec = ws.cell(row=lr, column=11, value="=Assumptions!$B$3")
+                    ec.number_format = "#,##0"; ec.font = Font(color="1A4FA0")
+                    if cbot_val is not None:
+                        cc = ws.cell(row=lr, column=12, value=cbot_val)
+                        cc.number_format = "#,##0.00"
+                        if cbot_from_history:
+                            cc.font = Font(color="808080", italic=True)
+                            local_prem_used_flag["any"] = True
+                    if px is not None and fx_val and factor_any_loc:
+                        cbe_formula = (f"=(J{lr}-K{lr})/G{lr}/Assumptions!$B$2" if use_b2_loc
+                                       else f"=(J{lr}-K{lr})/G{lr}/{factor_any_loc}")
+                        cec = ws.cell(row=lr, column=13, value=cbe_formula)
+                        cec.number_format = "#,##0.00"; cec.font = Font(color="1A4FA0")
+                    for ci in range(1, 14):
+                        ws.cell(row=lr, column=ci).border = border
+                        ws.cell(row=lr, column=ci).alignment = Alignment(horizontal="center")
+                    lr += 1
+                ws.cell(row=lr, column=1, value="TOTAL").font = Font(bold=True)
+                tqc = ws.cell(row=lr, column=4,
+                              value=f"=SUM(D{lr0}:D{lr - 1})" if lr - 1 >= lr0 else 0)
+                tqc.font = Font(bold=True); tqc.number_format = "#,##0"
+                for ci in range(1, 20):
+                    ws.cell(row=lr, column=ci).fill = grp_fill
+                nr = lr + 2
+
             # FX-impact note block (mirrors the sheet's paragraph).
             note_r = nr + 1
             commodity_note_name = single_commodity if single_commodity else "corn"
@@ -21078,6 +21232,11 @@ class App(tk.Tk):
                 "the over price.",
                 "Reviewed and Verified by Finance.",
             ]
+            if local_prem_used_flag["any"]:
+                notes.append(
+                    "Gray CBOT Ref/FX cells in Local Purchases: not recorded on "
+                    "the purchase itself, so the nearest logged history on/before "
+                    "the purchase date was used instead.")
             if mkt_prem_used_flag["any"]:
                 notes.append(
                     "Orange \"CBOT Equivalent (Implied)\" cells: that contract's "

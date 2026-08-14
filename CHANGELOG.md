@@ -1,5 +1,37 @@
 # Changelog
 
+## Unreleased — CBOT Equivalent (Implied) for Local Purchases
+
+Period Brief and Finance Brief only ever computed "CBOT Equivalent
+(Implied)" for import-contract rows. Local purchases have no CIF/premium
+to work from, so they got nothing. Added a Local Purchases section to
+Finance Brief (which previously omitted local purchases entirely) and a
+new "CBOT Equivalent (Implied)" column to both briefs' Local Purchases
+tables, for every commodity:
+
+`CBOT Equivalent = ((price + transport − local expenses) ÷ FX) ÷ factor`
+
+— i.e. the flat CBOT print a zero-basis deal would need to justify that
+local price, directly comparable to the Avr CBOT column. CBOT Ref/FX for
+each row come from the purchase's own recorded `cbot_ref`/`fx_ref` when
+present, otherwise the nearest logged CBOT/FX history on or before the
+purchase date (same lookup the Local Purchases tab's auto-fill button
+uses) — cells that fall back to history are marked gray/italic with a
+legend note, so a looked-up estimate is never mistaken for a recorded
+figure. Uses the same single-commodity-aware Assumptions factor as the
+CBOT Equivalent fix above (own factor when filtered to one commodity,
+literal per-row factor in mixed "ALL" briefs).
+
+Verified headlessly: a CORN local buy with recorded CBOT/FX renders
+un-marked and uses Assumptions!$B$2; an SBM local buy with no recorded
+CBOT/FX falls back to history, renders gray/italic, and uses its own
+1.1023 factor (shared B2 when the brief is SBM-only, embedded literal in
+mixed "ALL" briefs) — in both Finance Brief and Period Brief. No
+exceptions, and the existing import-contract and FX-impact sections are
+unaffected (column positions in the Local Purchases table shifted, so the
+Period Summary's "Local volume/value" formula reference was updated to
+match).
+
 ## Unreleased — Fix: unrealistic CBOT Equivalent on non-CORN / zero-premium rows
 
 Found by inspecting a real exported Finance Brief for SBM: the "CBOT
