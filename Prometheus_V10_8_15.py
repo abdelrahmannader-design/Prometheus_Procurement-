@@ -12635,6 +12635,19 @@ class App(tk.Tk):
                   font=("Segoe UI", 9), foreground="#444").pack(
                   side="left", padx=(10,0))
 
+        # ── Export ──────────────────────────────────────────────────
+        ttk.Separator(p, orient="horizontal").grid(
+            row=8, column=0, sticky="ew", pady=(8,6))
+        ef = ttk.Frame(p)
+        ef.grid(row=9, column=0, sticky="ew", pady=(0,4))
+        ttk.Button(ef, text="📊  Export to Excel (CBOT + FX)…",
+                   command=self._export_market_history_excel).pack(side="left")
+        ttk.Label(ef,
+                  text="One sheet per CBOT commodity, plus a FX History sheet — "
+                       "choose a date range on export",
+                  font=("Segoe UI", 9), foreground="#666").pack(
+                  side="left", padx=(10,0))
+
         self._refresh_fx_history_tree()
         self._refresh_cbot_history_trees()
 
@@ -12758,6 +12771,177 @@ class App(tk.Tk):
                     f"✔  Backfill complete — {len(e)} new closes added"
                     if e else "✔  Already up to date")))
         threading.Thread(target=_run, daemon=True).start()
+
+    def _prompt_market_history_range(self, default_start, default_end):
+        """Modal date-range picker. Returns (start_str, end_str) or None if cancelled."""
+        result = {}
+        win = tk.Toplevel(self)
+        win.title("Choose export date range")
+        win.resizable(False, False)
+        win.transient(self)
+        win.grab_set()
+
+        ttk.Label(win, text="Export CBOT + FX history between:",
+                  font=(FONT_FAMILY, FS_BODY, "bold")).grid(
+                  row=0, column=0, columnspan=2, sticky="w", padx=12, pady=(12,8))
+
+        ttk.Label(win, text="Start date (YYYY-MM-DD):").grid(
+            row=1, column=0, sticky="w", padx=(12,6), pady=4)
+        start_var = tk.StringVar(value=default_start)
+        ttk.Entry(win, textvariable=start_var, width=14).grid(
+            row=1, column=1, sticky="w", padx=(0,12), pady=4)
+
+        ttk.Label(win, text="End date (YYYY-MM-DD):").grid(
+            row=2, column=0, sticky="w", padx=(12,6), pady=4)
+        end_var = tk.StringVar(value=default_end)
+        ttk.Entry(win, textvariable=end_var, width=14).grid(
+            row=2, column=1, sticky="w", padx=(0,12), pady=4)
+
+        err_var = tk.StringVar(value="")
+        ttk.Label(win, textvariable=err_var, foreground=CLR.get("danger", "#c0392b")).grid(
+            row=3, column=0, columnspan=2, sticky="w", padx=12)
+
+        def _ok():
+            s, e = start_var.get().strip(), end_var.get().strip()
+            try:
+                sd = dt.date.fromisoformat(s)
+                ed = dt.date.fromisoformat(e)
+            except Exception:
+                err_var.set("Enter valid dates as YYYY-MM-DD.")
+                return
+            if sd > ed:
+                err_var.set("Start date must be on or before end date.")
+                return
+            result["range"] = (sd.isoformat(), ed.isoformat())
+            win.destroy()
+
+        def _cancel():
+            win.destroy()
+
+        btns = ttk.Frame(win)
+        btns.grid(row=4, column=0, columnspan=2, sticky="e", padx=12, pady=(8,12))
+        ttk.Button(btns, text="Cancel", command=_cancel).pack(side="right", padx=(6,0))
+        ttk.Button(btns, text="Export", command=_ok).pack(side="right")
+
+        win.bind("<Return>", lambda e: _ok())
+        win.bind("<Escape>", lambda e: _cancel())
+        win.update_idletasks()
+        win.wait_window()
+        return result.get("range")
+
+    def _build_market_history_workbook(self, start_date, end_date):
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        from openpyxl.utils import get_column_letter
+        navy = "0B1F3A"; pale = "EAF2FF"
+        thin = Side(style="thin", color="D8E1EC")
+        border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+        def style_header(ws, headers, row=1):
+            for col, label in enumerate(headers, 1):
+                c = ws.cell(row, col, label)
+                c.fill = PatternFill("solid", fgColor=navy)
+                c.font = Font(bold=True, color="FFFFFF")
+                c.border = border
+                c.alignment = Alignment(horizontal="center")
+
+        def in_range(d_str):
+            return bool(d_str) and start_date <= d_str <= end_date
+
+        wb = Workbook()
+        wb.remove(wb.active)
+
+        cbot = [e for e in self.state_obj.get("cbot_history", []) or []
+                if in_range(e.get("date", ""))]
+        commodities = sorted({e.get("commodity", "?") for e in cbot})
+        for comm in commodities:
+            rows = sorted(
+                (e for e in cbot if e.get("commodity") == comm),
+                key=lambda x: x.get("date", ""))
+            ws = wb.create_sheet(title=comm[:31] or "CBOT")
+            ws["A1"] = f"CBOT DAILY CLOSE HISTORY — {comm}"
+            ws["A1"].font = Font(bold=True, size=13, color=navy)
+            ws["A2"] = f"Range: {start_date} to {end_date}   ·   Generated: {now_ts()}"
+            headers = ["Date", "Close (¢/bu)", "Source"]
+            style_header(ws, headers, row=4)
+            for ridx, e in enumerate(rows, 5):
+                price = e.get("price", "")
+                ws.cell(ridx, 1, e.get("date", "")).border = border
+                pc = ws.cell(ridx, 2, round(price, 4) if isinstance(price, (int, float)) else price)
+                pc.border = border; pc.number_format = "0.0000"
+                ws.cell(ridx, 3, e.get("source", "")).border = border
+                if ridx % 2 == 0:
+                    for cidx in range(1, 4):
+                        ws.cell(ridx, cidx).fill = PatternFill("solid", fgColor=pale)
+            for col, width in enumerate([14, 16, 26], 1):
+                ws.column_dimensions[get_column_letter(col)].width = width
+            ws.freeze_panes = "A5"
+
+        fx = sorted(
+            (e for e in self.state_obj.get("fx_history", []) or []
+             if in_range(e.get("date", ""))),
+            key=lambda x: x.get("date", ""))
+        ws = wb.create_sheet(title="FX History")
+        ws["A1"] = "USD/EGP DAILY RATE HISTORY"
+        ws["A1"].font = Font(bold=True, size=13, color=navy)
+        ws["A2"] = f"Range: {start_date} to {end_date}   ·   Generated: {now_ts()}"
+        headers = ["Date", "USD/EGP Rate", "Source"]
+        style_header(ws, headers, row=4)
+        for ridx, e in enumerate(fx, 5):
+            rate = e.get("rate", "")
+            ws.cell(ridx, 1, e.get("date", "")).border = border
+            rc = ws.cell(ridx, 2, round(rate, 4) if isinstance(rate, (int, float)) else rate)
+            rc.border = border; rc.number_format = "0.0000"
+            ws.cell(ridx, 3, e.get("source", "")).border = border
+            if ridx % 2 == 0:
+                for cidx in range(1, 4):
+                    ws.cell(ridx, cidx).fill = PatternFill("solid", fgColor=pale)
+        for col, width in enumerate([14, 16, 26], 1):
+            ws.column_dimensions[get_column_letter(col)].width = width
+        ws.freeze_panes = "A5"
+
+        return wb, len(cbot), len(fx)
+
+    def _export_market_history_excel(self):
+        if not _need_openpyxl():
+            return
+        try:
+            all_dates = [e.get("date", "") for e in
+                         (self.state_obj.get("cbot_history", []) or []) +
+                         (self.state_obj.get("fx_history", []) or [])
+                         if e.get("date")]
+            default_start = min(all_dates) if all_dates else \
+                (dt.date.today() - dt.timedelta(days=90)).isoformat()
+            default_end = max(all_dates) if all_dates else dt.date.today().isoformat()
+
+            date_range = self._prompt_market_history_range(default_start, default_end)
+            if not date_range:
+                return
+            start_date, end_date = date_range
+
+            fp = filedialog.asksaveasfilename(
+                initialdir=get_default_export_dir(),
+                initialfile=f"CBOT_FX_History_{start_date}_to_{end_date}.xlsx",
+                defaultextension=".xlsx", filetypes=[("Excel", "*.xlsx")],
+                title="Export CBOT + FX History")
+            if not fp:
+                return
+
+            wb, n_cbot, n_fx = self._build_market_history_workbook(start_date, end_date)
+            if n_cbot == 0 and n_fx == 0:
+                messagebox.showinfo(
+                    APP_NAME, "No CBOT or FX history entries fall in that date range.")
+                return
+            wb.save(fp)
+            append_audit_event(
+                self.state_obj, "export_market_history_excel", "history", "all",
+                {"start": start_date, "end": end_date, "cbot_rows": n_cbot,
+                 "fx_rows": n_fx, "file": os.path.basename(fp)})
+            messagebox.showinfo(
+                APP_NAME,
+                f"Exported {n_cbot} CBOT row(s) and {n_fx} FX row(s):\n{fp}")
+        except Exception as exc:
+            self._surface_error("_export_market_history_excel", exc, show=True)
 
     def _refresh_fx_history_tree(self):
         if not hasattr(self, "_fxh_tree"):
