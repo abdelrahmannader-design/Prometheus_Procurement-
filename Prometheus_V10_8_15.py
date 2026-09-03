@@ -6,6 +6,7 @@
 import json
 import os
 import re
+import sys
 import csv
 import datetime as dt
 import math
@@ -69,7 +70,8 @@ except Exception:
 # safe system-font fallbacks and are upgraded in place (global rebind) by
 # _resolve_fonts() once a Tk root exists and can query font.families().
 # ══════════════════════════════════════════════════════════════════════
-_BUNDLED_FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
+_APP_BASE_DIR = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+_BUNDLED_FONT_DIR = os.path.join(_APP_BASE_DIR, "fonts")
 
 
 def _load_bundled_fonts():
