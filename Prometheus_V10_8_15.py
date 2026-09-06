@@ -7850,12 +7850,19 @@ class App(tk.Tk):
         and the Analysis tab so both stay in sync."""
         parent.columnconfigure(0, weight=1)
 
+        hdr_row = ttk.Frame(parent)
+        hdr_row.grid(row=start_row, column=0, sticky="ew", pady=(0, 8))
+        hdr_row.columnconfigure(0, weight=1)
+
         header = (f"{stats['contract_name']}  ·  {stats['commodity']}\n"
                   f"Delivery: {stats['delivery_date']}   ·   "
                   f"Window: {stats['window_start']} to {stats['window_end']} "
                   f"(±{stats['window_days']} days)")
-        ttk.Label(parent, text=header, font=(FONT_FAMILY, FS_BODY, "bold"),
-                  justify="left").grid(row=start_row, column=0, sticky="w", pady=(0, 8))
+        ttk.Label(hdr_row, text=header, font=(FONT_FAMILY, FS_BODY, "bold"),
+                  justify="left").grid(row=0, column=0, sticky="w")
+        ttk.Button(hdr_row, text="📊  Export to Excel…",
+                   command=lambda: self._export_arrival_window_excel(stats)).grid(
+                       row=0, column=1, sticky="e", padx=(10, 0))
 
         body = ttk.Frame(parent)
         body.grid(row=start_row + 1, column=0, sticky="ew")
@@ -7927,6 +7934,105 @@ class App(tk.Tk):
 
         _breakdown_tree(0, stats["cbot"]["daily"], "¢/bu")
         _breakdown_tree(1, stats["local"]["daily"], "EGP/MT")
+
+    def _build_arrival_window_workbook(self, stats):
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        from openpyxl.utils import get_column_letter
+        navy = "0B1F3A"; pale = "EAF2FF"
+        thin = Side(style="thin", color="D8E1EC")
+        border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Summary"
+        ws["A1"] = f"ARRIVAL WINDOW PRICE CHECK — {stats['contract_name']}"
+        ws["A1"].font = Font(bold=True, size=14, color=navy)
+        ws["A2"] = (f"{stats['commodity']}   ·   Delivery: {stats['delivery_date']}   ·   "
+                    f"Window: {stats['window_start']} to {stats['window_end']} "
+                    f"(±{stats['window_days']} days)")
+        ws["A3"] = f"Generated: {now_ts()}"
+
+        def _summary_block(row0, title, blk, unit):
+            c = ws.cell(row0, 1, title)
+            c.font = Font(bold=True, size=12, color=navy)
+            headers = ["Metric", "Value", "Unit"]
+            for col, label in enumerate(headers, 1):
+                hc = ws.cell(row0 + 1, col, label)
+                hc.fill = PatternFill("solid", fgColor=navy)
+                hc.font = Font(bold=True, color="FFFFFF")
+                hc.border = border
+                hc.alignment = Alignment(horizontal="center")
+            rows = [
+                ("Contract's own price", blk.get("contract_value")),
+                (f"Window average ({blk.get('n', 0)} days)", blk.get("avg")),
+                ("Delta (window avg minus contract)", blk.get("delta")),
+            ]
+            for i, (label, value) in enumerate(rows):
+                r = row0 + 2 + i
+                ws.cell(r, 1, label).border = border
+                vc = ws.cell(r, 2, round(value, 4) if isinstance(value, (int, float)) else "—")
+                vc.border = border
+                vc.number_format = "0.0000"
+                ws.cell(r, 3, unit).border = border
+            return row0 + 2 + len(rows)
+
+        next_row = _summary_block(5, "CBOT (¢/bu)", stats["cbot"], "¢/bu")
+        _summary_block(next_row + 2, "Local (EGP/MT)", stats["local"], "EGP/MT")
+
+        for col, width in enumerate([32, 16, 10], 1):
+            ws.column_dimensions[get_column_letter(col)].width = width
+
+        def _breakdown_sheet(name, daily, val_label):
+            wsb = wb.create_sheet(title=name[:31])
+            wsb["A1"] = name
+            wsb["A1"].font = Font(bold=True, size=13, color=navy)
+            headers = ["Date", val_label]
+            for col, label in enumerate(headers, 1):
+                c = wsb.cell(3, col, label)
+                c.fill = PatternFill("solid", fgColor=navy)
+                c.font = Font(bold=True, color="FFFFFF")
+                c.border = border
+                c.alignment = Alignment(horizontal="center")
+            for ridx, (d, v) in enumerate(daily, 4):
+                wsb.cell(ridx, 1, d).border = border
+                vc = wsb.cell(ridx, 2, round(v, 4))
+                vc.border = border
+                vc.number_format = "0.0000"
+                if ridx % 2 == 1:
+                    for cidx in range(1, 3):
+                        wsb.cell(ridx, cidx).fill = PatternFill("solid", fgColor=pale)
+            if not daily:
+                wsb.cell(4, 1, "—").border = border
+                wsb.cell(4, 2, "no data in window").border = border
+            for col, width in enumerate([14, 18], 1):
+                wsb.column_dimensions[get_column_letter(col)].width = width
+            wsb.freeze_panes = "A4"
+
+        _breakdown_sheet("CBOT Breakdown", stats["cbot"]["daily"], "Close (¢/bu)")
+        _breakdown_sheet("Local Breakdown", stats["local"]["daily"], "All-in (EGP/MT)")
+
+        return wb
+
+    def _export_arrival_window_excel(self, stats):
+        if not _need_openpyxl():
+            return
+        try:
+            fp = filedialog.asksaveasfilename(
+                initialdir=get_default_export_dir(),
+                initialfile=f"Arrival_Window_{stats['contract_id']}_{stats['delivery_date']}.xlsx",
+                defaultextension=".xlsx", filetypes=[("Excel", "*.xlsx")],
+                title="Export Arrival Window Comparison")
+            if not fp:
+                return
+            wb = self._build_arrival_window_workbook(stats)
+            wb.save(fp)
+            append_audit_event(
+                self.state_obj, "export_arrival_window_excel", "contracts",
+                stats["contract_id"], {"file": os.path.basename(fp)})
+            messagebox.showinfo(APP_NAME, f"Exported arrival window comparison:\n{fp}")
+        except Exception as exc:
+            self._surface_error("_export_arrival_window_excel", exc, show=True)
 
     def _show_arrival_window_dialog(self, stats):
         win = tk.Toplevel(self)
@@ -13198,6 +13304,24 @@ class App(tk.Tk):
             ws.column_dimensions[get_column_letter(col)].width = width
         ws.freeze_panes = "A5"
 
+        n_local = self._add_local_price_sheets(wb, start_date, end_date)
+
+        return wb, len(cbot), len(fx), n_local
+
+    def _add_local_price_sheets(self, wb, start_date, end_date):
+        """Write one sheet per local-price commodity (date/price/transport/
+        all-in) into `wb`, filtered to [start_date, end_date]. Returns the
+        total number of rows written across all commodities. Shared by the
+        combined CBOT+FX+Local export and the Local Prices tab's own export."""
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        from openpyxl.utils import get_column_letter
+        navy = "0B1F3A"; pale = "EAF2FF"
+        thin = Side(style="thin", color="D8E1EC")
+        border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+        def in_range(d_str):
+            return bool(d_str) and start_date <= d_str <= end_date
+
         local = [r for r in self.state_obj.get("local_prices", []) or []
                  if in_range(r.get("date", ""))]
         local_commodities = sorted({r.get("commodity", "?") for r in local})
@@ -13211,7 +13335,12 @@ class App(tk.Tk):
             ws["A1"].font = Font(bold=True, size=13, color=navy)
             ws["A2"] = f"Range: {start_date} to {end_date}   ·   Generated: {now_ts()}"
             headers = ["Date", "Price (EGP/MT)", "Transport (EGP/MT)", "All-in (EGP/MT)"]
-            style_header(ws, headers, row=4)
+            for col, label in enumerate(headers, 1):
+                c = ws.cell(4, col, label)
+                c.fill = PatternFill("solid", fgColor=navy)
+                c.font = Font(bold=True, color="FFFFFF")
+                c.border = border
+                c.alignment = Alignment(horizontal="center")
             for ridx, r in enumerate(rows, 5):
                 price = to_float(r.get("price_egp_mt"), None)
                 trans = to_float(r.get("transport_egp_mt"), 0) or 0
@@ -13229,7 +13358,53 @@ class App(tk.Tk):
                 ws.column_dimensions[get_column_letter(col)].width = width
             ws.freeze_panes = "A5"
 
-        return wb, len(cbot), len(fx), len(local)
+        return len(local)
+
+    def _build_local_prices_workbook(self, start_date, end_date):
+        from openpyxl import Workbook
+        wb = Workbook()
+        wb.remove(wb.active)
+        n_local = self._add_local_price_sheets(wb, start_date, end_date)
+        return wb, n_local
+
+    def _export_local_prices_excel(self):
+        if not _need_openpyxl():
+            return
+        try:
+            all_dates = [r.get("date", "") for r in
+                         (self.state_obj.get("local_prices", []) or [])
+                         if r.get("date")]
+            default_start = min(all_dates) if all_dates else \
+                (dt.date.today() - dt.timedelta(days=90)).isoformat()
+            default_end = max(all_dates) if all_dates else dt.date.today().isoformat()
+
+            date_range = self._prompt_market_history_range(default_start, default_end)
+            if not date_range:
+                return
+            start_date, end_date = date_range
+
+            fp = filedialog.asksaveasfilename(
+                initialdir=get_default_export_dir(),
+                initialfile=f"Local_Prices_History_{start_date}_to_{end_date}.xlsx",
+                defaultextension=".xlsx", filetypes=[("Excel", "*.xlsx")],
+                title="Export Local Prices")
+            if not fp:
+                return
+
+            wb, n_local = self._build_local_prices_workbook(start_date, end_date)
+            if n_local == 0:
+                messagebox.showinfo(
+                    APP_NAME, "No local price entries fall in that date range.")
+                return
+            wb.save(fp)
+            append_audit_event(
+                self.state_obj, "export_local_prices_excel", "local_prices", "all",
+                {"start": start_date, "end": end_date, "rows": n_local,
+                 "file": os.path.basename(fp)})
+            messagebox.showinfo(
+                APP_NAME, f"Exported {n_local} local price row(s):\n{fp}")
+        except Exception as exc:
+            self._surface_error("_export_local_prices_excel", exc, show=True)
 
     def _export_market_history_excel(self):
         if not _need_openpyxl():
@@ -19985,6 +20160,9 @@ class App(tk.Tk):
                        side="left", padx=(0, 8))
         ttk.Button(btns, text="Edit per-commodity freight…",
                    command=self.edit_commodity_freight_defaults).pack(
+                       side="left", padx=(0, 8))
+        ttk.Button(btns, text="📊  Export to Excel (per commodity)…",
+                   command=self._export_local_prices_excel).pack(
                        side="left", padx=(0, 8))
 
         # ── Average Transport per Commodity box ───────────────────────
