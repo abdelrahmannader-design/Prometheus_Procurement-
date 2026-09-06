@@ -7791,6 +7791,40 @@ class App(tk.Tk):
                      if (cbot_avg is not None and locked_cbot is not None) else None,
         }
 
+        # ── CIF estimate: (CBOT + premium) x conversion factor, computed
+        # from the window-average CBOT and from the latest available CBOT
+        # close ("today"), for when the contract's own priced-in CBOT/CIF
+        # isn't recorded and a formula-based estimate is needed instead. ──
+        premium_cents = to_float(c.get("premium_cents"), None)
+        cbot_conv = cbot_conv_factor(base_comm)
+
+        today_cbot, today_cbot_date = None, None
+        if cbot_comm_key:
+            latest_entries = [
+                (e.get("date", ""), to_float(e.get("price"), None))
+                for e in self.state_obj.get("cbot_history", []) or []
+                if (e.get("commodity") or "").upper() == cbot_comm_key
+                and e.get("date", "") and e.get("date", "") <= dt.date.today().isoformat()
+            ]
+            latest_entries = [(d, p) for d, p in latest_entries if p is not None]
+            if latest_entries:
+                today_cbot_date, today_cbot = max(latest_entries, key=lambda x: x[0])
+
+        def _cif_from(cbot_val):
+            if cbot_val is None or premium_cents is None or not cbot_conv:
+                return None
+            return (cbot_val + premium_cents) * cbot_conv
+
+        result["cif"] = {
+            "premium_cents": premium_cents,
+            "conv_factor": cbot_conv,
+            "window_avg_cbot": cbot_avg,
+            "cif_from_window_avg": _cif_from(cbot_avg),
+            "today_cbot": today_cbot,
+            "today_cbot_date": today_cbot_date,
+            "cif_from_today": _cif_from(today_cbot),
+        }
+
         # ── Local: daily logged prices in-window, vs. nearest-to-delivery ──
         local_daily = []
         local_key_used = None
@@ -7900,10 +7934,39 @@ class App(tk.Tk):
         _section(0, "CBOT (¢/bu)", stats["cbot"], "¢/bu")
         _section(1, "Local (EGP/MT)", stats["local"], "EGP/MT")
 
+        # ── CIF estimate: (CBOT + premium) x conversion — a formula-based
+        # landed-cost estimate for when the contract's own priced-in CBOT/CIF
+        # isn't recorded, using the window-average CBOT and today's CBOT. ──
+        cif = stats.get("cif") or {}
+        cif_box = ttk.LabelFrame(parent, text="  CIF Estimate — (CBOT + Premium) × Conversion  ", padding=10)
+        cif_box.grid(row=start_row + 2, column=0, sticky="ew", pady=(8, 0))
+        premium = cif.get("premium_cents")
+        conv = cif.get("conv_factor")
+        if premium is None or not conv:
+            ttk.Label(cif_box, text="Missing premium and/or conversion factor for this "
+                                     "commodity — can't compute a CIF estimate.",
+                      foreground="#888").pack(anchor="w")
+        else:
+            def _cif_row(label, cbot_val, cif_val, note=""):
+                r = ttk.Frame(cif_box)
+                r.pack(fill="x", pady=2)
+                text = (f"{label}: ({cbot_val:.2f}¢/bu + {premium:.2f}¢ premium) × {conv} "
+                        f"= ${cif_val:.2f}/MT" if (cbot_val is not None and cif_val is not None)
+                        else f"{label}: no data")
+                ttk.Label(r, text=text, font=(FONT_FAMILY, FS_BODY, "bold")).pack(side="left")
+                if note:
+                    ttk.Label(r, text=note, foreground="#888").pack(side="left", padx=(8, 0))
+
+            _cif_row("From window-average CBOT", cif.get("window_avg_cbot"),
+                      cif.get("cif_from_window_avg"))
+            _cif_row("From today's CBOT", cif.get("today_cbot"),
+                      cif.get("cif_from_today"),
+                      note=f"(CBOT date: {cif['today_cbot_date']})" if cif.get("today_cbot_date") else "")
+
         # ── Breakdown ───────────────────────────────────────────────
         brk_frame = ttk.Frame(parent)
-        brk_frame.grid(row=start_row + 2, column=0, sticky="nsew", pady=(10, 0))
-        parent.rowconfigure(start_row + 2, weight=1)
+        brk_frame.grid(row=start_row + 3, column=0, sticky="nsew", pady=(10, 0))
+        parent.rowconfigure(start_row + 3, weight=1)
         brk_frame.columnconfigure(0, weight=1)
         brk_frame.columnconfigure(1, weight=1)
         brk_frame.rowconfigure(1, weight=1)
@@ -7978,9 +8041,37 @@ class App(tk.Tk):
             return row0 + 2 + len(rows)
 
         next_row = _summary_block(5, "CBOT (¢/bu)", stats["cbot"], "¢/bu")
-        _summary_block(next_row + 2, "Local (EGP/MT)", stats["local"], "EGP/MT")
+        next_row = _summary_block(next_row + 2, "Local (EGP/MT)", stats["local"], "EGP/MT")
 
-        for col, width in enumerate([32, 16, 10], 1):
+        cif = stats.get("cif") or {}
+        row0 = next_row + 2
+        ws.cell(row0, 1, "CIF Estimate — (CBOT + Premium) x Conversion").font = \
+            Font(bold=True, size=12, color=navy)
+        headers = ["Basis", "CBOT (¢/bu)", "Premium (¢)", "Conversion", "CIF (USD/MT)", "CBOT Date"]
+        for col, label in enumerate(headers, 1):
+            hc = ws.cell(row0 + 1, col, label)
+            hc.fill = PatternFill("solid", fgColor=navy)
+            hc.font = Font(bold=True, color="FFFFFF")
+            hc.border = border
+            hc.alignment = Alignment(horizontal="center")
+        cif_rows = [
+            ("Window-average CBOT", cif.get("window_avg_cbot"), cif.get("cif_from_window_avg"), ""),
+            ("Today's CBOT", cif.get("today_cbot"), cif.get("cif_from_today"),
+             cif.get("today_cbot_date") or ""),
+        ]
+        for i, (label, cbot_val, cif_val, cbot_date) in enumerate(cif_rows):
+            r = row0 + 2 + i
+            ws.cell(r, 1, label).border = border
+            ws.cell(r, 2, round(cbot_val, 4) if isinstance(cbot_val, (int, float)) else "—").border = border
+            ws.cell(r, 3, round(cif.get("premium_cents"), 4)
+                    if isinstance(cif.get("premium_cents"), (int, float)) else "—").border = border
+            ws.cell(r, 4, cif.get("conv_factor") or "—").border = border
+            vc = ws.cell(r, 5, round(cif_val, 4) if isinstance(cif_val, (int, float)) else "—")
+            vc.border = border
+            vc.number_format = "#,##0.0000"
+            ws.cell(r, 6, cbot_date or "—").border = border
+
+        for col, width in enumerate([32, 16, 14, 12, 16, 14], 1):
             ws.column_dimensions[get_column_letter(col)].width = width
 
         def _breakdown_sheet(name, daily, val_label):
@@ -8037,16 +8128,15 @@ class App(tk.Tk):
     def _show_arrival_window_dialog(self, stats):
         win = tk.Toplevel(self)
         win.title(f"Arrival Window — {stats['contract_name']}")
-        win.geometry("680x580")
+        win.geometry("700x680")
         win.transient(self)
         win.columnconfigure(0, weight=1)
-        win.rowconfigure(2, weight=1)
+        win.rowconfigure(0, weight=1)
 
         outer = ttk.Frame(win)
         outer.grid(row=0, column=0, sticky="nsew", padx=12, pady=12)
         outer.columnconfigure(0, weight=1)
-        outer.rowconfigure(2, weight=1)
-        win.rowconfigure(0, weight=1)
+        outer.rowconfigure(3, weight=1)
         self._render_arrival_window(outer, stats)
 
         ttk.Button(win, text="Close", command=win.destroy).grid(
