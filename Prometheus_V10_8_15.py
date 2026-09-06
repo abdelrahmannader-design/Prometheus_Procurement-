@@ -7720,6 +7720,232 @@ class App(tk.Tk):
             "n": len(pts),
         }
 
+    def _arrival_window_stats(self, cid, window_days=15):
+        """CBOT + local price averages in a +/-window_days window around a
+        contract's delivery/arrival date, compared against what the deal was
+        actually priced against. Returns None if the contract or its delivery
+        date can't be resolved."""
+        contracts = self.state_obj.get("contracts", {}) or {}
+        c = contracts.get(cid)
+        if not c:
+            return None
+        comm = (c.get("commodity") or "").upper()
+        base_comm = comm.split("-")[0] if "-" in comm else comm
+        del_str = c.get("delivery_date") or c.get("storage_start") or ""
+        try:
+            anchor = dt.date.fromisoformat(del_str)
+        except Exception:
+            return None
+        win_start = anchor - dt.timedelta(days=window_days)
+        win_end = anchor + dt.timedelta(days=window_days)
+        win_start_s, win_end_s = win_start.isoformat(), win_end.isoformat()
+
+        result = {
+            "contract_id": cid,
+            "contract_name": c.get("name") or cid,
+            "commodity": comm,
+            "base_commodity": base_comm,
+            "delivery_date": anchor.isoformat(),
+            "window_start": win_start_s,
+            "window_end": win_end_s,
+            "window_days": window_days,
+        }
+
+        # ── CBOT: daily closes in-window, vs. the deal's locked-in CBOT ────
+        cbot_comm_key = {"CORN": "CORN", "SOYBEAN": "SOYBEAN", "SBM": "SBM"}.get(base_comm)
+        cbot_daily = []
+        if cbot_comm_key:
+            for e in self.state_obj.get("cbot_history", []) or []:
+                if (e.get("commodity") or "").upper() != cbot_comm_key:
+                    continue
+                d = e.get("date", "")
+                if win_start_s <= d <= win_end_s:
+                    px = to_float(e.get("price"), None)
+                    if px is not None:
+                        cbot_daily.append((d, px))
+        cbot_daily.sort(key=lambda x: x[0])
+        cbot_avg = (sum(p for _, p in cbot_daily) / len(cbot_daily)) if cbot_daily else None
+
+        locked_cbot, locked_cbot_src = None, None
+        for key in ("pricing_cbot", "cbot_price", "cbot", "cbot_ref", "contract_cbot"):
+            v = to_float(c.get(key), None)
+            if v is not None:
+                locked_cbot, locked_cbot_src = v, key
+                break
+        if locked_cbot is None:
+            premium = to_float(c.get("premium_cents"), None)
+            cif = to_float(c.get("cif_usd_mt"), None)
+            cbot_conv = cbot_conv_factor(base_comm)
+            if premium is not None and cif is not None and cbot_conv:
+                locked_cbot = (cif / cbot_conv) - premium
+                locked_cbot_src = "reverse-computed from CIF & premium"
+
+        result["cbot"] = {
+            "commodity_key": cbot_comm_key,
+            "daily": cbot_daily,
+            "avg": cbot_avg,
+            "n": len(cbot_daily),
+            "contract_value": locked_cbot,
+            "contract_source": locked_cbot_src,
+            "delta": (cbot_avg - locked_cbot)
+                     if (cbot_avg is not None and locked_cbot is not None) else None,
+        }
+
+        # ── Local: daily logged prices in-window, vs. nearest-to-delivery ──
+        local_daily = []
+        local_key_used = None
+        for ck in self._hd_local_keys_for_contract(c):
+            entries = []
+            for r in self.state_obj.get("local_prices", []) or []:
+                if r.get("commodity") != ck:
+                    continue
+                d = r.get("date", "")
+                if not (win_start_s <= d <= win_end_s):
+                    continue
+                base_px = to_float(r.get("price_egp_mt"), None)
+                if base_px is None:
+                    continue
+                trans = to_float(r.get("transport_egp_mt"), 0) or 0
+                entries.append((d, base_px + trans))
+            if entries:
+                local_daily = sorted(entries, key=lambda x: x[0])
+                local_key_used = ck
+                break
+
+        local_avg = (sum(p for _, p in local_daily) / len(local_daily)) if local_daily else None
+        local_baseline, _local_ck, local_baseline_date = self._hd_local_for_contract(
+            c, date_str=anchor.isoformat())
+
+        result["local"] = {
+            "commodity_key": local_key_used,
+            "daily": local_daily,
+            "avg": local_avg,
+            "n": len(local_daily),
+            "contract_value": local_baseline,
+            "contract_date": local_baseline_date,
+            "delta": (local_avg - local_baseline)
+                     if (local_avg is not None and local_baseline is not None) else None,
+        }
+
+        return result
+
+    def _open_arrival_window_popup(self, cid=None):
+        cid = cid or self._selected_contract_id_for_lots()
+        if not cid:
+            messagebox.showinfo(APP_NAME, "Select a contract first.")
+            return
+        stats = self._arrival_window_stats(cid)
+        if not stats:
+            messagebox.showinfo(
+                APP_NAME,
+                "Couldn't resolve a delivery date for this contract — "
+                "set one in the contract editor.")
+            return
+        self._show_arrival_window_dialog(stats)
+
+    def _render_arrival_window(self, parent, stats, start_row=0):
+        """Build the arrival-window comparison + day-by-day breakdown into
+        `parent`, starting at grid row `start_row`. `parent` must not have
+        other content in the rows it uses. Shared by the per-contract popup
+        and the Analysis tab so both stay in sync."""
+        parent.columnconfigure(0, weight=1)
+
+        header = (f"{stats['contract_name']}  ·  {stats['commodity']}\n"
+                  f"Delivery: {stats['delivery_date']}   ·   "
+                  f"Window: {stats['window_start']} to {stats['window_end']} "
+                  f"(±{stats['window_days']} days)")
+        ttk.Label(parent, text=header, font=(FONT_FAMILY, FS_BODY, "bold"),
+                  justify="left").grid(row=start_row, column=0, sticky="w", pady=(0, 8))
+
+        body = ttk.Frame(parent)
+        body.grid(row=start_row + 1, column=0, sticky="ew")
+        body.columnconfigure(0, weight=1)
+        body.columnconfigure(1, weight=1)
+
+        def _section(col, title, blk, unit, fmt="{:.2f}"):
+            box = ttk.LabelFrame(body, text=f"  {title}  ", padding=10)
+            box.grid(row=0, column=col, sticky="nsew",
+                      padx=(0, 8) if col == 0 else (8, 0))
+
+            def _row(label, value):
+                r = ttk.Frame(box)
+                r.pack(fill="x", pady=2)
+                ttk.Label(r, text=label, foreground="#666").pack(side="left")
+                ttk.Label(r, text=value, font=(FONT_FAMILY, FS_BODY, "bold")).pack(side="right")
+
+            contract_val = blk.get("contract_value")
+            avg = blk.get("avg")
+            delta = blk.get("delta")
+            _row("Contract's own price:",
+                 fmt.format(contract_val) + f" {unit}" if contract_val is not None else "—")
+            _row(f"Window average ({blk.get('n', 0)} days):",
+                 fmt.format(avg) + f" {unit}" if avg is not None else "no data")
+            if delta is not None:
+                tag = "higher" if delta > 0 else ("lower" if delta < 0 else "equal")
+                color = CLR["danger"] if delta > 0 else CLR["success"]
+                r = ttk.Frame(box)
+                r.pack(fill="x", pady=(6, 0))
+                ttk.Label(r, text=f"Window avg is {abs(delta):.2f} {unit} {tag} than contract",
+                          foreground=color, font=(FONT_FAMILY, FS_BODY, "bold"),
+                          wraplength=280, justify="left").pack(anchor="w")
+            return box
+
+        _section(0, "CBOT (¢/bu)", stats["cbot"], "¢/bu")
+        _section(1, "Local (EGP/MT)", stats["local"], "EGP/MT")
+
+        # ── Breakdown ───────────────────────────────────────────────
+        brk_frame = ttk.Frame(parent)
+        brk_frame.grid(row=start_row + 2, column=0, sticky="nsew", pady=(10, 0))
+        parent.rowconfigure(start_row + 2, weight=1)
+        brk_frame.columnconfigure(0, weight=1)
+        brk_frame.columnconfigure(1, weight=1)
+        brk_frame.rowconfigure(1, weight=1)
+
+        ttk.Label(brk_frame, text="Day-by-day breakdown feeding each average:",
+                  font=(FONT_FAMILY, FS_BODY, "bold")).grid(
+                      row=0, column=0, columnspan=2, sticky="w", pady=(0, 4))
+
+        def _breakdown_tree(col, daily, val_label):
+            tf = ttk.Frame(brk_frame)
+            tf.grid(row=1, column=col, sticky="nsew",
+                    padx=(0, 6) if col == 0 else (6, 0))
+            tf.columnconfigure(0, weight=1)
+            tf.rowconfigure(0, weight=1)
+            tv = ttk.Treeview(tf, columns=("date", "val"), show="headings", height=10)
+            tv.heading("date", text="Date")
+            tv.heading("val", text=val_label)
+            tv.column("date", width=100, anchor="center")
+            tv.column("val", width=100, anchor="e")
+            tv.grid(row=0, column=0, sticky="nsew")
+            sb = ttk.Scrollbar(tf, orient="vertical", command=tv.yview)
+            tv.configure(yscrollcommand=sb.set)
+            sb.grid(row=0, column=1, sticky="ns")
+            for d, v in daily:
+                tv.insert("", "end", values=(d, f"{v:.2f}"))
+            if not daily:
+                tv.insert("", "end", values=("—", "no data in window"))
+
+        _breakdown_tree(0, stats["cbot"]["daily"], "¢/bu")
+        _breakdown_tree(1, stats["local"]["daily"], "EGP/MT")
+
+    def _show_arrival_window_dialog(self, stats):
+        win = tk.Toplevel(self)
+        win.title(f"Arrival Window — {stats['contract_name']}")
+        win.geometry("680x580")
+        win.transient(self)
+        win.columnconfigure(0, weight=1)
+        win.rowconfigure(2, weight=1)
+
+        outer = ttk.Frame(win)
+        outer.grid(row=0, column=0, sticky="nsew", padx=12, pady=12)
+        outer.columnconfigure(0, weight=1)
+        outer.rowconfigure(2, weight=1)
+        win.rowconfigure(0, weight=1)
+        self._render_arrival_window(outer, stats)
+
+        ttk.Button(win, text="Close", command=win.destroy).grid(
+            row=1, column=0, sticky="e", padx=12, pady=(0, 10))
+
     def _build_home_range_watch(self, parent):
         """3-Month Price Range card: for each tracked CBOT commodity, FX and
         local price series, show current vs trailing-90-day low/high with a
@@ -10592,6 +10818,76 @@ class App(tk.Tk):
         except Exception as e:
             log_exception(e, "run_performance")
             messagebox.showerror(APP_NAME, f"Performance error: {e}")
+
+    def _build_arrival_window_subtab(self):
+        """Pick any contract and see CBOT + local price averages in a window
+        around its delivery date, compared to what the deal was actually
+        priced against, with the day-by-day numbers behind each average."""
+        p = self.tab_arrival_window
+        p.columnconfigure(0, weight=1)
+        p.rowconfigure(2, weight=1)
+
+        ttk.Label(p,
+                  text="🗓  Arrival Window Price Check — CBOT & local averages in a window "
+                       "around delivery, vs. what the deal was priced against",
+                  font=("Segoe UI", 12, "bold")).grid(
+                      row=0, column=0, sticky="w", pady=(0, 8))
+
+        ctrl = ttk.LabelFrame(p, text="Parameters", padding=10)
+        ctrl.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+
+        ttk.Label(ctrl, text="Contract").grid(row=0, column=0, sticky="w", pady=4)
+        self.aw_contract_var = tk.StringVar(value="")
+        aw_combo = ttk.Combobox(ctrl, textvariable=self.aw_contract_var,
+                                 values=[], width=42, state="normal")
+        aw_combo.grid(row=0, column=1, sticky="w", padx=(6, 12), pady=4)
+        self._wire_contract_typeahead(
+            aw_combo, self.aw_contract_var,
+            lambda q: self._contract_picker_values(query=q))
+
+        ttk.Label(ctrl, text="Window (± days)").grid(row=0, column=2, sticky="w", pady=4)
+        self.aw_window_var = tk.StringVar(value="15")
+        ttk.Entry(ctrl, textvariable=self.aw_window_var, width=6).grid(
+            row=0, column=3, sticky="w", padx=(6, 12), pady=4)
+
+        ttk.Button(ctrl, text="▶  Run",
+                   command=self._run_arrival_window_subtab).grid(
+                       row=0, column=4, padx=(6, 0), pady=4)
+
+        ttk.Label(ctrl,
+                  text="Compares CBOT and logged local prices from N days before to N days "
+                       "after the contract's delivery date against the contract's own priced-in CBOT/local.",
+                  font=("Segoe UI", 9), foreground="#888").grid(
+                      row=1, column=0, columnspan=5, sticky="w", pady=(4, 0))
+
+        self._aw_result_frame = ttk.Frame(p)
+        self._aw_result_frame.grid(row=2, column=0, sticky="nsew")
+        self._aw_result_frame.columnconfigure(0, weight=1)
+        ttk.Label(self._aw_result_frame, text="Pick a contract and click Run.",
+                  foreground="#888").grid(row=0, column=0, sticky="w")
+
+    def _run_arrival_window_subtab(self):
+        cid = self._resolve_contract_id_from_label(self.aw_contract_var.get())
+        if not cid or cid not in (self.state_obj.get("contracts", {}) or {}):
+            messagebox.showinfo(APP_NAME, "Pick a valid contract first.")
+            return
+        try:
+            window_days = int(to_float(self.aw_window_var.get(), 15) or 15)
+        except Exception:
+            window_days = 15
+
+        for w in self._aw_result_frame.winfo_children():
+            w.destroy()
+
+        stats = self._arrival_window_stats(cid, window_days=window_days)
+        if not stats:
+            ttk.Label(self._aw_result_frame,
+                      text="Couldn't resolve a delivery date for this contract — "
+                           "set one in the contract editor.",
+                      foreground=CLR["danger"]).grid(row=0, column=0, sticky="w")
+            return
+        self._render_arrival_window(self._aw_result_frame, stats)
+
     def _export_contract_intelligence(self, cid=None, c=None):
         """Full per-contract intelligence Excel:
         Sheet 1 — Contract Summary
@@ -12642,11 +12938,11 @@ class App(tk.Tk):
             row=8, column=0, sticky="ew", pady=(8,6))
         ef = ttk.Frame(p)
         ef.grid(row=9, column=0, sticky="ew", pady=(0,4))
-        ttk.Button(ef, text="📊  Export to Excel (CBOT + FX)…",
+        ttk.Button(ef, text="📊  Export to Excel (CBOT + FX + Local)…",
                    command=self._export_market_history_excel).pack(side="left")
         ttk.Label(ef,
-                  text="One sheet per CBOT commodity, plus a FX History sheet — "
-                       "choose a date range on export",
+                  text="One sheet per CBOT commodity, one per local-price commodity, plus an "
+                       "FX History sheet — choose a date range on export",
                   font=("Segoe UI", 9), foreground="#666").pack(
                   side="left", padx=(10,0))
 
@@ -12783,7 +13079,7 @@ class App(tk.Tk):
         win.transient(self)
         win.grab_set()
 
-        ttk.Label(win, text="Export CBOT + FX history between:",
+        ttk.Label(win, text="Export CBOT + FX + local price history between:",
                   font=(FONT_FAMILY, FS_BODY, "bold")).grid(
                   row=0, column=0, columnspan=2, sticky="w", padx=12, pady=(12,8))
 
@@ -12902,7 +13198,38 @@ class App(tk.Tk):
             ws.column_dimensions[get_column_letter(col)].width = width
         ws.freeze_panes = "A5"
 
-        return wb, len(cbot), len(fx)
+        local = [r for r in self.state_obj.get("local_prices", []) or []
+                 if in_range(r.get("date", ""))]
+        local_commodities = sorted({r.get("commodity", "?") for r in local})
+        for comm in local_commodities:
+            rows = sorted(
+                (r for r in local if r.get("commodity") == comm),
+                key=lambda x: x.get("date", ""))
+            title = f"Local {comm}"[:31]
+            ws = wb.create_sheet(title=title)
+            ws["A1"] = f"LOCAL PRICE HISTORY — {comm}"
+            ws["A1"].font = Font(bold=True, size=13, color=navy)
+            ws["A2"] = f"Range: {start_date} to {end_date}   ·   Generated: {now_ts()}"
+            headers = ["Date", "Price (EGP/MT)", "Transport (EGP/MT)", "All-in (EGP/MT)"]
+            style_header(ws, headers, row=4)
+            for ridx, r in enumerate(rows, 5):
+                price = to_float(r.get("price_egp_mt"), None)
+                trans = to_float(r.get("transport_egp_mt"), 0) or 0
+                ws.cell(ridx, 1, r.get("date", "")).border = border
+                pc = ws.cell(ridx, 2, round(price, 2) if price is not None else "")
+                pc.border = border; pc.number_format = "#,##0.00"
+                tc = ws.cell(ridx, 3, round(trans, 2))
+                tc.border = border; tc.number_format = "#,##0.00"
+                ac = ws.cell(ridx, 4, round(price + trans, 2) if price is not None else "")
+                ac.border = border; ac.number_format = "#,##0.00"
+                if ridx % 2 == 0:
+                    for cidx in range(1, 5):
+                        ws.cell(ridx, cidx).fill = PatternFill("solid", fgColor=pale)
+            for col, width in enumerate([14, 18, 18, 18], 1):
+                ws.column_dimensions[get_column_letter(col)].width = width
+            ws.freeze_panes = "A5"
+
+        return wb, len(cbot), len(fx), len(local)
 
     def _export_market_history_excel(self):
         if not _need_openpyxl():
@@ -12910,7 +13237,8 @@ class App(tk.Tk):
         try:
             all_dates = [e.get("date", "") for e in
                          (self.state_obj.get("cbot_history", []) or []) +
-                         (self.state_obj.get("fx_history", []) or [])
+                         (self.state_obj.get("fx_history", []) or []) +
+                         (self.state_obj.get("local_prices", []) or [])
                          if e.get("date")]
             default_start = min(all_dates) if all_dates else \
                 (dt.date.today() - dt.timedelta(days=90)).isoformat()
@@ -12923,25 +13251,26 @@ class App(tk.Tk):
 
             fp = filedialog.asksaveasfilename(
                 initialdir=get_default_export_dir(),
-                initialfile=f"CBOT_FX_History_{start_date}_to_{end_date}.xlsx",
+                initialfile=f"CBOT_FX_Local_History_{start_date}_to_{end_date}.xlsx",
                 defaultextension=".xlsx", filetypes=[("Excel", "*.xlsx")],
-                title="Export CBOT + FX History")
+                title="Export CBOT + FX + Local History")
             if not fp:
                 return
 
-            wb, n_cbot, n_fx = self._build_market_history_workbook(start_date, end_date)
-            if n_cbot == 0 and n_fx == 0:
+            wb, n_cbot, n_fx, n_local = self._build_market_history_workbook(start_date, end_date)
+            if n_cbot == 0 and n_fx == 0 and n_local == 0:
                 messagebox.showinfo(
-                    APP_NAME, "No CBOT or FX history entries fall in that date range.")
+                    APP_NAME, "No CBOT, FX or local price entries fall in that date range.")
                 return
             wb.save(fp)
             append_audit_event(
                 self.state_obj, "export_market_history_excel", "history", "all",
                 {"start": start_date, "end": end_date, "cbot_rows": n_cbot,
-                 "fx_rows": n_fx, "file": os.path.basename(fp)})
+                 "fx_rows": n_fx, "local_rows": n_local, "file": os.path.basename(fp)})
             messagebox.showinfo(
                 APP_NAME,
-                f"Exported {n_cbot} CBOT row(s) and {n_fx} FX row(s):\n{fp}")
+                f"Exported {n_cbot} CBOT row(s), {n_fx} FX row(s) "
+                f"and {n_local} local price row(s):\n{fp}")
         except Exception as exc:
             self._surface_error("_export_market_history_excel", exc, show=True)
 
@@ -13234,7 +13563,8 @@ class App(tk.Tk):
             p, [("perf", "Contract Performance"), ("detail", "Contract Detail"),
                 ("supplier", "Supplier Scorecard"), ("season", "Seasonality"),
                 ("origin", "Origin Compare"), ("savings", "Savings Tracker"),
-                ("basis", "Basis Tracker"), ("exposure", "Exposure & Risk")])
+                ("basis", "Basis Tracker"), ("exposure", "Exposure & Risk"),
+                ("arrival", "Arrival Window")])
         _a_bar.grid(row=1, column=0, sticky="w", pady=(0, 4))
         _a_host.grid(row=2, column=0, sticky="nsew")
 
@@ -13248,6 +13578,7 @@ class App(tk.Tk):
         self.tab_savings    = self._make_scrollable_tab(self.tab_savings_outer, padding=10)
         self.tab_basis    = _a_screens["basis"]
         self.tab_exposure = _a_screens["exposure"]
+        self.tab_arrival_window = _a_screens["arrival"]
 
         self._build_performance()
         self._build_an_contract_subtab()
@@ -13259,6 +13590,7 @@ class App(tk.Tk):
         self._build_savings_tracker()
         self._build_basis_tracker()
         self._build_exposure_risk()
+        self._build_arrival_window_subtab()
         _a_finalize()
 
     def _build_an_contract_subtab(self):
@@ -16921,6 +17253,7 @@ class App(tk.Tk):
             ("＋ New", None, self._contracts_prepare_new, False),
             ("Save / Update", None, self._contracts_save_from_editor, True),
             ("Compare 2", None, self._open_contract_comparison, False),
+            ("Arrival Window", None, self._open_arrival_window_popup, False),
             ("Refresh", None, lambda: self.refresh_all(fetch_market=True), False),
             (None, self._contract_editor_button_var, self._toggle_contract_editor, False),
             (None, self._contract_history_button_var, self._toggle_contract_history, False),
