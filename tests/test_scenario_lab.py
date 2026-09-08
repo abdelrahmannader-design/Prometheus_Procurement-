@@ -8,12 +8,15 @@ import sys
 import unittest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 try:
     import tkinter  # noqa: F401
     _HAS_TK = True
 except Exception:
     _HAS_TK = False
+
+from _app_test_helpers import start_isolated_app
 
 
 @unittest.skipUnless(_HAS_TK, "tkinter not available in this environment")
@@ -22,12 +25,12 @@ class TestScenarioLab(unittest.TestCase):
     def setUpClass(cls):
         import Prometheus_V10_8_15 as P
         cls.P = P
-        cls.app = P.App()
-        cls.app.withdraw()
+        cls.app, cls._tmp_dir, cls._restore = start_isolated_app(P)
 
     @classmethod
     def tearDownClass(cls):
         cls.app.destroy()
+        cls._restore()
 
     def setUp(self):
         self.app.state_obj["contracts"] = {
