@@ -47,6 +47,14 @@ def bind_wraplength(label, container=None, pad=8):
     target = container if container is not None else label.master
 
     def _sync(event=None):
+        # The container outlives labels that are rebuilt on refresh, and a
+        # "+"-added binding cannot be removed individually — so a stale
+        # callback must simply do nothing rather than raise.
+        try:
+            if not label.winfo_exists():
+                return
+        except Exception:
+            return
         width = (event.width if event is not None else target.winfo_width()) - pad * 2
         if width > 40:
             label.configure(wraplength=width)
@@ -162,15 +170,17 @@ class SectionTitle(tk.Frame):
 class PillButton(tk.Canvas):
     """Fully rounded button with hover/press states, drawn on a canvas."""
 
+    #: variant -> (fill token or None, ink token or None, border token or None)
+    #: an ink of ``None`` means "pick whichever of dark/white reads on the
+    #: fill", which is what keeps bright dark-palette fills legible.
     VARIANTS = {
-        # variant -> (fill token, ink token, border token or None)
-        "primary": ("brand", "on_brand", None),
+        "primary": ("brand", None, None),
         "soft":    ("brand_soft", "brand_ink", None),
         "ghost":   (None, "ink_2", "stroke"),
         "quiet":   (None, "ink_2", None),
-        "mint":    ("mint", "on_brand", None),
-        "rose":    ("rose", "on_brand", None),
-        "amber":   ("amber", "on_brand", None),
+        "mint":    ("mint", None, None),
+        "rose":    ("rose", None, None),
+        "amber":   ("amber", None, None),
     }
 
     def __init__(self, master, theme: Theme, text, command=None, icon="",
@@ -236,9 +246,10 @@ class PillButton(tk.Canvas):
     # -- paint ----------------------------------------------------------
     def _colors(self):
         t = self.theme
+        from .theme import readable_ink
         fill_tok, ink_tok, border_tok = self.VARIANTS[self._variant]
         fill = t.c(fill_tok) if fill_tok else self._ground
-        ink = t.c(ink_tok)
+        ink = t.c(ink_tok) if ink_tok else readable_ink(fill)
         border = t.c(border_tok) if border_tok else ""
         if not self._enabled:
             return mix(self._ground, t.c("stroke"), 0.6), t.c("ink_3"), border
@@ -288,9 +299,10 @@ class IconBubble(tk.Canvas):
     def _draw(self):
         self.delete("all")
         s = self._size
-        strong, soft = self.theme.tone(self._tone)
+        _strong, soft = self.theme.tone(self._tone)
         pr.round_rect(self, 0, 0, s, s, radius=self._radius, fill=soft)
-        self.create_text(s / 2, s / 2 + 1, text=self._glyph, fill=strong,
+        self.create_text(s / 2, s / 2 + 1, text=self._glyph,
+                         fill=self.theme.tone_ink(self._tone),
                          font=(self.theme.family, max(10, int(s * 0.44))))
 
 
@@ -331,7 +343,8 @@ class Chip(tk.Canvas):
             return
         strong, soft = self.theme.tone(self._tone)
         fill = strong if self._solid else soft
-        ink = self.theme.c("on_brand") if self._solid else strong
+        ink = (self.theme.on_tone(self._tone) if self._solid
+               else self.theme.tone_ink(self._tone))
         pr.pill(self, 0, 0, w, h, fill=fill)
         self.create_text(w / 2, h / 2, text=self._text, fill=ink, font=self._font)
 
@@ -941,13 +954,15 @@ class HeroBanner(tk.Canvas):
                              fill=ink, font=f_metric)
             my += line_height(self, f_metric) + 8
             if self.metric_delta:
+                from .theme import readable_ink
                 strong, _soft = t.tone(self.metric_delta_tone)
+                chip_fill = mix(c2, strong, 0.85)
                 chip_h = line_height(self, f_chip) + 8
                 tw = pr.chip_text_width(t.size("caption"), self.metric_delta, pad=12)
-                pr.pill(self, mx - tw, my, mx, my + chip_h,
-                        fill=mix(c2, strong, 0.85))
+                pr.pill(self, mx - tw, my, mx, my + chip_h, fill=chip_fill)
                 self.create_text(mx - tw / 2, my + chip_h / 2,
-                                 text=self.metric_delta, fill="#ffffff",
+                                 text=self.metric_delta,
+                                 fill=readable_ink(chip_fill),
                                  font=f_chip)
 
         # Action pills along the bottom-left.

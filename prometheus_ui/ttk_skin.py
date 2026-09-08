@@ -131,10 +131,13 @@ def apply_ttk_skin(root, theme: Theme, row_height: int | None = None) -> bool:
 
         # -- notebooks ----------------------------------------------------
         style.configure("TNotebook", background=bg, borderwidth=0,
-                        tabmargins=(6, 6, 6, 0))
-        style.configure("TNotebook.Tab", font=body_bold, padding=(16, 9),
-                        background=surface_3, foreground=ink_2,
-                        borderwidth=0)
+                        tabmargins=(4, 6, 4, 0))
+        # Analysis carries ten sub-tabs. Padding generous enough for a
+        # two-tab notebook truncates every label there, so tabs stay on the
+        # caption size: bold keeps them legible, compact keeps them whole.
+        style.configure("TNotebook.Tab", font=theme.font("caption"),
+                        padding=(10, 8), background=surface_3,
+                        foreground=ink_2, borderwidth=0)
         style.map("TNotebook.Tab",
                   background=[("selected", surface), ("active", surface_2)],
                   foreground=[("selected", theme.c("brand_ink"))],

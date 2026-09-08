@@ -99,6 +99,54 @@ CLR = {
     "dark2":    "#111c31",   # dark card
 }
 
+# ══════════════════════════════════════════════════════════════════════
+# V10.10 MODERN INTERFACE ("Aurora")
+# The V8 tokens above still drive every legacy screen. The prometheus_ui
+# package adds the modern shell, the CBOT Command Center and the ttk skin
+# on top of them. It is imported defensively: if the package is missing or
+# fails to load, the app falls back to the classic notebook chrome rather
+# than refusing to start.
+# ══════════════════════════════════════════════════════════════════════
+try:
+    from prometheus_ui import (theme_for as _ui_theme_for,
+                               apply_ttk_skin as _ui_apply_ttk_skin,
+                               FLAT_NOTEBOOK_STYLE as _UI_FLAT_NOTEBOOK,
+                               UI_KIT_VERSION as _UI_KIT_VERSION)
+    from prometheus_ui.shell import ModernShell as _UIModernShell
+    from prometheus_ui.cbot_console import (CBOTFeed as _UICBOTFeed,
+                                            CBOTCommandCenter as _UICBOTConsole)
+    HAS_MODERN_UI = True
+except Exception:
+    HAS_MODERN_UI = False
+    _UI_KIT_VERSION = "unavailable"
+
+#: Rail destinations, in daily-workflow order. ``tab`` names the App
+#: attribute holding that notebook page, so navigation stays identity-based
+#: rather than index-based (tab order has changed before and will again).
+MODERN_DESTINATIONS = [
+    {"key": "cbot", "tab": "tab_cbot_outer", "label": "CBOT Desk",
+     "glyph": "◈", "section": "Market", "title": "CBOT Command Center",
+     "subtitle": "Board, basis and the tons still exposed to it"},
+    {"key": "home", "tab": "tab_home", "label": "Home", "glyph": "⌂",
+     "section": "Market", "title": "Home",
+     "subtitle": "Executive summary, alerts and open position"},
+    {"key": "contracts", "tab": "tab_contracts_group", "label": "Contracts",
+     "glyph": "▤", "section": "Transact", "title": "Contracts",
+     "subtitle": "Imports · local purchases · CBOT slots"},
+    {"key": "calculate", "tab": "tab_single_outer", "label": "Calculate",
+     "glyph": "∑", "section": "Decide", "title": "Calculate",
+     "subtitle": "Deal evaluator and scenario what-if"},
+    {"key": "analysis", "tab": "tab_analysis_outer", "label": "Analysis",
+     "glyph": "◔", "section": "Decide", "title": "Analysis",
+     "subtitle": "Performance · basis · inventory vs market · savings"},
+    {"key": "consumption", "tab": "tab_consumption_outer", "label": "Consumption",
+     "glyph": "⌛", "section": "Operate", "title": "Consumption",
+     "subtitle": "Stock, burn rate and coverage"},
+    {"key": "setup", "tab": "tab_setup_outer", "label": "Setup & Data",
+     "glyph": "⚙", "section": "Operate", "title": "Setup & Data",
+     "subtitle": "Suppliers · commodities · market data · backups"},
+]
+
 DATE_ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _DATE_DMY_RE = re.compile(r"^(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{4})$")
 
@@ -3287,10 +3335,267 @@ class App(tk.Tk):
         except Exception:
             pass
 
+    # ══════════════════════════════════════════════════════════════════
+    #  MODERN INTERFACE ("Aurora")  — shell, theme and the CBOT console.
+    #
+    #  Everything here is additive and defensive: the notebook, every
+    #  existing screen and every refresh path keep working unchanged. If
+    #  any part of the modern chrome fails to build, the app falls back to
+    #  the classic notebook rather than failing to start.
+    # ══════════════════════════════════════════════════════════════════
+    def _modern_ui_enabled(self):
+        """True when the kit imported and the user has not opted out."""
+        if not HAS_MODERN_UI:
+            return False
+        return bool(self.state_obj.setdefault("ui", {})
+                    .setdefault("modern_interface", True))
+
+    def _modern_palette(self):
+        palette = str(self.state_obj.setdefault("ui", {})
+                      .setdefault("interface_palette", "day")).lower()
+        return palette if palette in ("day", "night") else "day"
+
+    def _init_modern_theme(self):
+        """Build the Aurora theme and skin ttk with it. Returns success."""
+        self.ui_theme = None
+        if not self._modern_ui_enabled():
+            return False
+        try:
+            scale = getattr(self, "_font_scale", 1.0) or 1.0
+            self.ui_theme = _ui_theme_for(self._modern_palette(),
+                                          font_scale=scale, family=FONT_FAMILY)
+            if not _ui_apply_ttk_skin(self, self.ui_theme,
+                                      row_height=max(26, round(28 * scale))):
+                self.ui_theme = None
+                return False
+            self.configure(bg=self.ui_theme.c("bg"))
+            return True
+        except Exception as e:
+            log_exception(e, "_init_modern_theme")
+            self.ui_theme = None
+            return False
+
+    def _build_modern_shell(self):
+        """Create the rail + top bar that host the existing notebook."""
+        self.shell = None
+        if getattr(self, "ui_theme", None) is None:
+            return None
+        try:
+            self.shell = _UIModernShell(
+                self, self.ui_theme, MODERN_DESTINATIONS,
+                on_navigate=self._on_shell_navigate,
+                brand="Prometheus",
+                brand_sub=f"Procurement {APP_BUILD.split('-')[0]}",
+                on_toggle_theme=self._on_shell_theme_toggle,
+                on_search=self._on_shell_search)
+            self.shell.pack(fill="both", expand=True)
+            for seq in ("<Control-k>", "<Control-K>"):
+                self.bind_all(seq, self._open_command_palette, add="+")
+        except Exception as e:
+            log_exception(e, "_build_modern_shell")
+            self.shell = None
+        return self.shell
+
+    def _shell_tab_widget(self, key):
+        dest = next((d for d in MODERN_DESTINATIONS if d["key"] == key), None)
+        return getattr(self, dest["tab"], None) if dest else None
+
+    def _on_shell_navigate(self, key):
+        widget = self._shell_tab_widget(key)
+        if widget is None:
+            return
+        try:
+            self.nb.select(widget)
+        except Exception as e:
+            log_exception(e, f"_on_shell_navigate:{key}")
+
+    def _sync_shell_nav(self):
+        """Mirror the notebook's current page onto the rail and top bar."""
+        shell = getattr(self, "shell", None)
+        if shell is None:
+            return
+        try:
+            current = self.nb.nametowidget(self.nb.select())
+        except Exception:
+            return
+        for dest in MODERN_DESTINATIONS:
+            if getattr(self, dest["tab"], None) is current:
+                shell.select(dest["key"])
+                return
+
+    def _on_shell_search(self, query):
+        """The top-bar field is a jump box, not a data search."""
+        query = (query or "").strip()
+        if not query:
+            return
+        for dest in MODERN_DESTINATIONS:
+            if query.lower() in dest["label"].lower():
+                self._on_shell_navigate(dest["key"])
+                return
+        self._open_command_palette()
+
+    def _open_command_palette(self, _event=None):
+        shell = getattr(self, "shell", None)
+        if shell is None:
+            return
+        try:
+            shell.open_palette([
+                {"key": "_refresh", "label": "Refresh market data",
+                 "glyph": "⟳", "hint": "Action",
+                 "command": lambda: self.refresh_all(fetch_market=True)},
+                {"key": "_glossary", "label": "Open glossary", "glyph": "?",
+                 "hint": "Action", "command": self._show_glossary},
+                {"key": "_theme", "label": "Switch day / night theme",
+                 "glyph": "◐", "hint": "Action",
+                 "command": lambda: self._on_shell_theme_toggle(
+                     self._modern_palette() == "day")},
+            ])
+        except Exception as e:
+            log_exception(e, "_open_command_palette")
+        return "break"
+
+    def _on_shell_theme_toggle(self, dark):
+        """Persist the palette choice and rebuild the interface in place."""
+        try:
+            self.state_obj.setdefault("ui", {})["interface_palette"] = (
+                "night" if dark else "day")
+            self._mark_dirty()
+            save_state(self.state_obj)
+            self._autosave_dirty = False
+        except Exception as e:
+            log_exception(e, "_on_shell_theme_toggle:save")
+        self._rebuild_interface()
+
+    def _rebuild_interface(self):
+        """Tear down and rebuild the chrome after a theme/layout change.
+
+        Only the view is rebuilt: ``state_obj`` and the background timers
+        started in ``__init__`` are left alone, so no fetch loop is
+        duplicated and no unsaved edit is lost.
+        """
+        try:
+            self._page_scroll_canvases = []
+            for child in list(self.winfo_children()):
+                child.destroy()
+            self.shell = None
+            # Builders run in a fixed order and some of them refresh as they
+            # go. Any attribute still pointing at a widget from the torn-down
+            # tree would be used by those early refreshes and raise, so drop
+            # the dead references before rebuilding.
+            self._drop_dead_widget_refs()
+            self._apply_global_style()
+            self._build_top_bar()
+            self._build_tabs()
+            self._build_status_bar()
+            self.refresh_all()
+        except Exception as e:
+            log_exception(e, "_rebuild_interface")
+            try:
+                messagebox.showwarning(
+                    APP_NAME,
+                    "The interface could not be rebuilt in place.\n\n"
+                    "Your data is safe and saved. Please restart Prometheus "
+                    "to finish applying the change.")
+            except Exception:
+                pass
+
+    @staticmethod
+    def _is_dead_widget(value):
+        if not isinstance(value, tk.Misc):
+            return False
+        try:
+            return not value.winfo_exists()
+        except Exception:
+            return True
+
+    def _drop_dead_widget_refs(self):
+        """Delete attributes referencing widgets that no longer exist."""
+        for name, value in list(self.__dict__.items()):
+            if name.startswith("__"):
+                continue
+            dead = self._is_dead_widget(value)
+            if not dead and isinstance(value, (list, tuple, set)):
+                dead = any(self._is_dead_widget(v) for v in value)
+            if not dead and isinstance(value, dict):
+                dead = any(self._is_dead_widget(v) for v in value.values())
+            if dead:
+                try:
+                    delattr(self, name)
+                except Exception:
+                    pass
+
+    # ── CBOT Command Center ───────────────────────────────────────────
+    def _build_cbot_console(self):
+        """Build the modern CBOT screen inside its scrollable tab."""
+        self.cbot_console = None
+        if getattr(self, "ui_theme", None) is None:
+            return None
+        try:
+            feed = _UICBOTFeed(self.state_obj)
+            self.cbot_console = _UICBOTConsole(
+                self.tab_cbot, self.ui_theme, feed,
+                actions={
+                    "refresh_quotes": lambda: self.refresh_all(fetch_market=True),
+                    "open_basis": lambda: self._jump_to_analysis_subtab("tab_basis"),
+                    "open_slots": lambda: self._jump_to_contracts_subtab("tab_slots_outer"),
+                    "open_contracts": lambda: self._jump_to_contracts_subtab("tab_contracts_outer"),
+                    "open_contract": self._jump_to_contract,
+                })
+            self.cbot_console.pack(fill="both", expand=True)
+        except Exception as e:
+            log_exception(e, "_build_cbot_console")
+            self.cbot_console = None
+        return self.cbot_console
+
+    def refresh_cbot_console(self):
+        console = getattr(self, "cbot_console", None)
+        if console is None or self._is_dead_widget(console):
+            return
+        try:
+            console.feed = _UICBOTFeed(self.state_obj)
+            console.refresh()
+        except Exception as e:
+            log_exception(e, "refresh_cbot_console")
+
+    def _jump_to_analysis_subtab(self, attr):
+        try:
+            self.nb.select(self.tab_analysis_outer)
+            target = getattr(self, attr, None)
+            if target is not None and hasattr(self, "_an_nb"):
+                self._an_nb.select(target)
+        except Exception as e:
+            log_exception(e, f"_jump_to_analysis_subtab:{attr}")
+
+    def _jump_to_contracts_subtab(self, attr):
+        try:
+            self.nb.select(self.tab_contracts_group)
+            target = getattr(self, attr, None)
+            if target is not None and hasattr(self, "_contracts_nb"):
+                self._contracts_nb.select(target)
+        except Exception as e:
+            log_exception(e, f"_jump_to_contracts_subtab:{attr}")
+
+    def _jump_to_contract(self, cid):
+        """Open the Contracts workspace focused on one contract."""
+        self._jump_to_contracts_subtab("tab_contracts_outer")
+        try:
+            if hasattr(self, "contract_tree") and self.contract_tree.exists(cid):
+                self.contract_tree.selection_set(cid)
+                self.contract_tree.see(cid)
+                self.contract_tree.focus(cid)
+        except Exception as e:
+            log_exception(e, f"_jump_to_contract:{cid}")
+
     def _apply_global_style(self):
-        """V8 design tokens applied once, app-wide: one base font, readable
-        trees, consistent notebook chrome. Individual screens must not
-        override these except through the token constants."""
+        """Apply the app-wide chrome.
+
+        V10.10: the Aurora skin is tried first — it restyles ttk itself, so
+        every existing screen picks up the modern palette, spacing and type
+        scale without being rewritten. The V8 chrome below stays as the
+        fallback whenever the modern kit is unavailable or switched off.
+        """
+        if self._init_modern_theme():
+            return
         try:
             style = ttk.Style(self)
             style.configure(".", font=(FONT_FAMILY, FS_BODY))
@@ -3448,7 +3753,25 @@ class App(tk.Tk):
         except Exception as e:
             log_exception(e, "_daily_fx_store")
     def _build_status_bar(self):
-        bar = tk.Frame(self, bg="#1a2030", height=22)
+        # Colours come from the Aurora tokens when the modern interface is
+        # on, and from the historical dark strip otherwise.
+        theme = getattr(self, "ui_theme", None)
+        if theme is not None:
+            bar_bg, sep_c = theme.c("surface"), theme.c("stroke")
+            c_save, c_info = theme.c("mint"), theme.c("ink_2")
+            c_warn, c_err = theme.c("amber"), theme.c("rose")
+            sb_font = theme.font("caption")
+        else:
+            bar_bg, sep_c = "#1a2030", "#2a3a50"
+            c_save, c_info = "#4a9a4a", "#6a9abf"
+            c_warn, c_err = "#8a7a1a", "#ff8a8a"
+            sb_font = ("Segoe UI", 9)
+
+        shell = getattr(self, "shell", None)
+        host = shell.statusbar_host if shell is not None else self
+        if shell is not None:
+            tk.Frame(host, bg=sep_c, height=1).pack(fill="x", side="top")
+        bar = tk.Frame(host, bg=bar_bg, height=24)
         bar.pack(fill="x", side="bottom")
         bar.pack_propagate(False)
 
@@ -3456,24 +3779,28 @@ class App(tk.Tk):
         self._sb_fx_var   = tk.StringVar(value="FX: —")
         self._sb_cbot_var = tk.StringVar(value="CBOT: —")
         self._sb_qual_var = tk.StringVar(value="")
-        self._sb_ver_var  = tk.StringVar(value=APP_NAME)
+        # Name the interface kit too: a support call about "the new look"
+        # should be able to read which one is running.
+        self._sb_ver_var  = tk.StringVar(
+            value=f"{APP_NAME} · UI {_UI_KIT_VERSION}" if theme is not None
+            else APP_NAME)
 
-        def _lbl(var, fg="#6a8faa", side="left", padx=(10, 14)):
-            tk.Label(bar, textvariable=var, bg="#1a2030", fg=fg,
-                     font=("Segoe UI", 9)).pack(side=side, padx=padx)
+        def _lbl(var, fg=c_info, side="left", padx=(10, 14)):
+            tk.Label(bar, textvariable=var, bg=bar_bg, fg=fg,
+                     font=sb_font).pack(side=side, padx=padx)
 
-        _lbl(self._sb_save_var,  fg="#4a9a4a")
-        tk.Frame(bar, bg="#2a3a50", width=1).pack(side="left", fill="y", pady=3)
-        _lbl(self._sb_fx_var,   fg="#6a9abf", padx=(10, 4))
-        tk.Frame(bar, bg="#2a3a50", width=1).pack(side="left", fill="y", pady=3)
-        _lbl(self._sb_cbot_var, fg="#6a9abf", padx=(10, 4))
-        tk.Frame(bar, bg="#2a3a50", width=1).pack(side="left", fill="y", pady=3)
-        _lbl(self._sb_qual_var, fg="#8a7a1a", padx=(10, 4))
+        _lbl(self._sb_save_var,  fg=c_save)
+        tk.Frame(bar, bg=sep_c, width=1).pack(side="left", fill="y", pady=3)
+        _lbl(self._sb_fx_var,   fg=c_info, padx=(10, 4))
+        tk.Frame(bar, bg=sep_c, width=1).pack(side="left", fill="y", pady=3)
+        _lbl(self._sb_cbot_var, fg=c_info, padx=(10, 4))
+        tk.Frame(bar, bg=sep_c, width=1).pack(side="left", fill="y", pady=3)
+        _lbl(self._sb_qual_var, fg=c_warn, padx=(10, 4))
 
         # ── Data-issues chip: silent failures become a visible signal ────
         self._sb_err_var = tk.StringVar(value="")
         self._sb_err_lbl = tk.Label(bar, textvariable=self._sb_err_var,
-                                    bg="#1a2030", fg="#ff8a8a", cursor="hand2",
+                                    bg=bar_bg, fg=c_err, cursor="hand2",
                                     font=(FONT_FAMILY, FS_BODY, "bold"))
         self._sb_err_lbl.pack(side="left", padx=(10, 4))
         self._sb_err_lbl.bind("<Button-1>", lambda e: self._show_error_center())
@@ -3481,14 +3808,16 @@ class App(tk.Tk):
 
         # App version / build — always visible on the right, so a stale exe
         # floating on a shared PC is immediately identifiable
+        c_faint = theme.c("ink_3") if theme is not None else "#3a5a78"
+        c_hint = theme.c("ink_3") if theme is not None else "#2a3a50"
         tk.Label(bar, textvariable=self._sb_ver_var,
-                 bg="#1a2030", fg="#3a5a78", font=("Segoe UI", 9)).pack(
+                 bg=bar_bg, fg=c_faint, font=sb_font).pack(
                      side="right", padx=(10, 14))
-        tk.Frame(bar, bg="#2a3a50", width=1).pack(side="right", fill="y", pady=3)
+        tk.Frame(bar, bg=sep_c, width=1).pack(side="right", fill="y", pady=3)
 
         tk.Label(bar,
-                 text="Ctrl+R = Refresh  |  Ctrl+S = Save Snapshot  |  Ctrl+E = Export PDF",
-                 bg="#1a2030", fg="#2a3a50", font=("Segoe UI", 9)).pack(
+                 text="Ctrl+R Refresh  ·  Ctrl+S Snapshot  ·  Ctrl+E Export  ·  Ctrl+K Jump",
+                 bg=bar_bg, fg=c_hint, font=sb_font).pack(
                      side="right", padx=10)
 
         self.bind_all("<Control-r>", lambda e: self.refresh_all(fetch_market=True))
@@ -3662,8 +3991,36 @@ class App(tk.Tk):
             if feed_status:
                 qual = (qual + "  |  " if qual else "") + feed_status
             self._sb_qual_var.set(qual)
+            self._refresh_shell_chips(fx_price, cbot_corn, conf, issue_count)
         except Exception as e:
             log_exception(e, "_set_statusbar")
+
+    def _refresh_shell_chips(self, fx_price, cbot_corn, confidence, issue_count):
+        """Mirror the live market numbers into the modern top bar."""
+        shell = getattr(self, "shell", None)
+        if shell is None:
+            return
+        try:
+            topbar = shell.topbar
+            topbar.set_chip("fx",
+                            f"FX {fx_price:,.4f}" if fx_price else "FX —",
+                            "sky" if fx_price else "rose")
+            topbar.set_chip("cbot",
+                            f"CORN {cbot_corn:,.2f}¢" if cbot_corn else "CORN —",
+                            "brand" if cbot_corn else "rose")
+            tone = {"HIGH": "mint", "MEDIUM": "amber", "LOW": "rose"}.get(
+                confidence, "sky")
+            if confidence:
+                topbar.set_chip("quality", f"● {confidence}", tone)
+            else:
+                topbar.remove_chip("quality")
+            if issue_count:
+                topbar.set_chip("issues", f"⚠ {issue_count}", "rose")
+            else:
+                topbar.remove_chip("issues")
+            shell.sidebar.set_badge("cbot", len(getattr(self, "_hd_action_alerts", []) or []))
+        except Exception as e:
+            log_exception(e, "_refresh_shell_chips")
 
     # ── Shared filtered contract-picker engine ──────────────────────
     # Every contract selector should behave the same way: newest-first,
@@ -3842,8 +4199,15 @@ class App(tk.Tk):
         self.on_select_contract()
 
     def _build_top_bar(self):
-        bar = ttk.Frame(self, padding=(10,6))
+        # The shell owns the window layout when the modern interface is on;
+        # this legacy toolbar then lives inside it instead of at the root.
+        self._build_modern_shell()
+        shell = getattr(self, "shell", None)
+        host = shell.toolbar_host if shell is not None else self
+        bar = ttk.Frame(host, padding=(10, 6))
         bar.pack(fill="x")
+        if shell is not None:
+            shell.show_toolbar(True)
 
         ttk.Label(bar, text="Selected Contract:").pack(side="left")
         self.contract_filter_var = tk.StringVar(
@@ -3873,8 +4237,10 @@ class App(tk.Tk):
             side="left", padx=(0, 8))
         # Backup / Load / Reset intentionally NOT here: destructive and
         # data-management actions live in  Setup & Data → Data Management.
-        ttk.Label(bar, text="Backup · restore · reset →  ⚙ Setup & Data",
-                  font=(FONT_FAMILY, FS_BODY), foreground=CLR["muted"]).pack(side="left")
+        if getattr(self, "shell", None) is None:
+            ttk.Label(bar, text="Backup · restore · reset →  ⚙ Setup & Data",
+                      font=(FONT_FAMILY, FS_BODY),
+                      foreground=CLR["muted"]).pack(side="left")
 
         self.status_var = tk.StringVar(value="")
         ttk.Label(bar, textvariable=self.status_var).pack(side="right")
@@ -6126,7 +6492,10 @@ class App(tk.Tk):
     # completion state of initial setup and disappears once done.
     # ------------------------------------------------------------------
     def _build_onboarding_strip(self):
-        self._onb_frame = ttk.Frame(self, padding=(10, 4))
+        # `_refresh_onboarding_strip` packs this with `before=self.nb`, which
+        # Tk only allows between siblings — so it must share the notebook's
+        # parent, wherever the notebook currently lives.
+        self._onb_frame = ttk.Frame(self.nb.master, padding=(10, 4))
         self.nb.bind("<<NotebookTabChanged>>", self._on_tab_change)
         self._refresh_onboarding_strip()
 
@@ -6178,8 +6547,11 @@ class App(tk.Tk):
                 self.refresh_savings_tracker()
                 self.refresh_exposure_risk()
                 self.refresh_basis_tracker()
+            elif sel is getattr(self, "tab_cbot_outer", None):
+                self.refresh_cbot_console()
         except Exception:
             pass
+        self._sync_shell_nav()
         self._refresh_onboarding_strip()
 
     # ------------------------------------------------------------------
@@ -6315,7 +6687,14 @@ class App(tk.Tk):
         return None
 
     def _build_tabs(self):
-        self.nb = ttk.Notebook(self)
+        shell = getattr(self, "shell", None)
+        if shell is not None:
+            # The rail navigates the notebook, so its own tab strip is
+            # hidden by style rather than by removing the notebook — every
+            # existing screen keeps the parent it was written against.
+            self.nb = ttk.Notebook(shell.body, style=_UI_FLAT_NOTEBOOK)
+        else:
+            self.nb = ttk.Notebook(self)
         self.nb.pack(fill="both", expand=True)
 
         # ── Main navigation: 6 destinations (V8 information architecture) ─
@@ -6327,6 +6706,12 @@ class App(tk.Tk):
         #   ⚙ Setup & Data   suppliers · commodities · market data · data mgmt
         # Tab order mirrors the daily loop: see status → transact → decide
         # → analyse → operate → configure.
+
+        # CBOT Command Center leads the rail when the modern kit is present.
+        self.tab_cbot_outer = None
+        if shell is not None:
+            self.tab_cbot_outer = ttk.Frame(self.nb)
+            self.nb.add(self.tab_cbot_outer, text="◈ CBOT Desk")
 
         self.tab_home              = ttk.Frame(self.nb)
         self.tab_contracts_group   = ttk.Frame(self.nb)
@@ -6403,7 +6788,17 @@ class App(tk.Tk):
         # Origin Compare and the Savings Tracker (single home for each).
         self._build_analysis_tab()
 
+        if self.tab_cbot_outer is not None:
+            self.tab_cbot = self._make_scrollable_tab(self.tab_cbot_outer, padding=6)
+            try:
+                self.tab_cbot.master._force_viewport_width = True
+                self.tab_cbot.master._sync_scrollregion()
+            except Exception:
+                pass
+            self._build_cbot_console()
+
         self._build_onboarding_strip()
+        self._sync_shell_nav()
 
 
     # ------------------------------------------------------------------
@@ -8482,10 +8877,24 @@ class App(tk.Tk):
                  font=("Segoe UI", 18, "bold")).grid(row=0, column=0, sticky="w", padx=16, pady=(14, 0))
         tk.Label(hero, text="Executive overview of procurement performance",
                  bg="#07111f", fg="#7890a8", font=("Segoe UI", 9)).grid(row=1, column=0, sticky="w", padx=16, pady=(0, 3))
-        tk.Label(hero, textvariable=self.hd_formula_rule_var,
-                 bg="#07111f", fg="#60a5fa", font=("Segoe UI", 9, "bold")).grid(row=2, column=0, sticky="w", padx=16, pady=(0, 4))
-        tk.Label(hero, textvariable=self.hd_market_status_var,
-                 bg="#07111f", fg="#9fb3c8", font=("Segoe UI", 9)).grid(row=3, column=0, sticky="w", padx=16, pady=(0, 4))
+        # These two lines are long. Left-anchored and wrapped to the live
+        # hero width, they stay readable; centred (Tk's default) they get
+        # clipped at BOTH ends as soon as the window is narrower than the
+        # text, which loses the first word of each sentence.
+        _hero_rule = tk.Label(hero, textvariable=self.hd_formula_rule_var,
+                              bg="#07111f", fg="#60a5fa", anchor="w",
+                              justify="left", font=("Segoe UI", 9, "bold"))
+        _hero_rule.grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 4))
+        _hero_status = tk.Label(hero, textvariable=self.hd_market_status_var,
+                                bg="#07111f", fg="#9fb3c8", anchor="w",
+                                justify="left", font=("Segoe UI", 9))
+        _hero_status.grid(row=3, column=0, sticky="ew", padx=16, pady=(0, 4))
+
+        def _hero_wrap(event):
+            width = max(240, event.width - 420)
+            for _lbl in (_hero_rule, _hero_status):
+                _lbl.configure(wraplength=width)
+        hero.bind("<Configure>", _hero_wrap)
         self.hd_golive_var = tk.StringVar(value="💎 Value created since go-live: —")
         tk.Label(hero, textvariable=self.hd_golive_var,
                  bg="#07111f", fg="#4ade80", font=("Segoe UI", 12, "bold")).grid(
@@ -12974,11 +13383,63 @@ class App(tk.Tk):
                   foreground=CLR["danger"], wraplength=1150).grid(row=2, column=0, columnspan=4,
                                                 sticky="w", pady=(6, 0))
 
+        # ── Appearance ───────────────────────────────────────────────────
+        appearance = ttk.LabelFrame(
+            p, text="🎨 Appearance — interface style and theme", padding=10)
+        appearance.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+
+        self._ui_modern_var = tk.BooleanVar(value=self._modern_ui_enabled())
+        self._ui_palette_var = tk.StringVar(
+            value="Night" if self._modern_palette() == "night" else "Day")
+
+        ttk.Checkbutton(
+            appearance,
+            text="Modern interface (Aurora) — sidebar navigation, CBOT Command "
+                 "Center and the redesigned chrome",
+            variable=self._ui_modern_var).grid(row=0, column=0, columnspan=3,
+                                               sticky="w")
+        ttk.Label(appearance, text="Theme").grid(row=1, column=0, sticky="w",
+                                                 pady=(8, 0), padx=(0, 8))
+        ttk.Combobox(appearance, textvariable=self._ui_palette_var, width=10,
+                     values=["Day", "Night"], state="readonly").grid(
+                         row=1, column=1, sticky="w", pady=(8, 0))
+
+        def _save_appearance():
+            ui = self.state_obj.setdefault("ui", {})
+            ui["modern_interface"] = bool(self._ui_modern_var.get())
+            ui["interface_palette"] = (
+                "night" if self._ui_palette_var.get().lower().startswith("n")
+                else "day")
+            save_state(self.state_obj)
+            self._autosave_dirty = False
+            self._rebuild_interface()
+
+        ttk.Button(appearance, text="Apply Appearance",
+                   command=_save_appearance).grid(row=1, column=2, sticky="w",
+                                                  padx=(8, 0), pady=(8, 0))
+        ttk.Label(appearance,
+                  text=("Applied immediately — no restart needed. Turning the "
+                        "modern interface off restores the classic tab bar; "
+                        "every screen, calculation and export is identical "
+                        "either way."
+                        if HAS_MODERN_UI else
+                        "The modern interface package (prometheus_ui) is not "
+                        "available in this build, so the classic tab bar is "
+                        "in use."),
+                  foreground=CLR["muted"], wraplength=1000).grid(
+                      row=2, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        if not HAS_MODERN_UI:
+            for _child in appearance.winfo_children()[:3]:
+                try:
+                    _child.configure(state="disabled")
+                except Exception:
+                    pass
+
         # ── CEO Email Digest ─────────────────────────────────────────────
         email_ui = self.state_obj.get("ui", {}) or {}
         email_frame = ttk.LabelFrame(
             p, text="📧 CEO Email Digest — send the CEO Brief PDF by email", padding=10)
-        email_frame.grid(row=4, column=0, sticky="ew", pady=(0, 10))
+        email_frame.grid(row=5, column=0, sticky="ew", pady=(0, 10))
         for i in range(6):
             email_frame.columnconfigure(i, weight=0)
 
@@ -13057,7 +13518,7 @@ class App(tk.Tk):
                       row=5, column=0, columnspan=6, sticky="w", pady=(6, 0))
 
         imports = ttk.LabelFrame(p, text="Imports — reduce manual daily feeding", padding=10)
-        imports.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        imports.grid(row=2, column=0, sticky="ew", pady=(0, 10))
         ttk.Button(imports, text="Import Local Prices (Excel / CSV)…",
                    command=self.import_local_prices_file).grid(row=0, column=0, padx=(0, 8), sticky="w")
         ttk.Button(imports, text="Import Contracts CSV…",
@@ -13069,7 +13530,7 @@ class App(tk.Tk):
                                                 sticky="w", pady=(4, 0))
 
         bk = ttk.LabelFrame(p, text="Backup & Restore", padding=10)
-        bk.grid(row=2, column=0, sticky="ew", pady=(0, 10))
+        bk.grid(row=3, column=0, sticky="ew", pady=(0, 10))
         ttk.Button(bk, text="Backup data to JSON…",
                    command=self.export_json).grid(row=0, column=0, padx=(0, 8))
         ttk.Button(bk, text="Load data from JSON…",
@@ -13082,7 +13543,7 @@ class App(tk.Tk):
                                                 sticky="w", pady=(4, 0))
 
         dz = ttk.LabelFrame(p, text="Danger Zone", padding=10)
-        dz.grid(row=3, column=0, sticky="ew")
+        dz.grid(row=4, column=0, sticky="ew")
         tk.Button(dz, text="Reset ALL data…", command=self.reset_data,
                   bg=CLR["danger"], fg="white", relief="flat", cursor="hand2",
                   font=(FONT_FAMILY, FS_BODY, "bold"), padx=12, pady=4).grid(
@@ -28966,6 +29427,10 @@ class App(tk.Tk):
             self.refresh_risk_alerts()
         except Exception:
             pass
+        try:
+            self.refresh_cbot_console()
+        except Exception as e:
+            log_exception(e, "refresh_all→refresh_cbot_console")
         # Zebra-stripe the main tables (cheap, idempotent, applies to
         # whatever rows the refreshes above just inserted)
         for _tv_name in ("contract_tree", "lp_tree", "local_prices_tree",

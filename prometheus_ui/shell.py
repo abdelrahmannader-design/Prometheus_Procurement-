@@ -17,8 +17,7 @@ import tkinter as tk
 
 from . import primitives as pr
 from .theme import Theme, mix
-from .widgets import (Chip, IconBubble, PillButton, SearchField, ToggleSwitch,
-                      line_height, parent_bg)
+from .widgets import Chip, IconBubble, SearchField, ToggleSwitch, parent_bg
 
 __all__ = ["NavItem", "Sidebar", "TopBar", "ModernShell", "CommandPalette"]
 
@@ -341,7 +340,26 @@ class CommandPalette(tk.Toplevel):
         for seq in ("<Escape>", "<Return>", "<Down>", "<Up>"):
             self.search.entry.bind(seq, getattr(self, "_key_" + seq.strip("<>").lower()))
         self._render()
-        self.after(30, self.search.focus_input)
+        # The palette can be dismissed before this fires, and Tk complains
+        # about the orphaned callback, so cancel it on destroy.
+        self._focus_job = self.after(30, self._focus_search_if_alive)
+        self.bind("<Destroy>", self._cancel_focus_job, add="+")
+
+    def _cancel_focus_job(self, _event=None):
+        job, self._focus_job = getattr(self, "_focus_job", None), None
+        if job:
+            try:
+                self.after_cancel(job)
+            except Exception:
+                pass
+
+    def _focus_search_if_alive(self):
+        self._focus_job = None
+        try:
+            if self.winfo_exists():
+                self.search.focus_input()
+        except Exception:
+            pass
 
     # -- keys ------------------------------------------------------------
     def _key_escape(self, _e=None):
@@ -429,8 +447,10 @@ class ModernShell(tk.Frame):
         self._on_navigate = on_navigate
         self._collapsed = False
 
+        # Only the content row grows: the top bar, the hosted legacy
+        # toolbar and the status bar each keep their requested height.
         self.columnconfigure(1, weight=1)
-        self.rowconfigure(1, weight=1)
+        self.rowconfigure(2, weight=1)
 
         self.sidebar = Sidebar(self, theme, self._destinations,
                                on_navigate=self._navigate, brand=brand,
@@ -458,7 +478,6 @@ class ModernShell(tk.Frame):
 
         self.statusbar_host = tk.Frame(self, bg=theme.c("bg"))
         self.statusbar_host.grid(row=3, column=0, columnspan=2, sticky="ew")
-        self.rowconfigure(2, weight=1)
 
     # -- navigation ------------------------------------------------------
     def _navigate(self, key):

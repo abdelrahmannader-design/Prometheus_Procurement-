@@ -14,7 +14,7 @@ if not exist .venv\Scripts\python.exe (
 call .venv\Scripts\activate
 python -m pip install pyinstaller matplotlib openpyxl reportlab
 if errorlevel 1 goto :fail
-python -m PyInstaller --noconfirm --clean --windowed --onedir --name "Prometheus Procurement" --collect-all matplotlib --collect-all openpyxl --collect-all reportlab "Prometheus_V10_9_2.py"
+python -m PyInstaller --noconfirm --clean --windowed --onedir --name "Prometheus Procurement" --collect-all matplotlib --collect-all openpyxl --collect-all reportlab --collect-submodules prometheus_core --collect-submodules prometheus_ui "Prometheus_V10_9_2.py"
 if errorlevel 1 goto :fail
 echo.
 echo Build complete:

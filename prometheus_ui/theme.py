@@ -290,6 +290,33 @@ class Theme:
             key = "brand"
         return self.c(key), self.soft(key)
 
+    def tone_ink(self, kind: str) -> str:
+        """Text colour to use on a tone's *soft* tint.
+
+        The strong tone doubles as text on its own tint for every semantic
+        ramp — except brand in the dark palette, where the fill colour has
+        to stay dark enough for white button labels and is therefore too
+        close to its tint to be read as text. ``brand_ink`` exists for
+        exactly that case.
+        """
+        strong, soft = self.tone(kind)
+        if contrast_ratio(strong, soft) >= 4.5:
+            return strong
+        candidate = self.c("brand_ink") if strong == self.c("brand") else self.c("ink")
+        return candidate if contrast_ratio(candidate, soft) >= contrast_ratio(strong, soft) else strong
+
+    def on_tone(self, kind: str) -> str:
+        """Text colour for a label sitting on a tone's *solid* fill.
+
+        Semantic fills are deliberately bright in the dark palette, so a
+        white label is not always the readable choice. The candidates are
+        near-black and white rather than the palette inks, because the ink
+        token itself is light in the dark palette and would fail on a
+        bright fill in both directions.
+        """
+        strong, _soft = self.tone(kind)
+        return readable_ink(strong)
+
     def delta_tone(self, value, positive_is_good: bool = True) -> str:
         try:
             v = float(value)

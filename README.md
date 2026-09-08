@@ -22,6 +22,48 @@ The app continues to read/write the normal state file under:
 Documents\ImportDecisionApp\app_state.json
 ```
 
+## The interface
+
+Prometheus runs the **Aurora** interface: a left navigation rail grouped by
+the daily loop (Market / Transact / Decide / Operate), a top bar with the
+page title, live FX and CBOT chips and a jump box, and a `Ctrl+K` command
+palette for going straight to any screen.
+
+- **Day and Night themes.** Toggle from the top bar, or from
+  **Setup & Data → Appearance**. Applied immediately — no restart.
+- **Classic chrome is still there.** The same Appearance panel switches
+  back to the original tab bar. Every screen, calculation and export is
+  identical either way.
+- Keyboard: `Ctrl+K` jump · `Ctrl+R` refresh · `Ctrl+S` snapshot ·
+  `Ctrl+E` export PDF.
+
+## CBOT Command Center
+
+The first destination on the rail — everything the CBOT decision needs, on
+one screen, before you price anything:
+
+- Live board price for **CORN / SBM / SOYBEAN / WHEAT**, its 30-day move
+  and how old the stored quote is.
+- Indicative **replacement cost EGP/MT** from today's board, the
+  quantity-weighted premium of the open book and today's FX. If there is no
+  defensible premium, the figure is labelled *flat (zero basis)* rather
+  than presented as an estimate.
+- **Board history** over 30D / 90D / 6M / 1Y / All, with a hover readout.
+- **Price cover**: how much of the open book is priced, how much is still
+  exposed to CBOT, and how much value has no Form 4 FX yet.
+- **Where today sits** inside the stored 12-month band, and the goods-only
+  gap between CBOT-implied and the latest local all-in. Freight, clearing,
+  VAT and finance are *not* in that gap — Analysis → Inventory vs Market is
+  the landed comparison.
+- **Open price risk**: unpriced tons first, nearest delivery first, click
+  through to the contract.
+- **Signals**: stale quotes, tons unpriced inside the alert window, FX not
+  secured, and large 30-day board moves.
+
+All of it is read from the data the app already stores (`market_data`,
+`cbot_history`, `fx_history`, `local_prices`, `contracts`). Nothing on this
+screen invents a number: a missing input is shown as missing.
+
 ## Daily FIFO inventory
 
 Home now includes **Current FIFO Inventory**. Inventory membership is based on physical delivery and FIFO consumption, not the contract Open/Closed label:

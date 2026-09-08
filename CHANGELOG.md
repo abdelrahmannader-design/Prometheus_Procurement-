@@ -1,5 +1,74 @@
 # Changelog
 
+## Unreleased — Aurora: the modern interface
+
+The app's chrome has been rebuilt around a modern design system, and the
+CBOT workflow now has a screen of its own. Nothing about the calculations,
+the saved state file or the exports changed.
+
+**New `prometheus_ui` package** — a dependency-free Tk design system
+(`theme`, `primitives`, `widgets`, `charts`, `ttk_skin`, `shell`,
+`cbot_console`). Tk has no rounded rectangles, gradients or alpha channel,
+so those are reconstructed from polygons, per-scanline corner insets and
+pre-blended colours. One token set drives everything; screens are not
+allowed to hardcode a hex value.
+
+**New navigation shell** — a left rail with grouped destinations, badges
+and a collapse toggle, a top bar carrying the page title, live FX/CBOT/data
+-quality chips and a jump box, and a `Ctrl+K` command palette. The rail
+drives the existing notebook, whose own tab strip is hidden by style — so
+every existing screen keeps the parent it was written against and behaves
+exactly as before.
+
+**New screen: CBOT Command Center** (first destination on the rail). One
+place to look before pricing anything:
+
+- a live hero with the selected board, its 30-day move and quote age;
+- stat tiles for board price, indicative EGP/MT replacement cost, unpriced
+  tons and USD/EGP, each with its own sparkline;
+- board history for CORN / SBM / SOYBEAN / WHEAT over 30D / 90D / 6M / 1Y /
+  All, with a hover crosshair readout;
+- price cover: the open book split priced vs unpriced, plus FX-unsecured
+  value;
+- where today's board sits inside the stored 12-month band, and the
+  goods-only gap between CBOT-implied and local all-in;
+- open price risk, unpriced tons and nearest delivery first, clickable
+  through to the contract;
+- signals: stale quotes, tons unpriced inside the alert window, FX not yet
+  secured, and large 30-day board moves.
+
+The screen's data layer (`CBOTFeed`) is pure Python over the existing state
+file and is unit-tested head-less. It keeps the app's data-honesty rule: a
+missing premium or quote is reported as missing, never treated as zero — a
+replacement cost computed without a defensible premium is labelled flat
+(zero basis) rather than presented as an estimate.
+
+**Every existing screen modernises with it.** The token set is applied to
+ttk itself, so tables, forms, buttons, combo boxes, notebooks and
+scrollbars pick up the new palette, spacing and type scale without any
+screen being rewritten.
+
+**Day and Night themes**, switchable from the top bar or from
+Setup & Data → Appearance, applied in place without a restart. The same
+panel can switch the whole interface back to the classic tab bar; the
+modern kit is also imported defensively, so a build without it still
+starts.
+
+Fixes found while doing this:
+
+- The CEO Dashboard's two long header lines were centre-clipped at both
+  ends on any window narrower than the text, losing the first word of each
+  sentence. They are now left-anchored and wrapped to the live hero width.
+- Analysis carries ten sub-tabs; notebook tab padding is tuned so all ten
+  labels render in full instead of being truncated.
+
+Tests: `tests/test_modern_ui.py` adds 50 tests — palette contrast (every
+text/ground pair clears WCAG AA), gradient and rounded-corner geometry,
+the full CBOT feed including its missing-data behaviour, widget and chart
+smoke tests in both palettes (skipped where no display is available), and
+source-level guarantees that navigation stays widget-identity based and
+that the classic chrome remains reachable. Suite total: 123 tests.
+
 ## V10.9.2 — Remaining FIFO Inventory vs Current Local & CBOT
 
 - Added **Analysis → Inventory vs Market**, a compact management table using FIFO remaining MT rather than original contract quantities.
