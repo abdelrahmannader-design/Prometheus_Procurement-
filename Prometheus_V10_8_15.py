@@ -41,6 +41,13 @@ from prometheus_core import (
     run_decision_engine as _core_run_decision_engine,
     compute_decision as _core_compute_decision,
     validate_single_inputs as _core_validate_single_inputs,
+    fifo_allocate_inventory as _core_fifo_allocate_inventory,
+    weighted_avg_cost as _core_weighted_avg_cost,
+    contract_landed_cost_egp_mt as _core_contract_landed_cost_egp_mt,
+    inventory_edge as _core_inventory_edge,
+    replacement_cif_usd_mt as _core_replacement_cif_usd_mt,
+    scenario_purchase_cost_egp_mt as _core_scenario_purchase_cost_egp_mt,
+    freight_incl_vat as _core_freight_incl_vat,
 )
 
 # ══════════════════════════════════════════════════════════════════════
@@ -17591,6 +17598,16 @@ class App(tk.Tk):
         self.c_loading_port_var  = tk.StringVar(value="")   # loading port
         self.c_destination_var   = tk.StringVar(value="")   # factory/destination
         self.c_freight_var       = tk.StringVar(value="")   # EGP/MT (auto-filled)
+        # Freight VAT mode: "detailed" = c_freight_var is the excl.-VAT base,
+        # VAT is added on save; "all_in" = c_freight_var is already final,
+        # no VAT is added (prevents double-counting on already-inclusive
+        # figures). New contracts default to "detailed" since freight
+        # lookups return excl.-VAT base rates; loading an existing contract
+        # defaults to "all_in" unless it already carries a saved
+        # freight_mode, so historical freight_egp_mt values are never
+        # silently re-based with VAT just by opening and re-saving a record.
+        self.c_freight_mode_var  = tk.StringVar(value="detailed")
+        self.c_freight_vat_pct_var = tk.StringVar(value="14")
         # CBOT Premium fields (CORN contracts)
         self.c_premium_var       = tk.StringVar(value="")   # premium cents/bu
         self.c_futures_month_var = tk.StringVar(value="")   # e.g. DEC-25
@@ -17761,6 +17778,61 @@ class App(tk.Tk):
                    command=_apply_picked_rate).grid(
                        row=1, column=8, padx=(0, 4))
 
+        # Row 2: VAT mode — Detailed (base + VAT%) vs All-In (already final).
+        # Prevents double-counting VAT: All-In mode writes the entered
+        # number straight into freight_egp_mt with no VAT added on top.
+        _fb_lbl(2, 0, "Freight entry mode")
+        vat_mode_frame = ttk.Frame(fr_box)
+        vat_mode_frame.grid(row=2, column=1, columnspan=3, sticky="w", pady=(0, 4))
+        ttk.Radiobutton(vat_mode_frame, text="Detailed (base + VAT%)",
+                         variable=self.c_freight_mode_var,
+                         value="detailed").pack(side="left", padx=(0, 10))
+        ttk.Radiobutton(vat_mode_frame, text="All-In (final, no VAT added)",
+                         variable=self.c_freight_mode_var,
+                         value="all_in").pack(side="left")
+
+        _fb_lbl(2, 4, "VAT %")
+        _fb_ent(2, 5, self.c_freight_vat_pct_var, w=6)
+
+        self._c_freight_vat_preview_var = tk.StringVar(value="")
+        ttk.Label(fr_box, textvariable=self._c_freight_vat_preview_var,
+                  font=("Segoe UI", 9, "bold"),
+                  foreground="#1a4fa0").grid(
+                      row=2, column=6, columnspan=4, sticky="w", padx=(6, 0))
+
+        def _freight_final_egp_mt():
+            """The number that will actually be saved as freight_egp_mt,
+            per the current mode. Returns None if the entered rate isn't a
+            valid number yet."""
+            raw = to_float(self.c_freight_var.get(), None)
+            if raw is None:
+                return None
+            if self.c_freight_mode_var.get() == "all_in":
+                return raw
+            vat_pct = to_float(self.c_freight_vat_pct_var.get(), 14.0)
+            return _core_freight_incl_vat(raw, vat_pct)
+
+        def _update_freight_vat_preview(*_):
+            final = _freight_final_egp_mt()
+            mode = self.c_freight_mode_var.get()
+            if final is None:
+                self._c_freight_vat_preview_var.set("")
+            elif mode == "all_in":
+                self._c_freight_vat_preview_var.set(
+                    f"= {final:,.2f} EGP/MT (all-in, no VAT added)")
+            else:
+                self._c_freight_vat_preview_var.set(
+                    f"= {final:,.2f} EGP/MT incl. VAT")
+            # Keep the live "Own-after" preview below in sync with whichever
+            # freight figure will actually be saved.
+            try:
+                _update_preview()
+            except Exception:
+                pass
+
+        for v in (self.c_freight_var, self.c_freight_mode_var, self.c_freight_vat_pct_var):
+            v.trace_add("write", _update_freight_vat_preview)
+
         def _lookup_freight(*_):
             """Auto-lookup by commodity+port+dest, and refresh quick-pick list."""
             comm  = self.c_commodity_var.get().strip().upper()
@@ -17886,7 +17958,7 @@ class App(tk.Tk):
                 fx  = to_float(self.c_delivery_fx_var.get(), None)
                 dis = to_float(self.c_discharge_var.get(), 0) or 0
                 clr = to_float(self.c_clearance_var.get(), 0) or 0
-                frt = to_float(self.c_freight_var.get(), 0) or 0
+                frt = _freight_final_egp_mt() or 0
                 if cif and fx:
                     own = cif * fx + dis + clr + frt
                     # try to look up local price from logged prices
@@ -18330,7 +18402,8 @@ class App(tk.Tk):
                 "c_form4_fx_var": "", "c_delivery_date_var": "",
                 "c_discharge_var": "", "c_clearance_var": "",
                 "c_loading_port_var": "", "c_destination_var": "",
-                "c_freight_var": "", "c_premium_var": "",
+                "c_freight_var": "", "c_freight_mode_var": "detailed",
+                "c_freight_vat_pct_var": "14", "c_premium_var": "",
                 "c_futures_month_var": "", "c_pricing_date_var": "",
             }
             for name, value in defaults.items():
@@ -29352,10 +29425,26 @@ class App(tk.Tk):
         _sv(self.c_form4_fx_var,      "form4_fx")
         _sv(self.c_discharge_var,     "discharge_egp_mt")
         _sv(self.c_clearance_var,     "clearance_egp_mt")
-        # Freight fields
+        # Freight fields. Contracts saved before the freight-VAT feature
+        # existed have no freight_mode -- default those to "all_in" so the
+        # stored freight_egp_mt is treated as already final: loading and
+        # re-saving without touching the freight box must never silently
+        # add VAT to a historical record.
         _sv(self.c_loading_port_var,  "loading_port")
         _sv(self.c_destination_var,   "destination")
-        _sv(self.c_freight_var,       "freight_egp_mt")
+        saved_freight_mode = c.get("freight_mode")
+        if saved_freight_mode in ("detailed", "all_in"):
+            self.c_freight_mode_var.set(saved_freight_mode)
+            if saved_freight_mode == "detailed" and c.get("freight_base_egp_mt") is not None:
+                self.c_freight_var.set(str(c.get("freight_base_egp_mt")))
+            else:
+                _sv(self.c_freight_var, "freight_egp_mt")
+            vat_pct = c.get("freight_vat_pct")
+            self.c_freight_vat_pct_var.set("14" if vat_pct is None else str(vat_pct))
+        else:
+            self.c_freight_mode_var.set("all_in")
+            _sv(self.c_freight_var, "freight_egp_mt")
+            self.c_freight_vat_pct_var.set("14")
         # Premium box
         _sv(self.c_premium_var,       "premium_cents")
         self._sync_premium_from_lots(c)
@@ -29399,10 +29488,12 @@ class App(tk.Tk):
         _add("form4_fx",         self.c_form4_fx_var.get())
         _add("discharge_egp_mt", self.c_discharge_var.get())
         _add("clearance_egp_mt", self.c_clearance_var.get())
-        # Freight fields
+        # Freight fields. freight_egp_mt itself is NOT set here -- it's
+        # owned exclusively by _freight_save_fields_from_form() (called
+        # separately by add_contract/update_contract) so VAT is applied
+        # exactly once, per the selected entry mode.
         _add("loading_port",     self.c_loading_port_var.get(),  is_float=False)
         _add("destination",      self.c_destination_var.get(),   is_float=False)
-        _add("freight_egp_mt",   self.c_freight_var.get())
         # Premium box
         # Lots are the single truth: when they exist, the saved premium is
         # always the weighted derivation, never a stale manual number.
@@ -29425,6 +29516,36 @@ class App(tk.Tk):
             fields["priced"] = True
 
         return fields
+
+    def _freight_save_fields_from_form(self):
+        """Compute the freight fields to persist, applying VAT per the
+        selected entry mode ("detailed" = base excl. VAT, VAT added here;
+        "all_in" = the entered number is already final, nothing added --
+        prevents double-counting). Returns:
+          None  -> the entered rate isn't a valid number (caller must abort)
+          {}    -> the field is blank (caller decides whether that clears
+                   or preserves the existing stored value)
+          dict  -> freight_egp_mt / freight_mode / freight_base_egp_mt /
+                   freight_vat_pct to write onto the contract record.
+        """
+        freight_raw = self.c_freight_var.get().strip()
+        if not freight_raw:
+            return {}
+        base_val = to_float(freight_raw, None)
+        if base_val is None:
+            return None
+        mode = self.c_freight_mode_var.get() or "detailed"
+        vat_pct = to_float(self.c_freight_vat_pct_var.get(), 14.0) or 0.0
+        if mode == "all_in":
+            final_val = base_val
+        else:
+            final_val = _core_freight_incl_vat(base_val, vat_pct)
+        return {
+            "freight_egp_mt": final_val,
+            "freight_mode": mode,
+            "freight_base_egp_mt": base_val,
+            "freight_vat_pct": vat_pct,
+        }
 
     def add_contract(self):
         name = self.c_name_var.get().strip()
@@ -29459,13 +29580,11 @@ class App(tk.Tk):
         # Keep freight fields normalized on first save too.
         record["loading_port"] = self.c_loading_port_var.get().strip()
         record["destination"] = self.c_destination_var.get().strip()
-        freight_raw = self.c_freight_var.get().strip()
-        if freight_raw:
-            freight_val = to_float(freight_raw, None)
-            if freight_val is None:
-                messagebox.showwarning(APP_NAME, "Enter a valid Freight Rate (EGP/MT).")
-                return
-            record["freight_egp_mt"] = freight_val
+        freight_fields = self._freight_save_fields_from_form()
+        if freight_fields is None:
+            messagebox.showwarning(APP_NAME, "Enter a valid Freight Rate (EGP/MT).")
+            return
+        record.update(freight_fields)
         self.state_obj["contracts"][cid] = record
         append_audit_event(self.state_obj, "add_contract", "contract", cid, {"name": name, "commodity": comm, "origin": record.get("origin")})
         prev_sel = self.state_obj["ui"].get("selected_contract_id", "ALL")
@@ -29540,15 +29659,17 @@ class App(tk.Tk):
         # This makes the Savings tab immediately follow edits made in Contracts.
         c["loading_port"] = self.c_loading_port_var.get().strip()
         c["destination"] = self.c_destination_var.get().strip()
-        freight_raw = self.c_freight_var.get().strip()
-        if freight_raw == "":
+        freight_fields = self._freight_save_fields_from_form()
+        if freight_fields is None:
+            messagebox.showwarning(APP_NAME, "Enter a valid Freight Rate (EGP/MT).")
+            return
+        if not freight_fields:
             c.pop("freight_egp_mt", None)
+            c.pop("freight_mode", None)
+            c.pop("freight_base_egp_mt", None)
+            c.pop("freight_vat_pct", None)
         else:
-            freight_val = to_float(freight_raw, None)
-            if freight_val is None:
-                messagebox.showwarning(APP_NAME, "Enter a valid Freight Rate (EGP/MT).")
-                return
-            c["freight_egp_mt"] = freight_val
+            c.update(freight_fields)
 
         # Sync delivery_date = storage_start so Savings can select the
         # comparable local price at discharge/delivery.
