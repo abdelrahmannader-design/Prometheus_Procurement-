@@ -1,0 +1,28 @@
+Prometheus Procurement V10.9.2 — Validation
+Date: 2026-09-08
+
+Automated regression suite:
+- 73 tests passed
+- 0 failed
+
+New coverage includes:
+- Inventory vs Market view presence and FIFO basis
+- Remaining-layer local edge calculation
+- Remaining-layer current CBOT replacement calculation
+- Missing premium never assumed to be zero
+- Existing FIFO depletion / physical baseline tests
+- Existing freight VAT / no-double-VAT tests
+- Existing Scenario Lab tests
+
+GUI smoke tests under virtual Windows-like Tk display:
+- Application startup: PASS
+- Analysis → Inventory vs Market tab creation: PASS
+- User-uploaded app_state.json load: PASS, 0 runtime errors
+- Synthetic delivered Open FIFO row: PASS
+- Open status filter: PASS
+- All status filter including delivered Closed inventory: PASS
+- Current local and CBOT replacement values populated: PASS
+- Home/Analysis navigation hooks: PASS
+
+Important real-data note:
+The uploaded state used for smoke testing currently resolves to 0 remaining CORN FIFO contract lots as of 2026-09-08 under the enabled daily estimate, because its latest physical/consumption baseline is old enough for the configured daily consumption model to deplete the identifiable stock. Entering a current physical stock count re-anchors the model; this is intentional audit behavior, not a hidden override.
