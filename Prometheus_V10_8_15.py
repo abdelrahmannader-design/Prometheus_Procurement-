@@ -6975,6 +6975,345 @@ class App(tk.Tk):
             status = "Covered"
         return {"days": days, "on_hand": on_hand, "rate": rate, "status": status}
 
+    def _fifo_inventory_for_commodity(self, base_comm):
+        """Build FIFO inventory lots + current valuation for one base
+        commodity (CORN/SOYBEAN/SBM/WHEAT/SFM/DDGS/...). Single source of
+        truth reused by the Home Dashboard, Exposure & Risk, the FIFO
+        drill-down and the Scenario Lab, so all four always agree.
+
+        Inbound layers = every contract of this commodity (any status --
+        physical presence isn't gated by administrative status) with a
+        resolvable delivery date, oldest first. Total consumed-to-date is
+        derived from the on-hand stock number already trusted for "days
+        of coverage" (_compute_stock_with_adjustments): consumed =
+        total contracted inbound - on_hand. This is what makes the FIFO
+        remaining total reconcile exactly to the existing coverage figure
+        by construction, rather than by coincidence.
+        """
+        base = (base_comm or "").strip().upper()
+        contracts = self.state_obj.get("contracts", {}) or {}
+
+        keys = set((self.state_obj.get("commodities", {}) or {}).keys())
+        keys.update((c.get("commodity") or "") for c in contracts.values())
+        keys.update((r.get("commodity") or "") for r in (self.state_obj.get("consumption_log", []) or []))
+        aliases = sorted({str(k).strip().upper() for k in keys
+                          if str(k).strip() and str(k).strip().upper().split("-")[0] == base})
+        if not aliases:
+            aliases = [base]
+
+        layers = []
+        skipped_contracts = []
+        for cid, c in contracts.items():
+            comm = (c.get("commodity") or "").strip().upper()
+            if comm.split("-")[0] != base:
+                continue
+            del_str = c.get("delivery_date") or c.get("storage_start") or ""
+            qty = to_float(c.get("qty_mt"), None)
+            if not del_str or qty is None:
+                skipped_contracts.append(cid)
+                continue
+            layers.append({"contract_id": cid, "delivery_date": del_str, "qty_mt": qty})
+        total_layers_mt = sum(l["qty_mt"] for l in layers)
+
+        # Total consumed for FIFO purposes: the Consumption tab's own
+        # "received_mt" entries are a separate, optional physical-receipt
+        # ledger that doesn't necessarily mirror Contracts deliveries (many
+        # users log only outflow, since a contract's delivery already *is*
+        # the receipt) -- so FIFO depletion is driven directly by the sum
+        # of logged consumed_mt, not by net (received-consumed) stock. A
+        # manual physical stock count ("Set Stock On Hand") is still
+        # honored as an authoritative checkpoint: consumption implied by
+        # the count as of its date, plus whatever was logged after it.
+        log = self._cons_log() if hasattr(self, "_cons_log") else []
+        relevant = [e for e in log if (e.get("commodity") or "").upper() in aliases]
+        has_log_activity = bool(relevant)
+
+        latest_adj = None
+        for e in relevant:
+            if not e.get("is_adjustment"):
+                continue
+            if latest_adj is None or (e.get("date") or "") > (latest_adj.get("date") or ""):
+                latest_adj = e
+
+        excess_on_hand_mt = 0.0
+        if latest_adj is not None:
+            adj_date = latest_adj.get("date") or ""
+            adj_qty = to_float(latest_adj.get("adjusted_qty"), 0.0) or 0.0
+            layers_asof_adj = sum(l["qty_mt"] for l in layers if l["delivery_date"] <= adj_date)
+            implied_consumed_asof_adj = layers_asof_adj - adj_qty
+            if implied_consumed_asof_adj < 0:
+                excess_on_hand_mt += -implied_consumed_asof_adj
+                implied_consumed_asof_adj = 0.0
+            consumed_after_adj = sum(
+                to_float(e.get("consumed_mt"), 0.0) or 0.0
+                for e in relevant if not e.get("is_adjustment") and (e.get("date") or "") > adj_date)
+            total_consumed = implied_consumed_asof_adj + consumed_after_adj
+            on_hand_source = f"stock count on {adj_date} + logged consumption since"
+        else:
+            total_consumed = sum(
+                to_float(e.get("consumed_mt"), 0.0) or 0.0
+                for e in relevant if not e.get("is_adjustment"))
+            on_hand_source = ("logged consumption (sum of Consumed MT entries)"
+                               if has_log_activity else "no consumption log activity recorded")
+
+        # Consumption exceeding total layers is surfaced via the FIFO
+        # allocation's own unattributed_consumed_mt below, not here.
+        on_hand = max(total_layers_mt - total_consumed, 0.0) + excess_on_hand_mt
+
+        alloc = _core_fifo_allocate_inventory(layers, total_consumed)
+
+        lots = []
+        for lot in alloc["lots"]:
+            c = contracts.get(lot["contract_id"], {})
+            cif = to_float(c.get("cif_usd_mt"), None)
+            fx = to_float(c.get("delivery_fx"), None)
+            disc = to_float(c.get("discharge_egp_mt"), 0.0) or 0.0
+            clr = to_float(c.get("clearance_egp_mt"), 0.0) or 0.0
+            frt = to_float(c.get("freight_egp_mt"), 0.0) or 0.0
+            cost = _core_contract_landed_cost_egp_mt(cif, fx, disc, clr, frt)
+            lots.append({
+                **lot,
+                "contract_name": c.get("name") or lot["contract_id"],
+                "cost_egp_mt": cost,
+                "cost_incomplete": cost is None,
+            })
+
+        weighted_cost = _core_weighted_avg_cost(
+            [{"remaining_mt": l["remaining_mt"], "cost_egp_mt": l["cost_egp_mt"]} for l in lots])
+        remaining_mt = sum(l["remaining_mt"] for l in lots)
+
+        local_price, local_date = None, None
+        for ck in aliases:
+            try:
+                pairs = self._local_price_map(ck)
+            except Exception:
+                pairs = []
+            if pairs:
+                d, p = pairs[-1]
+                local_date, local_price = d.isoformat(), p
+                break
+
+        edge = _core_inventory_edge(local_price, weighted_cost, remaining_mt)
+        coverage = self._home_coverage_for_commodity(base, open_qty=0.0)
+
+        return {
+            "commodity": base,
+            "aliases": aliases,
+            "lots": lots,
+            "skipped_contracts": skipped_contracts,
+            "unattributed_consumed_mt": alloc["unattributed_consumed_mt"],
+            "excess_on_hand_mt": excess_on_hand_mt,
+            "total_layers_mt": total_layers_mt,
+            "on_hand_mt": on_hand,
+            "on_hand_source": on_hand_source,
+            "has_log_activity": has_log_activity,
+            "remaining_mt": remaining_mt,
+            "weighted_avg_cost_egp_mt": weighted_cost,
+            "local_price_egp_mt": local_price,
+            "local_price_date": local_date,
+            "edge_per_mt": edge["edge_per_mt"],
+            "edge_total": edge["edge_total"],
+            "coverage_days": coverage.get("days"),
+            "coverage_status": coverage.get("status"),
+        }
+
+    def _fifo_replacement_cost(self, base_comm, premium_override=None):
+        """Theoretical current replacement cost for one CBOT-tradeable base
+        commodity (CORN/SOYBEAN/SBM -- WHEAT has a conversion factor but no
+        live/historical CBOT feed in this app, so it's marked unsupported
+        rather than guessed). Never invents a missing premium: falls back
+        to the most recently recorded premium on any contract of this
+        commodity, and marks the comparison incomplete when none exists so
+        callers can offer a scenario-premium entry instead."""
+        base = (base_comm or "").strip().upper()
+        cbot_comm_key = {"CORN": "CORN", "SOYBEAN": "SOYBEAN", "SBM": "SBM"}.get(base)
+
+        cbot_price, cbot_date = None, None
+        if cbot_comm_key:
+            entries = [(e.get("date", ""), to_float(e.get("price"), None))
+                       for e in self.state_obj.get("cbot_history", []) or []
+                       if (e.get("commodity") or "").upper() == cbot_comm_key]
+            entries = [(d, p) for d, p in entries if d and p is not None]
+            if entries:
+                cbot_date, cbot_price = max(entries, key=lambda x: x[0])
+
+        fx_price, fx_date = None, None
+        fx_entries = [(e.get("date", ""), to_float(e.get("rate"), None))
+                      for e in self.state_obj.get("fx_history", []) or []]
+        fx_entries = [(d, r) for d, r in fx_entries if d and r is not None]
+        if fx_entries:
+            fx_date, fx_price = max(fx_entries, key=lambda x: x[0])
+
+        premium = premium_override
+        premium_source = "scenario override" if premium_override is not None else None
+        if premium is None:
+            contracts = self.state_obj.get("contracts", {}) or {}
+            candidates = [
+                (c.get("pricing_date") or c.get("delivery_date") or "",
+                 to_float(c.get("premium_cents"), None))
+                for c in contracts.values()
+                if (c.get("commodity") or "").upper().split("-")[0] == base]
+            candidates = [(d, p) for d, p in candidates if p is not None]
+            if candidates:
+                _, premium = max(candidates, key=lambda x: x[0])
+                premium_source = "most recent contract premium"
+
+        replacement_cif = None
+        if cbot_comm_key and cbot_price is not None and premium is not None:
+            replacement_cif = _core_replacement_cif_usd_mt(base, cbot_price, premium)
+
+        replacement_cost_egp_mt = None
+        if replacement_cif is not None and fx_price is not None:
+            replacement_cost_egp_mt = replacement_cif * fx_price
+
+        return {
+            "commodity": base,
+            "cbot_supported": cbot_comm_key is not None,
+            "cbot_price": cbot_price, "cbot_date": cbot_date,
+            "fx_price": fx_price, "fx_date": fx_date,
+            "premium": premium, "premium_source": premium_source,
+            "replacement_cif_usd_mt": replacement_cif,
+            "replacement_cost_egp_mt": replacement_cost_egp_mt,
+            "incomplete": (cbot_comm_key is None or cbot_price is None
+                           or fx_price is None or premium is None),
+        }
+
+    def _open_fifo_drilldown(self, base_comm):
+        """FIFO inventory breakdown for one commodity: every contract layer
+        with its original/consumed/remaining MT, actual stored cost and
+        edge vs. today's local price. Built from the exact same
+        _fifo_inventory_for_commodity() dict the dashboard card uses, so
+        this table's totals reconcile to the card by construction."""
+        try:
+            fifo = self._fifo_inventory_for_commodity(base_comm)
+            repl = self._fifo_replacement_cost(base_comm)
+        except Exception as e:
+            self._surface_error("_open_fifo_drilldown", e, show=True)
+            return
+
+        win = tk.Toplevel(self)
+        win.title(f"FIFO Inventory — {base_comm}")
+        win.geometry("980x620")
+        win.transient(self)
+        win.columnconfigure(0, weight=1)
+        win.rowconfigure(3, weight=1)
+
+        header = (f"{base_comm}  ·  Remaining {fifo['remaining_mt']:,.0f} MT of "
+                  f"{fifo['total_layers_mt']:,.0f} MT contracted  ·  "
+                  f"source: {fifo['on_hand_source']}")
+        ttk.Label(win, text=header, font=(FONT_FAMILY, FS_BODY, "bold"),
+                  wraplength=940, justify="left").grid(
+                      row=0, column=0, sticky="w", padx=12, pady=(12, 4))
+
+        warnings = []
+        if fifo["skipped_contracts"]:
+            warnings.append(f"{len(fifo['skipped_contracts'])} contract(s) skipped "
+                             f"(missing quantity or delivery date): "
+                             + ", ".join(fifo["skipped_contracts"]))
+        if fifo["unattributed_consumed_mt"]:
+            warnings.append(f"{fifo['unattributed_consumed_mt']:,.0f} MT of logged "
+                             f"consumption exceeds total contracted inbound — not "
+                             f"attributed to any contract.")
+        if fifo["excess_on_hand_mt"]:
+            warnings.append(f"Physical stock exceeds total contracted inbound by "
+                             f"{fifo['excess_on_hand_mt']:,.0f} MT — some inventory "
+                             f"isn't linked to any contract.")
+        if not fifo["has_log_activity"]:
+            warnings.append("No Consumption tab activity logged for this commodity — "
+                             "remaining inventory shown is the full contracted "
+                             "quantity, not FIFO-depleted.")
+        if any(l["cost_incomplete"] for l in fifo["lots"] if l["remaining_mt"] > 0):
+            warnings.append("Some remaining lots are missing CIF/FX and are excluded "
+                             "from the weighted-average cost below.")
+        if warnings:
+            ttk.Label(win, text="⚠ " + "   ·   ".join(warnings),
+                      foreground=CLR["danger"], font=(FONT_FAMILY, FS_BODY),
+                      wraplength=940, justify="left").grid(
+                          row=1, column=0, sticky="w", padx=12, pady=(0, 6))
+
+        summary = ttk.Frame(win)
+        summary.grid(row=2, column=0, sticky="ew", padx=12)
+        cost_txt = (f"EGP {fifo['weighted_avg_cost_egp_mt']:,.2f}/MT"
+                    if fifo["weighted_avg_cost_egp_mt"] is not None else "—")
+        local_txt = (f"EGP {fifo['local_price_egp_mt']:,.2f}/MT (as of {fifo['local_price_date']})"
+                     if fifo["local_price_egp_mt"] is not None else "—")
+        edge_txt = (f"EGP {fifo['edge_per_mt']:+,.2f}/MT  ·  total {fifo['edge_total']:+,.0f} EGP"
+                    if fifo["edge_per_mt"] is not None else "—")
+        for i, (label, value) in enumerate([
+                ("Weighted Avg Inventory Cost", cost_txt),
+                ("Current Local Market", local_txt),
+                ("Current Inventory Edge", edge_txt)]):
+            box = ttk.Frame(summary)
+            box.grid(row=0, column=i, sticky="w", padx=(0, 24))
+            ttk.Label(box, text=label, foreground="#666").pack(anchor="w")
+            ttk.Label(box, text=value, font=(FONT_FAMILY, FS_BODY, "bold")).pack(anchor="w")
+        if repl and repl.get("cbot_supported"):
+            rc = repl.get("replacement_cost_egp_mt")
+            diff = (rc - fifo["weighted_avg_cost_egp_mt"]
+                    if (rc is not None and fifo["weighted_avg_cost_egp_mt"] is not None) else None)
+            box = ttk.Frame(summary)
+            box.grid(row=0, column=3, sticky="w")
+            ttk.Label(box, text="Replacement vs Inventory", foreground="#666").pack(anchor="w")
+            txt = (f"EGP {diff:+,.2f}/MT" if diff is not None else
+                   "incomplete — set a premium")
+            ttk.Label(box, text=txt, font=(FONT_FAMILY, FS_BODY, "bold")).pack(anchor="w")
+
+        # ── Lot table ───────────────────────────────────────────────
+        tf = ttk.Frame(win)
+        tf.grid(row=3, column=0, sticky="nsew", padx=12, pady=(8, 0))
+        tf.columnconfigure(0, weight=1)
+        tf.rowconfigure(0, weight=1)
+        cols = [("contract", "Contract", 150, "w"),
+                ("delivery", "Delivery Date", 100, "center"),
+                ("original", "Original MT", 100, "e"),
+                ("consumed", "Consumed MT", 100, "e"),
+                ("remaining", "Remaining MT", 100, "e"),
+                ("cost", "Actual Cost EGP/MT", 130, "e"),
+                ("value", "Remaining Value", 130, "e"),
+                ("local", "Current Local Price", 130, "e"),
+                ("edge_mt", "Edge EGP/MT", 110, "e"),
+                ("edge_total", "Total Edge", 130, "e")]
+        tv = ttk.Treeview(tf, columns=[c[0] for c in cols], show="headings", height=16)
+        for key, label, width, anchor in cols:
+            tv.heading(key, text=label)
+            tv.column(key, width=width, anchor=anchor)
+        tv.grid(row=0, column=0, sticky="nsew")
+        sb = ttk.Scrollbar(tf, orient="vertical", command=tv.yview)
+        tv.configure(yscrollcommand=sb.set)
+        sb.grid(row=0, column=1, sticky="ns")
+        tv.tag_configure("depleted", foreground="#9ca3af")
+        tv.tag_configure("warn", foreground=CLR["danger"])
+
+        local_price = fifo["local_price_egp_mt"]
+        for lot in fifo["lots"]:
+            cost = lot["cost_egp_mt"]
+            remaining = lot["remaining_mt"]
+            value = cost * remaining if cost is not None else None
+            edge_mt = (local_price - cost) if (local_price is not None and cost is not None) else None
+            edge_total = edge_mt * remaining if edge_mt is not None else None
+            tags = ()
+            if remaining <= 0:
+                tags = ("depleted",)
+            elif lot["cost_incomplete"]:
+                tags = ("warn",)
+            tv.insert("", "end", tags=tags, values=(
+                lot["contract_name"], lot["delivery_date"],
+                f"{lot['original_mt']:,.0f}", f"{lot['consumed_mt']:,.0f}",
+                f"{remaining:,.0f}",
+                f"{cost:,.2f}" if cost is not None else "incomplete",
+                f"{value:,.0f}" if value is not None else "—",
+                f"{local_price:,.2f}" if local_price is not None else "—",
+                f"{edge_mt:+,.2f}" if edge_mt is not None else "—",
+                f"{edge_total:+,.0f}" if edge_total is not None else "—",
+            ))
+
+        footer = ttk.Frame(win)
+        footer.grid(row=4, column=0, sticky="ew", padx=12, pady=10)
+        ttk.Label(footer,
+                  text=f"Reconciles to dashboard: total remaining {fifo['remaining_mt']:,.0f} MT",
+                  foreground="#888").pack(side="left")
+        ttk.Button(footer, text="Close", command=win.destroy).pack(side="right")
+
     def _home_exec_metrics(self, commodity="ALL", fx_mode="live"):
         """Build the executive KPI set for one base commodity or the portfolio.
 
@@ -7158,6 +7497,8 @@ class App(tk.Tk):
             tk.Label(card, text=comm, font=("Segoe UI", 11, "bold"),
                      bg="#1b2036", fg="#f8fafc").pack(anchor="w", padx=10, pady=(7, 2))
             line_specs = [
+                ("inv_remaining", "Inventory —", ("Segoe UI", 9, "bold"), "#38bdf8"),
+                ("inv_edge", "Inv. Edge —", ("Segoe UI", 8), "#9fb3c8"),
                 ("realized", "Realised —", ("Segoe UI", 9, "bold"), "#72e39a"),
                 ("saving_mt", "Saving/MT —", ("Segoe UI", 9), "#dbeafe"),
                 ("closed", "Closed —", ("Segoe UI", 8), "#7890a8"),
@@ -7176,9 +7517,13 @@ class App(tk.Tk):
                 lbl.pack(anchor="w", padx=10, pady=(0, 1))
                 vars_[key] = var
                 vars_[key + "_label"] = lbl
-            tk.Frame(card, bg="#1b2036", height=4).pack(fill="x")
             for widget in (card, *card.winfo_children()):
                 widget.bind("<Button-1>", lambda _e, c=comm: self._home_select_commodity(c))
+            fifo_link = tk.Label(card, text="🔍 FIFO detail →", font=("Segoe UI", 8, "bold"),
+                                 bg="#1b2036", fg="#38bdf8", cursor="hand2")
+            fifo_link.pack(anchor="w", padx=10, pady=(2, 6))
+            fifo_link.bind("<Button-1>", lambda _e, c=comm: self._open_fifo_drilldown(c))
+            tk.Frame(card, bg="#1b2036", height=4).pack(fill="x")
             self._hd_comm_kpi_vars[comm] = vars_
 
     def _refresh_home_commodity_cards(self):
@@ -7191,6 +7536,31 @@ class App(tk.Tk):
         fx_mode_sel = getattr(self, "_hd_fx_mode_var", None)
         fx_mode = fx_mode_sel.get() if fx_mode_sel else "live"
         for comm, vars_ in getattr(self, "_hd_comm_kpi_vars", {}).items():
+            try:
+                fifo = self._fifo_inventory_for_commodity(comm)
+            except Exception as e:
+                fifo = None
+                log_exception(e, f"_refresh_home_commodity_cards:fifo:{comm}")
+            if fifo is None:
+                vars_["inv_remaining"].set("Inventory  —")
+                vars_["inv_edge"].set("Inv. Edge  —")
+            else:
+                if fifo["weighted_avg_cost_egp_mt"] is not None:
+                    cost_txt = f"  @ EGP {fifo['weighted_avg_cost_egp_mt']:,.0f}/MT"
+                else:
+                    cost_txt = "  (cost incomplete)" if fifo["remaining_mt"] > 0 else ""
+                note = "" if fifo["has_log_activity"] else "  · no consumption logged"
+                vars_["inv_remaining"].set(
+                    f"Inventory  {fifo['remaining_mt']:,.0f} MT{cost_txt}{note}")
+                if fifo["edge_per_mt"] is not None:
+                    vars_["inv_edge"].set(
+                        f"Inv. Edge  EGP {fifo['edge_per_mt']:+,.0f}/MT "
+                        f"(total {self._home_compact_money(fifo['edge_total'])})")
+                    vars_["inv_edge_label"].configure(
+                        fg="#72e39a" if fifo["edge_per_mt"] >= 0 else "#fb7185")
+                else:
+                    vars_["inv_edge"].set("Inv. Edge  — (no local price)")
+                    vars_["inv_edge_label"].configure(fg="#9fb3c8")
             metrics = self._home_exec_metrics(comm, fx_mode=fx_mode)
             realised = metrics["realized_saving"]
             per_mt = metrics["realized_per_mt"]
@@ -25346,7 +25716,7 @@ class App(tk.Tk):
     def _build_exposure_risk(self):
         p = self.tab_exposure
         p.columnconfigure(0, weight=1)
-        p.rowconfigure(3, weight=1)
+        p.rowconfigure(5, weight=1)
         ttk.Label(p, text="Exposure & Risk — portfolio snapshot (open contracts)",
                   font=(FONT_FAMILY, 12, "bold"),
                   foreground="#1a4fa0").grid(row=0, column=0, sticky="w")
@@ -25379,6 +25749,43 @@ class App(tk.Tk):
                                                               padx=8, pady=(0, 6))
             self._exp_vars[key] = v
 
+        # ── Current Inventory (FIFO) — quantity-weighted, per commodity ──
+        # Distinct from the "Open exposure" cards above, which price every
+        # open contract's full quantity at its own locked terms regardless
+        # of how much has actually been consumed. This section shows what
+        # inventory physically remains today, at its own stored cost, vs.
+        # buying it locally or replacing it at today's CBOT.
+        ttk.Label(p, text="Current Inventory — FIFO-remaining quantity at actual stored cost",
+                  font=(FONT_FAMILY, FS_BODY, "bold"),
+                  foreground="#1a4fa0").grid(row=3, column=0, sticky="w", pady=(10, 2))
+
+        inv_cols = [
+            ("comm", "Commodity", 90, "w"),
+            ("remaining", "Remaining MT", 100, "e"),
+            ("cost", "W.Avg Inventory Cost", 140, "e"),
+            ("local", "Current Local Market", 140, "e"),
+            ("edge_mt", "Inventory Edge/MT", 130, "e"),
+            ("edge_total", "Total Inventory Edge", 150, "e"),
+            ("cbot", "Current CBOT", 100, "e"),
+            ("replacement", "Replacement Cost", 130, "e"),
+            ("diff", "Inv. vs Replacement", 140, "e"),
+        ]
+        self.exp_inventory_tree = ttk.Treeview(
+            p, columns=[c[0] for c in inv_cols], show="headings", height=6)
+        for key, label, width, anchor in inv_cols:
+            self.exp_inventory_tree.heading(key, text=label)
+            self.exp_inventory_tree.column(key, width=width, anchor=anchor)
+        self.exp_inventory_tree.tag_configure("positive", foreground="#1a7a1a")
+        self.exp_inventory_tree.tag_configure("negative", foreground="#b00020")
+        self.exp_inventory_tree.bind(
+            "<Double-1>", lambda e: self._exp_inventory_row_activated())
+        self.exp_inventory_tree.grid(row=4, column=0, sticky="ew", pady=(0, 8))
+        self._exp_inventory_note_var = tk.StringVar(
+            value="Double-click a row for the full FIFO lot breakdown.")
+        ttk.Label(p, textvariable=self._exp_inventory_note_var,
+                  foreground=CLR["muted"]).grid(row=4, column=0, sticky="w",
+                                                  pady=(0, 0))
+
         cols = [("Priority", 70), ("Issue", 560), ("Action", 420)]
         self.exp_alert_tree = ttk.Treeview(p, columns=[c for c, _ in cols],
                                            show="headings", height=12)
@@ -25387,13 +25794,59 @@ class App(tk.Tk):
             self.exp_alert_tree.column(c, width=w, anchor="w")
         self.exp_alert_tree.tag_configure("High", foreground="#b00020")
         self.exp_alert_tree.tag_configure("Medium", foreground="#b45309")
-        self.exp_alert_tree.grid(row=3, column=0, sticky="nsew")
+        self.exp_alert_tree.grid(row=5, column=0, sticky="nsew")
         ysb = ttk.Scrollbar(p, orient="vertical",
                             command=self.exp_alert_tree.yview)
         self.exp_alert_tree.configure(yscrollcommand=ysb.set)
-        ysb.grid(row=3, column=1, sticky="ns")
+        ysb.grid(row=5, column=1, sticky="ns")
+
+    def _exp_inventory_row_activated(self):
+        sel = self.exp_inventory_tree.selection()
+        if not sel:
+            return
+        self._open_fifo_drilldown(sel[0])
+
+    def refresh_exposure_inventory(self):
+        """Populate the Current Inventory (FIFO) table — the requirement
+        #5 "Average vs Average" per-commodity comparison."""
+        if not hasattr(self, "exp_inventory_tree"):
+            return
+        tv = self.exp_inventory_tree
+        for i in tv.get_children():
+            tv.delete(i)
+        try:
+            for comm in self._home_commodity_options():
+                fifo = self._fifo_inventory_for_commodity(comm)
+                if fifo["total_layers_mt"] <= 0:
+                    continue
+                repl = self._fifo_replacement_cost(comm)
+                cost = fifo["weighted_avg_cost_egp_mt"]
+                local = fifo["local_price_egp_mt"]
+                edge_mt = fifo["edge_per_mt"]
+                edge_total = fifo["edge_total"]
+                cbot = repl.get("cbot_price") if repl.get("cbot_supported") else None
+                rc = repl.get("replacement_cost_egp_mt")
+                diff = (rc - cost) if (rc is not None and cost is not None) else None
+                tags = ()
+                if edge_mt is not None:
+                    tags = ("positive",) if edge_mt >= 0 else ("negative",)
+                tv.insert("", "end", iid=comm, tags=tags, values=(
+                    comm,
+                    f"{fifo['remaining_mt']:,.0f}",
+                    f"{cost:,.0f}" if cost is not None else "—",
+                    f"{local:,.0f}" if local is not None else "—",
+                    f"{edge_mt:+,.0f}" if edge_mt is not None else "—",
+                    f"{edge_total:+,.0f}" if edge_total is not None else "—",
+                    f"{cbot:,.2f}" if cbot is not None else
+                        ("n/a" if not repl.get("cbot_supported") else "—"),
+                    f"{rc:,.0f}" if rc is not None else "—",
+                    f"{diff:+,.0f}" if diff is not None else "—",
+                ))
+        except Exception as e:
+            self._surface_error("refresh_exposure_inventory", e)
 
     def refresh_exposure_risk(self):
+        self.refresh_exposure_inventory()
         try:
             ex = self.portfolio_exposure()
             self._exp_vars["open_usd"].set(f"${ex['open_usd']:,.0f}")
