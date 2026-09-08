@@ -408,3 +408,190 @@ def compute_decision(inputs):
         "hedged_direct_margin_egp_mt": hedged_direct_margin_egp_mt,
         "hedged_indirect_margin_egp_mt": hedged_indirect_margin_egp_mt,
     }
+
+
+# ══════════════════════════════════════════════════════════════════════
+# FIFO INVENTORY & SCENARIO LAB — pure calculation core.
+#
+# The app has no existing FIFO engine: consumption_log entries carry an
+# optional contract_id tag that nothing ever reads back, and the one
+# "remaining quantity" calculation in the UI burns down each contract's
+# own qty_mt independently from its own storage_start date, ignoring
+# every other open contract of the same commodity. contract["remaining_mt"]
+# is read (with a qty_mt fallback) in several places but never written.
+#
+# fifo_allocate_inventory() below builds real FIFO layers instead: each
+# contract of a commodity is a layer (size = qty_mt) ordered oldest-first
+# by delivery_date, depleted by the commodity's total consumed-to-date
+# (the same aggregate figure the app already trusts for its "days of
+# stock" coverage calculation) -- not by trying to match individual log
+# entries to contracts, since that link doesn't reliably exist today.
+# ══════════════════════════════════════════════════════════════════════
+
+def fifo_allocate_inventory(contract_layers, total_consumed):
+    """FIFO-deplete `total_consumed` MT across `contract_layers`, oldest
+    delivery_date first.
+
+    contract_layers: iterable of dicts with 'contract_id', 'delivery_date'
+    (an ISO 'YYYY-MM-DD' string used for oldest-first ordering) and
+    'qty_mt' (the original inbound quantity -- the FIFO layer size).
+    Layers missing a usable delivery_date or a non-negative qty_mt are
+    excluded from allocation and reported in 'skipped' instead of being
+    silently dropped or mis-ordered.
+
+    total_consumed: total MT already consumed for this commodity to date.
+    This is a single commodity-level aggregate (not per-contract), because
+    consumption entries aren't reliably tied to a specific contract.
+
+    Returns {
+      'lots': [{'contract_id', 'delivery_date', 'original_mt',
+                 'consumed_mt', 'remaining_mt'}, ...] in oldest-first order,
+      'unattributed_consumed_mt': float -- > 0 when total_consumed exceeds
+                 the sum of all valid layers, i.e. consumption that isn't
+                 explained by any known contract. Never force-allocated
+                 onto a layer; callers must surface this as a warning.
+      'skipped': [contract_id, ...] -- layers excluded for missing data.
+    }
+
+    This function does not mutate its inputs and does not filter by
+    commodity -- callers pass in only the layers for one commodity.
+    """
+    total_consumed = to_float(total_consumed, 0.0) or 0.0
+    if total_consumed < 0:
+        total_consumed = 0.0
+
+    valid = []
+    skipped = []
+    for layer in (contract_layers or []):
+        cid = layer.get("contract_id")
+        qty = to_float(layer.get("qty_mt"), None)
+        d = layer.get("delivery_date")
+        if qty is None or qty < 0 or not d:
+            skipped.append(cid)
+            continue
+        valid.append({"contract_id": cid, "delivery_date": d, "original_mt": qty})
+
+    valid.sort(key=lambda x: (x["delivery_date"], str(x["contract_id"])))
+
+    remaining_to_consume = total_consumed
+    lots = []
+    for layer in valid:
+        orig = layer["original_mt"]
+        consumed_here = min(orig, remaining_to_consume)
+        remaining_to_consume -= consumed_here
+        lots.append({
+            "contract_id": layer["contract_id"],
+            "delivery_date": layer["delivery_date"],
+            "original_mt": orig,
+            "consumed_mt": consumed_here,
+            "remaining_mt": orig - consumed_here,
+        })
+
+    return {
+        "lots": lots,
+        "unattributed_consumed_mt": max(remaining_to_consume, 0.0),
+        "skipped": skipped,
+    }
+
+
+def weighted_avg_cost(lots):
+    """Quantity-weighted average cost across FIFO lots: Sigma(remaining x
+    cost) / Sigma(remaining). `lots` is an iterable of dicts with
+    'remaining_mt' and 'cost_egp_mt'. Lots with no remaining quantity or
+    no usable cost are excluded. Returns None (never 0) when nothing
+    qualifies, so callers must show "no data" rather than a fabricated
+    zero cost."""
+    total_qty = 0.0
+    total_value = 0.0
+    for lot in (lots or []):
+        qty = to_float(lot.get("remaining_mt"), None)
+        cost = to_float(lot.get("cost_egp_mt"), None)
+        if qty is None or qty <= 0 or cost is None:
+            continue
+        total_qty += qty
+        total_value += qty * cost
+    if total_qty <= 0:
+        return None
+    return total_value / total_qty
+
+
+def contract_landed_cost_egp_mt(cif_usd_mt, fx, discharge_egp_mt=0.0,
+                                 clearance_egp_mt=0.0, freight_egp_mt=0.0):
+    """Landed / Own-After cost EGP/MT = CIF x FX + discharge + clearance +
+    freight -- the same formula already used throughout the app (e.g.
+    own_after = cif_usd * delivery_fx + disc + clr + frt), centralized
+    here so a FIFO lot's cost is captured once from the contract's own
+    locked CIF/FX rather than being re-derived against a later live FX.
+    `freight_egp_mt` is expected to already be VAT-correct by the time it
+    reaches here (see freight_incl_vat) -- this function does not touch
+    VAT itself. Returns None when CIF or FX is missing: an incomplete
+    lot cost must never be silently treated as zero."""
+    cif = to_float(cif_usd_mt, None)
+    fx = to_float(fx, None)
+    if cif is None or fx is None:
+        return None
+    disc = to_float(discharge_egp_mt, 0.0) or 0.0
+    clr = to_float(clearance_egp_mt, 0.0) or 0.0
+    frt = to_float(freight_egp_mt, 0.0) or 0.0
+    return cif * fx + disc + clr + frt
+
+
+def inventory_edge(local_price_egp_mt, weighted_avg_cost_egp_mt, remaining_mt):
+    """Current Inventory Edge -- explicitly NOT "Realised Saving", a
+    different, pre-existing concept elsewhere in the app. Positive means
+    the inventory already on hand is cheaper than buying locally today.
+      edge_per_mt = local price - weighted average inventory cost
+      edge_total  = edge_per_mt x remaining_mt
+    Returns {'edge_per_mt': None, 'edge_total': None} when local price or
+    cost is unavailable, rather than a fabricated 0."""
+    local = to_float(local_price_egp_mt, None)
+    cost = to_float(weighted_avg_cost_egp_mt, None)
+    qty = to_float(remaining_mt, 0.0) or 0.0
+    if local is None or cost is None:
+        return {"edge_per_mt": None, "edge_total": None}
+    edge_per_mt = local - cost
+    return {"edge_per_mt": edge_per_mt, "edge_total": edge_per_mt * qty}
+
+
+def replacement_cif_usd_mt(commodity, cbot, premium):
+    """Theoretical replacement CIF USD/MT = (CBOT + premium) x the
+    commodity's conversion factor (CORN 0.3937, SOYBEAN/WHEAT 0.36745,
+    SBM 1.1023 -- see cbot_conv_factor). Returns None when CBOT or
+    premium is missing: a premium must never be silently invented here --
+    callers should mark the comparison incomplete or let the user supply
+    a scenario premium instead of calling this with a guess."""
+    cbot = to_float(cbot, None)
+    premium = to_float(premium, None)
+    if cbot is None or premium is None:
+        return None
+    factor = cbot_conv_factor(commodity, strict=True)
+    if factor is None:
+        return None
+    return (cbot + premium) * factor
+
+
+def scenario_purchase_cost_egp_mt(commodity, cbot, premium, fx,
+                                   freight_egp_mt=0.0, discharge_egp_mt=0.0,
+                                   clearance_egp_mt=0.0):
+    """Scenario Lab helper: the EGP/MT cost of a hypothetical purchase at
+    the given CBOT/premium/FX/fees, combining replacement_cif_usd_mt() and
+    contract_landed_cost_egp_mt(). Returns None if CBOT, premium or FX is
+    missing, or the commodity has no conversion factor."""
+    cif = replacement_cif_usd_mt(commodity, cbot, premium)
+    if cif is None:
+        return None
+    return contract_landed_cost_egp_mt(
+        cif, fx, discharge_egp_mt=discharge_egp_mt,
+        clearance_egp_mt=clearance_egp_mt, freight_egp_mt=freight_egp_mt)
+
+
+def freight_incl_vat(base_egp_mt, vat_pct=14.0):
+    """Freight including VAT = base x (1 + vat_pct / 100). Used only for
+    "Detailed" freight entry -- "All-In" entry bypasses this function
+    entirely and writes the user's already-final number straight through,
+    preventing VAT from being counted twice."""
+    base = to_float(base_egp_mt, None)
+    if base is None:
+        return None
+    pct = to_float(vat_pct, 0.0) or 0.0
+    return base * (1.0 + pct / 100.0)
