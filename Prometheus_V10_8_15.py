@@ -7314,6 +7314,118 @@ class App(tk.Tk):
                   foreground="#888").pack(side="left")
         ttk.Button(footer, text="Close", command=win.destroy).pack(side="right")
 
+    def _scenario_default_inputs(self, base_comm):
+        """Prefill the Scenario Lab's Scenario Case fields from the live
+        current-case data, so it starts as a copy of reality -- editing a
+        field is what turns it into a what-if. Never touches saved state."""
+        repl = self._fifo_replacement_cost(base_comm)
+        fifo = self._fifo_inventory_for_commodity(base_comm)
+        try:
+            freight_default = self._get_preferred_freight_for_commodity(base_comm)
+        except Exception:
+            freight_default = None
+        local_all_in = fifo.get("local_price_egp_mt")
+        return {
+            "cbot": repl.get("cbot_price"),
+            "fx": repl.get("fx_price"),
+            "premium": repl.get("premium"),
+            "local_price": local_all_in,
+            "local_transport": 0.0,
+            "freight_mode": "detailed",
+            "freight_base": freight_default,
+            "freight_vat_pct": 14.0,
+            "consumption_qty": None,
+            "consumption_horizon_days": 30.0,
+            "purchase_qty": None,
+            "new_contract_price": None,
+        }
+
+    def _scenario_compute(self, base_comm, inputs):
+        """Pure(-ish) scenario computation: takes a dict of scenario inputs
+        (see _scenario_default_inputs for the shape) and the commodity's
+        live current-case FIFO/replacement data, and returns everything
+        the Scenario Lab displays. Reads state_obj for the current case
+        only -- never writes anything, so calling this as fields change
+        can never touch saved contracts/history/consumption."""
+        fifo = self._fifo_inventory_for_commodity(base_comm)
+        repl_current = self._fifo_replacement_cost(base_comm)
+
+        cbot = to_float(inputs.get("cbot"), None)
+        fx = to_float(inputs.get("fx"), None)
+        premium = to_float(inputs.get("premium"), None)
+        local_price = to_float(inputs.get("local_price"), None)
+        local_transport = to_float(inputs.get("local_transport"), 0.0) or 0.0
+        freight_mode = inputs.get("freight_mode") or "detailed"
+        freight_base = to_float(inputs.get("freight_base"), None)
+        freight_vat_pct = to_float(inputs.get("freight_vat_pct"), 14.0) or 0.0
+        consumption_qty = to_float(inputs.get("consumption_qty"), 0.0) or 0.0
+        horizon_days = to_float(inputs.get("consumption_horizon_days"), None)
+        purchase_qty = to_float(inputs.get("purchase_qty"), 0.0) or 0.0
+        new_contract_price = to_float(inputs.get("new_contract_price"), None)
+
+        if freight_base is None:
+            freight_final = None
+        elif freight_mode == "all_in":
+            freight_final = freight_base
+        else:
+            freight_final = _core_freight_incl_vat(freight_base, freight_vat_pct)
+
+        scenario_local_all_in = (
+            (local_price + local_transport) if local_price is not None else None)
+
+        formula_purchase_cost = _core_scenario_purchase_cost_egp_mt(
+            base_comm, cbot, premium, fx, freight_egp_mt=freight_final or 0.0)
+        # A direct quoted price (e.g. a supplier's flat EGP/MT offer) takes
+        # precedence over the CBOT-formula estimate when the user supplies
+        # one -- it's more concrete than a derived figure.
+        scenario_purchase_cost = (new_contract_price if new_contract_price is not None
+                                   else formula_purchase_cost)
+
+        saving_per_mt = None
+        if scenario_local_all_in is not None and scenario_purchase_cost is not None:
+            saving_per_mt = scenario_local_all_in - scenario_purchase_cost
+        total_impact = saving_per_mt * purchase_qty if saving_per_mt is not None else None
+
+        remaining_mt = fifo["remaining_mt"]
+        projected_inventory = remaining_mt - consumption_qty + purchase_qty
+        projected_shortfall = projected_inventory < 0
+        projected_inventory = max(projected_inventory, 0.0)
+
+        coverage_days = None
+        if horizon_days and horizon_days > 0 and consumption_qty > 0:
+            daily_rate = consumption_qty / horizon_days
+            if daily_rate > 0:
+                coverage_days = projected_inventory / daily_rate
+
+        return {
+            "commodity": base_comm,
+            "current": {
+                "remaining_mt": remaining_mt,
+                "weighted_avg_cost_egp_mt": fifo["weighted_avg_cost_egp_mt"],
+                "local_price_egp_mt": fifo["local_price_egp_mt"],
+                "edge_per_mt": fifo["edge_per_mt"],
+                "edge_total": fifo["edge_total"],
+                "coverage_days": fifo["coverage_days"],
+                "cbot": repl_current.get("cbot_price"),
+                "fx": repl_current.get("fx_price"),
+                "premium": repl_current.get("premium"),
+                "replacement_cost_egp_mt": repl_current.get("replacement_cost_egp_mt"),
+            },
+            "scenario": {
+                "cbot": cbot, "fx": fx, "premium": premium,
+                "local_price_all_in": scenario_local_all_in,
+                "freight_egp_mt": freight_final,
+                "formula_purchase_cost_egp_mt": formula_purchase_cost,
+                "purchase_cost_egp_mt": scenario_purchase_cost,
+                "saving_per_mt": saving_per_mt,
+                "total_impact_egp": total_impact,
+                "projected_inventory_mt": projected_inventory,
+                "projected_shortfall": projected_shortfall,
+                "coverage_days": coverage_days,
+            },
+            "inputs": dict(inputs),
+        }
+
     def _home_exec_metrics(self, commodity="ALL", fx_mode="live"):
         """Build the executive KPI set for one base commodity or the portfolio.
 
@@ -11461,6 +11573,408 @@ class App(tk.Tk):
             return
         self._render_arrival_window(self._aw_result_frame, stats)
 
+    # ── Scenario Lab ────────────────────────────────────────────────────
+    def _build_scenario_lab_subtab(self):
+        """What-if analysis: change CBOT/FX/premium/local/freight/consumption
+        assumptions and see the impact immediately, without touching any
+        saved contract, history or consumption data. Scenario inputs live
+        only in Tkinter variables until the user explicitly saves one."""
+        p = self.tab_scenario_lab
+        p.columnconfigure(0, weight=1)
+
+        ttk.Label(p, text="🧪  Scenario Lab — change assumptions, see the impact instantly",
+                  font=("Segoe UI", 12, "bold")).grid(
+                      row=0, column=0, sticky="w", pady=(0, 4))
+        ttk.Label(p, text="Never overwrites Contracts, FX/CBOT History, Local Prices or "
+                          "Consumption — changes are temporary until you Save Scenario.",
+                  font=("Segoe UI", 9), foreground="#888").grid(
+                      row=1, column=0, sticky="w", pady=(0, 8))
+
+        bar = ttk.Frame(p)
+        bar.grid(row=2, column=0, sticky="ew", pady=(0, 8))
+        ttk.Label(bar, text="Commodity").pack(side="left")
+        self.scn_commodity_var = tk.StringVar(value="CORN")
+        comm_options = [c for c in ["CORN", "SOYBEAN", "SBM", "WHEAT", "SFM", "DDGS"]]
+        self.scn_commodity_combo = ttk.Combobox(
+            bar, textvariable=self.scn_commodity_var, values=comm_options,
+            width=10, state="readonly")
+        self.scn_commodity_combo.pack(side="left", padx=(4, 16))
+        self.scn_commodity_combo.bind(
+            "<<ComboboxSelected>>", lambda e: self._scenario_reset_to_market())
+        ttk.Button(bar, text="↺ Reset to Current Market",
+                   command=self._scenario_reset_to_market).pack(side="left", padx=(0, 6))
+        ttk.Button(bar, text="💾 Save Scenario",
+                   command=self._scenario_save).pack(side="left", padx=(0, 6))
+        ttk.Button(bar, text="⇄ Compare Scenarios",
+                   command=self._scenario_compare_dialog).pack(side="left", padx=(0, 6))
+        ttk.Button(bar, text="📊 Export Scenario Excel",
+                   command=self._scenario_export_excel).pack(side="left")
+
+        body = ttk.Frame(p)
+        body.grid(row=3, column=0, sticky="ew")
+        body.columnconfigure(0, weight=1)
+        body.columnconfigure(1, weight=1)
+
+        # ── Current Case (read-only, live) ─────────────────────────
+        cur_box = ttk.LabelFrame(body, text="  Current Case (live market)  ", padding=10)
+        cur_box.grid(row=0, column=0, sticky="new", padx=(0, 8))
+        self._scn_current_vars = {}
+        for key, label in [
+                ("cbot", "Current CBOT"), ("fx", "Current FX"),
+                ("premium", "Current Premium"),
+                ("local_price", "Current Local Price"),
+                ("replacement_cost", "Replacement Cost"),
+                ("remaining_mt", "FIFO Remaining Inventory"),
+                ("avg_cost", "Average Inventory Cost"),
+                ("edge", "Current Inventory Edge"),
+                ("coverage", "Coverage Days")]:
+            r = ttk.Frame(cur_box)
+            r.pack(fill="x", pady=2)
+            ttk.Label(r, text=label + ":", foreground="#666", width=24,
+                      anchor="w").pack(side="left")
+            var = tk.StringVar(value="—")
+            ttk.Label(r, textvariable=var, font=("Segoe UI", 9, "bold")).pack(side="left")
+            self._scn_current_vars[key] = var
+
+        # ── Scenario Case (editable) ────────────────────────────────
+        scn_box = ttk.LabelFrame(body, text="  Scenario Case (what-if)  ", padding=10)
+        scn_box.grid(row=0, column=1, sticky="new", padx=(8, 0))
+        self.scn_vars = {
+            "cbot": tk.StringVar(value=""), "fx": tk.StringVar(value=""),
+            "premium": tk.StringVar(value=""), "local_price": tk.StringVar(value=""),
+            "local_transport": tk.StringVar(value="0"),
+            "freight_mode": tk.StringVar(value="detailed"),
+            "freight_base": tk.StringVar(value=""),
+            "freight_vat_pct": tk.StringVar(value="14"),
+            "consumption_qty": tk.StringVar(value=""),
+            "consumption_horizon_days": tk.StringVar(value="30"),
+            "purchase_qty": tk.StringVar(value=""),
+            "new_contract_price": tk.StringVar(value=""),
+        }
+
+        def _field_row(key, label, step=None, width=10):
+            r = ttk.Frame(scn_box)
+            r.pack(fill="x", pady=2)
+            ttk.Label(r, text=label + ":", foreground="#666", width=22,
+                      anchor="w").pack(side="left")
+            if step is not None:
+                ttk.Button(r, text="−", width=2,
+                           command=lambda: self._scenario_nudge(key, -step)).pack(side="left")
+            ttk.Entry(r, textvariable=self.scn_vars[key], width=width).pack(
+                side="left", padx=3)
+            if step is not None:
+                ttk.Button(r, text="+", width=2,
+                           command=lambda: self._scenario_nudge(key, step)).pack(side="left")
+
+        _field_row("cbot", "CBOT (¢/bu)", step=5)
+        _field_row("fx", "FX (EGP/USD)", step=0.25)
+        _field_row("premium", "Premium (¢/bu)", step=5)
+        _field_row("local_price", "Local Market Price", step=100)
+        _field_row("local_transport", "Local Transport", step=25)
+
+        fm_row = ttk.Frame(scn_box)
+        fm_row.pack(fill="x", pady=(6, 2))
+        ttk.Label(fm_row, text="Freight entry:", foreground="#666", width=22,
+                  anchor="w").pack(side="left")
+        ttk.Radiobutton(fm_row, text="Detailed (+VAT%)", variable=self.scn_vars["freight_mode"],
+                         value="detailed").pack(side="left")
+        ttk.Radiobutton(fm_row, text="All-In", variable=self.scn_vars["freight_mode"],
+                         value="all_in").pack(side="left", padx=(6, 0))
+        _field_row("freight_base", "Freight (base/all-in)", step=25)
+        _field_row("freight_vat_pct", "Freight VAT %")
+
+        ttk.Separator(scn_box, orient="horizontal").pack(fill="x", pady=6)
+        _field_row("consumption_qty", "Consumption Qty (MT)", step=100)
+        _field_row("consumption_horizon_days", "Consumption Horizon (days)")
+        _field_row("purchase_qty", "Purchase Qty (MT)", step=100)
+        _field_row("new_contract_price", "New Proposed Contract Price")
+        ttk.Label(scn_box, text="Leave New Contract Price blank to use the "
+                                 "CBOT-formula purchase cost instead.",
+                  font=("Segoe UI", 8), foreground="#888",
+                  wraplength=280, justify="left").pack(anchor="w", pady=(4, 0))
+
+        for var in self.scn_vars.values():
+            var.trace_add("write", lambda *_: self._scenario_recalculate())
+
+        # ── Results ──────────────────────────────────────────────────
+        res_box = ttk.LabelFrame(p, text="  Scenario Results  ", padding=10)
+        res_box.grid(row=4, column=0, sticky="ew", pady=(10, 0))
+        for i in range(4):
+            res_box.columnconfigure(i, weight=1)
+        self._scn_result_vars = {}
+        result_specs = [
+            ("purchase_cost", "Scenario Purchase Cost"),
+            ("saving_per_mt", "Scenario Saving / Loss per MT"),
+            ("total_impact", "Total Scenario Impact EGP"),
+            ("projected_inventory", "Projected Inventory After Consumption"),
+            ("scenario_coverage", "Coverage Days (scenario)"),
+        ]
+        for i, (key, label) in enumerate(result_specs):
+            box = ttk.Frame(res_box)
+            box.grid(row=i // 3, column=i % 3, sticky="w", padx=(0, 24), pady=4)
+            ttk.Label(box, text=label, foreground="#666").pack(anchor="w")
+            var = tk.StringVar(value="—")
+            lbl = ttk.Label(box, textvariable=var, font=("Segoe UI", 11, "bold"))
+            lbl.pack(anchor="w")
+            self._scn_result_vars[key] = var
+            self._scn_result_vars[key + "_label"] = lbl
+
+        self._scn_status_var = tk.StringVar(value="")
+        ttk.Label(p, textvariable=self._scn_status_var,
+                  foreground="#888").grid(row=5, column=0, sticky="w", pady=(6, 0))
+
+        self._scenario_reset_to_market()
+
+    def _scenario_nudge(self, key, step):
+        cur = to_float(self.scn_vars[key].get(), 0.0) or 0.0
+        self.scn_vars[key].set(str(round(cur + step, 4)))
+
+    def _scenario_read_inputs(self):
+        return {
+            "cbot": to_float(self.scn_vars["cbot"].get(), None),
+            "fx": to_float(self.scn_vars["fx"].get(), None),
+            "premium": to_float(self.scn_vars["premium"].get(), None),
+            "local_price": to_float(self.scn_vars["local_price"].get(), None),
+            "local_transport": to_float(self.scn_vars["local_transport"].get(), 0.0),
+            "freight_mode": self.scn_vars["freight_mode"].get() or "detailed",
+            "freight_base": to_float(self.scn_vars["freight_base"].get(), None),
+            "freight_vat_pct": to_float(self.scn_vars["freight_vat_pct"].get(), 14.0),
+            "consumption_qty": to_float(self.scn_vars["consumption_qty"].get(), 0.0),
+            "consumption_horizon_days": to_float(
+                self.scn_vars["consumption_horizon_days"].get(), None),
+            "purchase_qty": to_float(self.scn_vars["purchase_qty"].get(), 0.0),
+            "new_contract_price": to_float(self.scn_vars["new_contract_price"].get(), None),
+        }
+
+    def _scenario_reset_to_market(self):
+        """Repopulate the Scenario Case fields from live current-case data.
+        Only touches the Scenario Lab's own Tkinter variables."""
+        if not hasattr(self, "scn_vars"):
+            return
+        comm = self.scn_commodity_var.get() or "CORN"
+        defaults = self._scenario_default_inputs(comm)
+        for key, var in self.scn_vars.items():
+            if key in ("freight_mode",):
+                var.set(defaults.get(key) or "detailed")
+                continue
+            val = defaults.get(key)
+            var.set("" if val is None else str(val))
+        self._scn_status_var.set(f"Reset to current {comm} market data.")
+        self._scenario_recalculate()
+
+    def _scenario_recalculate(self):
+        if not hasattr(self, "_scn_result_vars"):
+            return
+        try:
+            comm = self.scn_commodity_var.get() or "CORN"
+            inputs = self._scenario_read_inputs()
+            result = self._scenario_compute(comm, inputs)
+        except Exception as e:
+            log_exception(e, "_scenario_recalculate")
+            return
+
+        cur = result["current"]
+        cv = self._scn_current_vars
+        cv["cbot"].set(f"{cur['cbot']:.2f} ¢/bu" if cur["cbot"] is not None else "—")
+        cv["fx"].set(f"{cur['fx']:.4f}" if cur["fx"] is not None else "—")
+        cv["premium"].set(f"{cur['premium']:.2f} ¢/bu" if cur["premium"] is not None else "—")
+        cv["local_price"].set(
+            f"EGP {cur['local_price_egp_mt']:,.2f}/MT" if cur["local_price_egp_mt"] is not None else "—")
+        cv["replacement_cost"].set(
+            f"EGP {cur['replacement_cost_egp_mt']:,.2f}/MT"
+            if cur["replacement_cost_egp_mt"] is not None else "incomplete")
+        cv["remaining_mt"].set(f"{cur['remaining_mt']:,.0f} MT")
+        cv["avg_cost"].set(
+            f"EGP {cur['weighted_avg_cost_egp_mt']:,.2f}/MT"
+            if cur["weighted_avg_cost_egp_mt"] is not None else "—")
+        cv["edge"].set(
+            f"EGP {cur['edge_per_mt']:+,.2f}/MT" if cur["edge_per_mt"] is not None else "—")
+        cv["coverage"].set(
+            f"{cur['coverage_days']:.0f} days" if cur["coverage_days"] is not None else "—")
+
+        scn = result["scenario"]
+        rv = self._scn_result_vars
+        rv["purchase_cost"].set(
+            f"EGP {scn['purchase_cost_egp_mt']:,.2f}/MT"
+            if scn["purchase_cost_egp_mt"] is not None else "incomplete")
+        if scn["saving_per_mt"] is not None:
+            rv["saving_per_mt"].set(f"EGP {scn['saving_per_mt']:+,.2f}/MT")
+            rv["saving_per_mt_label"].configure(
+                foreground=CLR["success"] if scn["saving_per_mt"] >= 0 else CLR["danger"])
+        else:
+            rv["saving_per_mt"].set("—")
+            rv["saving_per_mt_label"].configure(foreground="#0f172a")
+        rv["total_impact"].set(
+            f"EGP {scn['total_impact_egp']:+,.0f}" if scn["total_impact_egp"] is not None else "—")
+        inv_txt = f"{scn['projected_inventory_mt']:,.0f} MT"
+        if scn["projected_shortfall"]:
+            inv_txt += "  ⚠ shortfall"
+            rv["projected_inventory_label"].configure(foreground=CLR["danger"])
+        else:
+            rv["projected_inventory_label"].configure(foreground="#0f172a")
+        rv["projected_inventory"].set(inv_txt)
+        rv["scenario_coverage"].set(
+            f"{scn['coverage_days']:.0f} days" if scn["coverage_days"] is not None else "—")
+
+        self._scn_last_result = result
+
+    def _scenario_save(self):
+        if not hasattr(self, "scn_vars"):
+            return
+        comm = self.scn_commodity_var.get() or "CORN"
+        label = simpledialog.askstring(
+            APP_NAME, "Name this scenario:",
+            initialvalue=f"{comm} scenario {dt.date.today().isoformat()}")
+        if not label:
+            return
+        inputs = self._scenario_read_inputs()
+        result = self._scenario_compute(comm, inputs)
+        scenarios = self.state_obj.setdefault("scenarios", {})
+        sid = f"SCN{len(scenarios) + 1:04d}"
+        while sid in scenarios:
+            sid = f"SCN{int(sid[3:]) + 1:04d}"
+        scenarios[sid] = {
+            "label": label, "commodity": comm, "created_ts": now_ts(),
+            "inputs": inputs, "results": result,
+        }
+        save_state(self.state_obj)
+        self._scn_status_var.set(f"✓ Saved scenario '{label}' ({sid}).")
+
+    def _scenario_compare_dialog(self):
+        scenarios = self.state_obj.get("scenarios", {}) or {}
+        win = tk.Toplevel(self)
+        win.title("Compare Scenarios")
+        win.geometry("900x420")
+        win.transient(self)
+        win.columnconfigure(0, weight=1)
+        win.rowconfigure(0, weight=1)
+
+        cols = [("label", "Scenario", 180, "w"), ("commodity", "Commodity", 90, "w"),
+                ("created", "Saved", 130, "center"),
+                ("purchase_cost", "Purchase Cost", 120, "e"),
+                ("saving", "Saving/MT", 100, "e"),
+                ("impact", "Total Impact", 130, "e"),
+                ("projected", "Projected Inv.", 110, "e")]
+        tv = ttk.Treeview(win, columns=[c[0] for c in cols], show="headings")
+        for key, label, width, anchor in cols:
+            tv.heading(key, text=label)
+            tv.column(key, width=width, anchor=anchor)
+        tv.grid(row=0, column=0, sticky="nsew", padx=12, pady=(12, 0))
+        sb = ttk.Scrollbar(win, orient="vertical", command=tv.yview)
+        tv.configure(yscrollcommand=sb.set)
+        sb.grid(row=0, column=1, sticky="ns", pady=(12, 0))
+
+        if not scenarios:
+            ttk.Label(win, text="No saved scenarios yet — use Save Scenario first.",
+                      foreground="#888").grid(row=1, column=0, sticky="w", padx=12, pady=10)
+        for sid, scn in sorted(scenarios.items(), key=lambda kv: kv[1].get("created_ts", "")):
+            r = scn.get("results", {}).get("scenario", {})
+            tv.insert("", "end", iid=sid, values=(
+                scn.get("label", sid), scn.get("commodity", ""),
+                (scn.get("created_ts") or "")[:16],
+                f"{r.get('purchase_cost_egp_mt'):,.2f}" if r.get("purchase_cost_egp_mt") is not None else "—",
+                f"{r.get('saving_per_mt'):+,.2f}" if r.get("saving_per_mt") is not None else "—",
+                f"{r.get('total_impact_egp'):+,.0f}" if r.get("total_impact_egp") is not None else "—",
+                f"{r.get('projected_inventory_mt'):,.0f}" if r.get("projected_inventory_mt") is not None else "—",
+            ))
+
+        btns = ttk.Frame(win)
+        btns.grid(row=2, column=0, columnspan=2, sticky="e", padx=12, pady=10)
+
+        def _delete_selected():
+            sel = tv.selection()
+            if not sel:
+                return
+            for sid in sel:
+                self.state_obj.get("scenarios", {}).pop(sid, None)
+                tv.delete(sid)
+            save_state(self.state_obj)
+
+        ttk.Button(btns, text="Delete Selected", command=_delete_selected).pack(
+            side="left", padx=(0, 8))
+        ttk.Button(btns, text="Close", command=win.destroy).pack(side="left")
+
+    def _build_scenario_workbook(self, comm, result):
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        from openpyxl.utils import get_column_letter
+        navy = "0B1F3A"
+        thin = Side(style="thin", color="D8E1EC")
+        border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Scenario"
+        ws["A1"] = f"SCENARIO LAB — {comm}"
+        ws["A1"].font = Font(bold=True, size=14, color=navy)
+        ws["A2"] = f"Generated: {now_ts()}"
+
+        def _block(row0, title, rows):
+            c = ws.cell(row0, 1, title)
+            c.font = Font(bold=True, size=12, color=navy)
+            headers = ["Metric", "Value"]
+            for col, label in enumerate(headers, 1):
+                hc = ws.cell(row0 + 1, col, label)
+                hc.fill = PatternFill("solid", fgColor=navy)
+                hc.font = Font(bold=True, color="FFFFFF")
+                hc.border = border
+                hc.alignment = Alignment(horizontal="center")
+            for i, (label, value) in enumerate(rows):
+                r = row0 + 2 + i
+                ws.cell(r, 1, label).border = border
+                vc = ws.cell(r, 2, value if value is not None else "—")
+                vc.border = border
+            return row0 + 2 + len(rows)
+
+        cur = result["current"]
+        next_row = _block(4, "Current Case", [
+            ("Current CBOT", cur.get("cbot")), ("Current FX", cur.get("fx")),
+            ("Current Premium", cur.get("premium")),
+            ("Current Local Price EGP/MT", cur.get("local_price_egp_mt")),
+            ("Replacement Cost EGP/MT", cur.get("replacement_cost_egp_mt")),
+            ("FIFO Remaining Inventory MT", cur.get("remaining_mt")),
+            ("Average Inventory Cost EGP/MT", cur.get("weighted_avg_cost_egp_mt")),
+            ("Current Inventory Edge EGP/MT", cur.get("edge_per_mt")),
+            ("Current Inventory Edge EGP (total)", cur.get("edge_total")),
+            ("Coverage Days", cur.get("coverage_days")),
+        ])
+        scn = result["scenario"]
+        _block(next_row + 2, "Scenario Case", [
+            ("Scenario CBOT", scn.get("cbot")), ("Scenario FX", scn.get("fx")),
+            ("Scenario Premium", scn.get("premium")),
+            ("Scenario Local Price (all-in) EGP/MT", scn.get("local_price_all_in")),
+            ("Scenario Freight EGP/MT", scn.get("freight_egp_mt")),
+            ("Scenario Purchase Cost EGP/MT", scn.get("purchase_cost_egp_mt")),
+            ("Scenario Saving/Loss per MT", scn.get("saving_per_mt")),
+            ("Total Scenario Impact EGP", scn.get("total_impact_egp")),
+            ("Projected Inventory After Consumption MT", scn.get("projected_inventory_mt")),
+            ("Coverage Days (scenario)", scn.get("coverage_days")),
+        ])
+        for col, width in enumerate([34, 18], 1):
+            ws.column_dimensions[get_column_letter(col)].width = width
+        return wb
+
+    def _scenario_export_excel(self):
+        if not _need_openpyxl():
+            return
+        if not hasattr(self, "_scn_last_result") or self._scn_last_result is None:
+            messagebox.showinfo(APP_NAME, "Nothing to export yet — adjust a field first.")
+            return
+        try:
+            comm = self.scn_commodity_var.get() or "CORN"
+            fp = filedialog.asksaveasfilename(
+                initialdir=get_default_export_dir(),
+                initialfile=f"Scenario_{comm}_{dt.date.today().isoformat()}.xlsx",
+                defaultextension=".xlsx", filetypes=[("Excel", "*.xlsx")],
+                title="Export Scenario")
+            if not fp:
+                return
+            wb = self._build_scenario_workbook(comm, self._scn_last_result)
+            wb.save(fp)
+            messagebox.showinfo(APP_NAME, f"Exported scenario:\n{fp}")
+        except Exception as exc:
+            self._surface_error("_scenario_export_excel", exc, show=True)
+
     def _export_contract_intelligence(self, cid=None, c=None):
         """Full per-contract intelligence Excel:
         Sheet 1 — Contract Summary
@@ -14206,7 +14720,7 @@ class App(tk.Tk):
                 ("supplier", "Supplier Scorecard"), ("season", "Seasonality"),
                 ("origin", "Origin Compare"), ("savings", "Savings Tracker"),
                 ("basis", "Basis Tracker"), ("exposure", "Exposure & Risk"),
-                ("arrival", "Arrival Window")])
+                ("arrival", "Arrival Window"), ("scenario", "Scenario Lab")])
         _a_bar.grid(row=1, column=0, sticky="w", pady=(0, 4))
         _a_host.grid(row=2, column=0, sticky="nsew")
 
@@ -14221,6 +14735,7 @@ class App(tk.Tk):
         self.tab_basis    = _a_screens["basis"]
         self.tab_exposure = _a_screens["exposure"]
         self.tab_arrival_window = _a_screens["arrival"]
+        self.tab_scenario_lab = _a_screens["scenario"]
 
         self._build_performance()
         self._build_an_contract_subtab()
@@ -14233,6 +14748,7 @@ class App(tk.Tk):
         self._build_basis_tracker()
         self._build_exposure_risk()
         self._build_arrival_window_subtab()
+        self._build_scenario_lab_subtab()
         _a_finalize()
 
     def _build_an_contract_subtab(self):
