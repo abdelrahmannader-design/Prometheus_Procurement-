@@ -20,10 +20,11 @@ from . import primitives as pr
 from .theme import Theme, mix
 
 __all__ = [
-    "line_height", "bind_wraplength", "Surface", "Card", "SectionTitle", "PillButton", "IconBubble", "Chip",
-    "StatTile", "SegmentedControl", "SearchField", "ToggleSwitch",
-    "MetricRow", "ListRow", "Divider", "HeroBanner", "EmptyState",
-    "ProgressTrack", "parent_bg",
+    "line_height", "text_width", "bind_wraplength", "parent_bg",
+    "Surface", "Card", "Panel", "SectionTitle", "Divider",
+    "PillButton", "IconBubble", "Chip", "StatTile", "MetricRow", "ListRow",
+    "SegmentedControl", "SearchField", "ToggleSwitch", "ProgressTrack",
+    "HeroBanner", "EmptyState",
 ]
 
 
@@ -35,6 +36,20 @@ def line_height(widget, font) -> int:
     except Exception:
         size = font[1] if isinstance(font, (tuple, list)) and len(font) > 1 else 10
         return int(size * 1.45)
+
+
+def text_width(widget, font, text) -> int:
+    """Measured pixel width of ``text`` in ``font``.
+
+    Canvas layout has to reserve space for text before drawing it, and a
+    character-count estimate is wrong often enough to push a label out of
+    its own pill. Measure instead.
+    """
+    try:
+        return int(tkfont.Font(root=widget, font=font).measure(str(text)))
+    except Exception:
+        size = font[1] if isinstance(font, (tuple, list)) and len(font) > 1 else 10
+        return int(len(str(text)) * size * 0.62)
 
 
 def bind_wraplength(label, container=None, pad=8):
@@ -144,6 +159,57 @@ class Card(tk.Frame):
         self._fill = self.theme.c(fill)
         self.body.configure(bg=self._fill)
         self._redraw()
+
+
+class Panel(tk.Frame):
+    """A rounded surface you parent children into *directly*.
+
+    :class:`Card` keeps its content in a separate ``body`` frame, which is
+    the right shape for new code. Panel exists for the opposite case: an
+    existing screen that grids its children into the container it was
+    given and also grids that container itself. Painting the rounded
+    surface on a ``place``d canvas behind the frame lets one widget do both
+    jobs, so a legacy panel can become a modern card without its children
+    being re-parented.
+    """
+
+    def __init__(self, master, theme: Theme, radius="lg", fill="surface",
+                 shadow=True, ground=None, **kw):
+        self.theme = theme
+        self._ground = ground or parent_bg(master, theme.c("bg"))
+        self._fill = theme.c(fill)
+        self._radius = theme.r(radius) if isinstance(radius, str) else int(radius)
+        self._shadow = bool(shadow)
+        self._margin = 5 if shadow else 0
+        super().__init__(master, bg=self._fill, **kw)
+        self._bgcv = tk.Canvas(self, bg=self._ground, highlightthickness=0, bd=0)
+        self._bgcv.place(x=0, y=0, relwidth=1, relheight=1)
+        self.bind("<Configure>", self._redraw)
+
+    @property
+    def fill(self) -> str:
+        return self._fill
+
+    def _redraw(self, _event=None):
+        cv = self._bgcv
+        cv.delete("all")
+        w, h = self.winfo_width(), self.winfo_height()
+        if w <= 2 or h <= 2:
+            return
+        m = self._margin
+        if self._shadow:
+            pr.soft_shadow(cv, m, m, w - m, h - m, radius=self._radius,
+                           ground=self._ground, color=self.theme.c("shadow"),
+                           strength=0.30 if not self.theme.is_dark else 0.62,
+                           layers=5, spread=m, offset=3)
+        pr.round_rect(cv, m, m, w - m, h - m, radius=self._radius,
+                      fill=self._fill)
+        # Children were gridded before this canvas existed in stacking
+        # order on the first pass; keep it underneath them.
+        try:
+            cv.lower()
+        except Exception:
+            pass
 
 
 class SectionTitle(tk.Frame):
@@ -412,9 +478,17 @@ class StatTile(Card):
         self.chip.grid_remove()
 
         self.value_var = tk.StringVar(value=value)
-        tk.Label(b, textvariable=self.value_var, bg=bg, fg=theme.c("ink"),
-                 font=theme.font("metric", "bold"), anchor="w").grid(
-                     row=1, column=0, sticky="w", pady=(12, 0))
+        self._value_lbl = tk.Label(b, textvariable=self.value_var, bg=bg,
+                                   fg=theme.c("ink"),
+                                   font=theme.font("metric", "bold"),
+                                   anchor="w")
+        self._value_lbl.grid(row=1, column=0, sticky="w", pady=(12, 0))
+        # A KPI can be "8" or "+EGP 613.8m". Step the display size down when
+        # the figure would otherwise be clipped by the tile — a truncated
+        # number is worse than a slightly smaller one.
+        self._fit_after = None
+        self.value_var.trace_add("write", lambda *_a: self._schedule_fit())
+        self.bind("<Configure>", lambda _e: self._schedule_fit())
 
         self.hint_var = tk.StringVar(value=hint)
         tk.Label(b, textvariable=self.hint_var, bg=bg, fg=theme.c("ink_3"),
@@ -431,6 +505,31 @@ class StatTile(Card):
 
         if callable(on_click):
             self._bind_click(self, on_click)
+
+    def _schedule_fit(self):
+        if self._fit_after is not None:
+            try:
+                self.after_cancel(self._fit_after)
+            except Exception:
+                pass
+        self._fit_after = self.after(16, self._fit_value)
+
+    def _fit_value(self):
+        self._fit_after = None
+        try:
+            if not self._value_lbl.winfo_exists():
+                return
+            available = self.body.winfo_width()
+            if available <= 20:
+                return
+            for token in ("metric", "title", "subtitle", "body_lg"):
+                font = self.theme.font(token, "bold")
+                probe = tkfont.Font(root=self, font=font)
+                if probe.measure(self.value_var.get() or "") <= available:
+                    break
+            self._value_lbl.configure(font=font)
+        except Exception:
+            pass
 
     def _bind_click(self, widget, command):
         widget.configure(cursor="hand2")
@@ -907,6 +1006,7 @@ class HeroBanner(tk.Canvas):
     def redraw(self):
         self.delete("all")
         self._action_hits = {}
+        self._actions_right = 0
         w, h = self.winfo_width(), self.winfo_height()
         if w <= 4 or h <= 4:
             return
@@ -958,7 +1058,7 @@ class HeroBanner(tk.Canvas):
                 strong, _soft = t.tone(self.metric_delta_tone)
                 chip_fill = mix(c2, strong, 0.85)
                 chip_h = line_height(self, f_chip) + 8
-                tw = pr.chip_text_width(t.size("caption"), self.metric_delta, pad=12)
+                tw = text_width(self, f_chip, self.metric_delta) + 24
                 pr.pill(self, mx - tw, my, mx, my + chip_h, fill=chip_fill)
                 self.create_text(mx - tw / 2, my + chip_h / 2,
                                  text=self.metric_delta,
@@ -970,8 +1070,9 @@ class HeroBanner(tk.Canvas):
             ay2 = h - pad + 4
             ay1 = ay2 - (line_height(self, t.font("body", "bold")) + 16)
             ax = pad
+            f_action = t.font("body", "bold")
             for idx, (label, _cb) in enumerate(self._actions):
-                tw = pr.chip_text_width(t.size("body"), label, pad=18)
+                tw = text_width(self, f_action, label) + 36
                 hot = self._hot == idx
                 if idx == 0:
                     fill = "#ffffff" if not hot else mix("#ffffff", c1, 0.12)
@@ -981,11 +1082,17 @@ class HeroBanner(tk.Canvas):
                     fg = "#ffffff"
                 pr.pill(self, ax, ay1, ax + tw, ay2, fill=fill)
                 self.create_text(ax + tw / 2, (ay1 + ay2) / 2, text=label,
-                                 fill=fg, font=t.font("body", "bold"))
+                                 fill=fg, font=f_action)
                 self._action_hits[idx] = (ax, ay1, ax + tw, ay2)
                 ax += tw + 10
+            self._actions_right = ax
 
         if self.footnote:
+            # Keep clear of the action pills: the footnote gets only the
+            # space to their right, and wraps inside it.
+            left_edge = getattr(self, "_actions_right", pad) + 16
+            room = max(120, w - pad - left_edge)
             self.create_text(w - pad, h - pad + 4, anchor="se",
                              text=self.footnote, fill=ink_soft,
+                             justify="right", width=room,
                              font=t.font("caption"))

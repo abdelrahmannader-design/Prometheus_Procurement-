@@ -99,18 +99,29 @@ class DesktopSmokeTests(unittest.TestCase):
         self.assertIn("Open Exposure by Commodity", source)
         self.assertIn("Data Quality & Quick Links", source)
         self.assertIn("comm_portfolio.grid(row=2", source)
-        self.assertIn("exp.grid(row=7", source)
-        self.assertIn("sc.grid(row=8", source)
-        self.assertIn("se.grid(row=9", source)
-        self.assertNotIn("se.grid(row=6", source)
+        # Section order is the invariant; the sections themselves are now
+        # built by `_hd_section` rather than as raw LabelFrames.
+        self.assertIn("row=7, sticky=\"nsew\")", source)         # open MTM
+        self.assertIn("\"Closed contracts only\", row=8", source)  # scorecard
+        self.assertIn("row=9, sticky=\"nsew\")", source)         # scenarios
 
-    def test_home_uses_dark_executive_dashboard_style(self):
+    def test_home_is_themed_through_the_shared_palette(self):
+        """Home used to be a hand-painted dark cockpit sitting above light
+        ttk frames, which is why it matched neither the rest of the app nor
+        itself. It now resolves every colour through `_hd_theme()`."""
         source = self.path.read_text(encoding="utf-8")
         self.assertIn("CEO Dashboard", source)
         self.assertIn("Open Exposure by Commodity", source)
         self.assertIn("Top Contracts / Recent Decisions", source)
         self.assertIn("Data Quality & Quick Links", source)
-        self.assertIn("#07111f", source)
+        self.assertIn("def _hd_theme", source)
+        self.assertIn("_HOME_LEGACY_COLOURS", source)
+        builder = source[source.index("def _build_home_dashboard"):
+                         source.index("def _hd_make_tree")]
+        # The legacy navy may only survive inside the classic fallback map.
+        for legacy in ("#07111f", "#0b1728", "#06101d", "#0f172a"):
+            self.assertNotIn(legacy, builder,
+                             f"{legacy} is hardcoded in the Home builder")
 
     def test_previous_ceo_dashboard_is_preserved(self):
         self.assertTrue((self.project / "legacy" / "V10_8_13_Frozen.py").exists())
