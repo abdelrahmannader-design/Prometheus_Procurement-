@@ -14711,6 +14711,12 @@ class App(tk.Tk):
                 elif cost_basis == "live":
                     issues.append("FIFO cost is indicative — contract not priced yet, "
                                   "derived from live CBOT + premium (it will move with the market)")
+                    if metrics.get("inventory_vs_replacement_egp_mt") is not None:
+                        # Both sides then use the same live CBOT + premium, so
+                        # that term cancels: what is left is the FX and fee
+                        # difference, never a board advantage.
+                        issues.append("Edge vs CBOT is FX and fees only — the board and premium "
+                                      "cancel out because this lot is not priced")
                 if local is None: issues.append("Current local price missing")
                 if cbot is None and factor is not None: issues.append("Live CBOT missing")
                 if factor is not None and premium_for_replacement is None: issues.append("Positive premium missing")
@@ -14815,6 +14821,7 @@ class App(tk.Tk):
         groups=defaultdict(list)
         for r in rows: groups[r.get("base") or "OTHER"].append(r)
         total_qty=0.0; total_local_edge=0.0; total_repl_edge=0.0; local_known=False; repl_known=False; issue_count=0
+        unpriced_repl=0
         for base in sorted(groups, key=lambda b: (self._home_commodity_options().index(b) if b in self._home_commodity_options() else 999,b)):
             rs=groups[base]; qty=sum(to_float(r.get("remaining_mt"),0.0) or 0.0 for r in rs); total_qty+=qty
             def wavg(key):
@@ -14825,13 +14832,20 @@ class App(tk.Tk):
                 return num/den if den else None
             fifo=wavg("fifo_cost"); local=wavg("local"); repl=wavg("replacement_cost"); cbot=wavg("live_cbot")
             local_total=sum(to_float(r.get("edge_local_total"),0.0) or 0.0 for r in rs if r.get("edge_local_total") is not None)
-            repl_total=sum(to_float(r.get("edge_repl_total"),0.0) or 0.0 for r in rs if r.get("edge_repl_total") is not None)
+            # Unpriced lots price BOTH sides off today's board, so their
+            # "advantage vs replacement" is an FX/fee artefact, not a market
+            # position. Keep it on the row, keep it out of the headline.
+            priced_rs=[r for r in rs if r.get("fifo_cost_basis") != "live"]
+            repl_total=sum(to_float(r.get("edge_repl_total"),0.0) or 0.0 for r in priced_rs if r.get("edge_repl_total") is not None)
+            repl_qty=sum(to_float(r.get("remaining_mt"),0.0) or 0.0 for r in priced_rs if r.get("edge_repl_total") is not None)
+            unpriced_repl += sum(1 for r in rs if r.get("fifo_cost_basis") == "live"
+                                 and r.get("edge_repl_total") is not None)
             g_local_known = any(r.get("edge_local_total") is not None for r in rs)
-            g_repl_known = any(r.get("edge_repl_total") is not None for r in rs)
+            g_repl_known = any(r.get("edge_repl_total") is not None for r in priced_rs)
             if g_local_known: local_known=True; total_local_edge+=local_total
             if g_repl_known: repl_known=True; total_repl_edge+=repl_total
             g_local_mt=local_total/qty if qty and g_local_known else None
-            g_repl_mt=repl_total/qty if qty and g_repl_known else None
+            g_repl_mt=repl_total/repl_qty if repl_qty and g_repl_known else None
             tv.insert("","end",iid=f"__IM_GRP_{base}",tags=("grp",),values=(
                 f"▸ {base} ({len(rs)} FIFO lots)","","","","","",fmt_num(qty,0),fmt_num(fifo,0),
                 "quantity-weighted across the lots below",
@@ -14860,7 +14874,11 @@ class App(tk.Tk):
                     r.get("fifo_cost_formula_short") or r.get("fifo_cost_formula") or "",
                     fmt_num(r.get("live_cbot"),2),fmt_num(r.get("premium"),2),
                     r.get("formula"),fmt_num(r.get("fx_today"),4),fmt_num(r.get("freight_today"),0),fmt_num(r.get("replacement_cost"),0),
-                    local_disp,fmt_num(r.get("edge_local_mt"),0),fmt_num(r.get("edge_repl_mt"),0),r.get("decision") or ""))
+                    local_disp,fmt_num(r.get("edge_local_mt"),0),
+                    (fmt_num(r.get("edge_repl_mt"),0)
+                     + (" fx/fees" if r.get("fifo_cost_basis") == "live"
+                        and r.get("edge_repl_mt") is not None else "")),
+                    r.get("decision") or ""))
         local_txt=self._home_compact_money(total_local_edge) if local_known else "—"
         repl_txt=self._home_compact_money(total_repl_edge) if repl_known else "—"
         self.im_summary_var.set(
@@ -14868,7 +14886,11 @@ class App(tk.Tk):
             f"Inventory edge vs current local {local_txt} · inventory advantage vs CBOT replacement {repl_txt} · "
             f"{issue_count} data warning(s).  * local carried forward more than 14 days.  "
             "~ FIFO cost is indicative: the contract is not priced yet, so the figure "
-            "is derived from live CBOT + premium and moves with the market.")
+            "is derived from live CBOT + premium and moves with the market."
+            + (f"  The replacement advantage covers priced lots only — "
+               f"{unpriced_repl} unpriced lot(s) are excluded, because pricing both "
+               f"sides off today's board leaves an FX/fee difference, not a market "
+               f"advantage (shown per row as 'fx/fees')." if unpriced_repl else ""))
 
     def _open_inventory_market_tab(self, commodity=None, status=None):
         try:

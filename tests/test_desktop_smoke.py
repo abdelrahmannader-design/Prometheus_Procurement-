@@ -251,6 +251,22 @@ class DesktopSmokeTests(unittest.TestCase):
         self.assertIn("get_column_letter(len(hdr))", source)
         self.assertNotIn('auto_filter.ref=f"A4:V', source)
 
+    def test_unpriced_lot_has_no_real_edge_against_cbot_replacement(self):
+        """An unpriced lot prices BOTH sides off today's board, so the CBOT +
+        premium term cancels and no board advantage can remain. Make the
+        cancellation explicit rather than letting the residue read as one."""
+        source = self.path.read_text(encoding="utf-8")
+        self.assertIn("Edge vs CBOT is FX and fees only", source)
+        self.assertIn("fx/fees", source)
+        # The headline must be built from priced lots only.
+        self.assertIn("priced_rs=[r for r in rs if r.get(\"fifo_cost_basis\") != \"live\"]", source)
+        self.assertIn("The replacement advantage covers priced lots only", source)
+        refresh = source[source.index("def refresh_inventory_market"):]
+        refresh = refresh[:refresh.index("def _open_inventory_market_tab")]
+        # The per-MT figure divides by the priced quantity, not everything.
+        self.assertIn("g_repl_mt=repl_total/repl_qty", refresh)
+        self.assertNotIn("g_repl_mt=repl_total/qty", refresh)
+
     # ── Sideways scrolling ────────────────────────────────────────────
     def test_shift_wheel_scrolls_the_table_not_the_width_locked_page(self):
         source = self.path.read_text(encoding="utf-8")
