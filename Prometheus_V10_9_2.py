@@ -6872,6 +6872,51 @@ class App(tk.Tk):
     # ------------------------------------------------------------------
     # V10.9.2 — Daily FIFO Inventory + Inventory vs Market integration
     # ------------------------------------------------------------------
+    @staticmethod
+    def _fifo_cost_formula(economics, compact=False):
+        """Spell out how a FIFO lot's cost per MT was built.
+
+        No figure on these screens is allowed to be unaccountable, and the
+        cost side had no visible derivation at all: the table showed FX
+        Today and Freight Today, which are *replacement* inputs, while the
+        cost itself was built from the contract's own locked FX and fees.
+        This makes that difference readable instead of implied.
+        """
+        if not isinstance(economics, dict):
+            return ""
+        cif = to_float(economics.get("cif"), None)
+        fx = to_float(economics.get("fx"), None)
+        disc = to_float(economics.get("disc"), 0.0) or 0.0
+        clr = to_float(economics.get("clr"), 0.0) or 0.0
+        freight = to_float(economics.get("freight"), 0.0) or 0.0
+        basis = economics.get("cif_basis")
+        if cif is None:
+            if basis == "saved" or basis is None:
+                return "No fixed CIF, and no CBOT + premium to derive one"
+            return "CIF unavailable"
+        if fx is None or not fx:
+            return f"CIF {cif:,.2f} — no FX to convert it"
+
+        if basis == "override":
+            head = f"Manual CIF {cif:,.2f}"
+        elif basis == "live":
+            derivation = (economics.get("cif_formula") or "").split(" | ")[0]
+            derivation = derivation.replace(" (indicative)", "").strip()
+            head = f"{derivation} = CIF {cif:,.2f}" if derivation else f"CIF {cif:,.2f}"
+        else:
+            head = f"Fixed CIF {cif:,.2f}"
+
+        fees = freight + disc + clr
+        text = f"{head} × FX {fx:,.4f} + fees {fees:,.0f}"
+        if compact:
+            # The grid cell has a fixed width, and the "~" on the FIFO Cost
+            # value plus the row's warning already carry the indicative flag.
+            return text
+        text += f" (frt {freight:,.0f} · dis {disc:,.0f} · clr {clr:,.0f})"
+        if basis == "live":
+            text += " · indicative, not a fixed price"
+        return text
+
     def _fifo_contract_lots(self, as_of=None):
         """Normalize every dated contract into one FIFO receipt lot.
 
@@ -6893,10 +6938,13 @@ class App(tk.Tk):
                     cid, c, use_latest_fx=False, fx_mode="locked")
                 cost = to_float(economics.get("own_after"), None)
                 cost_basis = economics.get("cif_basis")
+                cost_formula = self._fifo_cost_formula(economics)
+                cost_formula_short = self._fifo_cost_formula(economics, compact=True)
             except Exception as exc:
                 log_exception(exc, f"_fifo_contract_lots:{cid}")
                 cost = None
                 cost_basis = None
+                cost_formula = cost_formula_short = ""
             rows.append({
                 "lot_id": f"CONTRACT-{cid}",
                 "contract_id": cid,
@@ -6910,6 +6958,8 @@ class App(tk.Tk):
                 "original_mt": qty,
                 "cost_egp_mt": cost,
                 "cost_basis": cost_basis,
+                "cost_formula": cost_formula,
+                "cost_formula_short": cost_formula_short,
                 "premium": to_float(c.get("premium_cents"), None),
                 "priced": bool(c.get("priced", False)),
             })
@@ -14588,6 +14638,9 @@ class App(tk.Tk):
                         "supplier": "", "commodity": base, "origin": "",
                         "status": layer.get("status") or "Physical adjustment",
                         "remaining_mt": rem, "fifo_cost": to_float(layer.get("cost_egp_mt"), None),
+                    "fifo_cost_basis": layer.get("cost_basis"),
+                    "fifo_cost_formula": layer.get("cost_formula") or "Physical adjustment — no contract economics",
+                    "fifo_cost_formula_short": layer.get("cost_formula_short") or "Physical adjustment",
                         "pricing_status": "N/A", "live_cbot": cbot, "premium": None,
                         "replacement_cif": None, "formula": "No contract premium / route",
                         "fx_today": fx_today, "freight_today": None, "replacement_cost": None,
@@ -14665,7 +14718,10 @@ class App(tk.Tk):
                     "supplier": c.get("supplier") or "", "commodity": (c.get("commodity") or base).upper(),
                     "origin": c.get("origin") or "", "status": (c.get("status") or "Open").strip() or "Open",
                     "remaining_mt": rem, "fifo_cost": fifo_cost,
-                    "fifo_cost_basis": cost_basis, "pricing_status": pricing_status,
+                    "fifo_cost_basis": cost_basis,
+                    "fifo_cost_formula": layer.get("cost_formula") or "",
+                    "fifo_cost_formula_short": layer.get("cost_formula_short") or "",
+                    "pricing_status": pricing_status,
                     "live_cbot": cbot, "premium": premium_for_replacement,
                     "replacement_cif": metrics.get("replacement_cif_usd_mt"),
                     "formula": formula, "fx_today": fx_today, "freight_today": freight_today,
@@ -14712,14 +14768,17 @@ class App(tk.Tk):
         frame=ttk.Frame(p); frame.grid(row=4,column=0,sticky="nsew"); frame.columnconfigure(0,weight=1); frame.rowconfigure(0,weight=1)
         cols=[
             ("Ref",170,"w"),("Supplier",110,"w"),("Commodity",90,"w"),("Origin",85,"w"),("Status",68,"w"),
-            ("Pricing",78,"center"),("Remaining_MT",92,"e"),("FIFO_Cost",95,"e"),("Live_CBOT",82,"e"),
+            ("Pricing",78,"center"),("Remaining_MT",92,"e"),("FIFO_Cost",95,"e"),
+            ("FIFO_Cost_Basis",510,"w"),("Live_CBOT",82,"e"),
             ("Premium",75,"e"),("CBOT_Formula",215,"w"),("FX_Today",80,"e"),("Freight_Today",95,"e"),
             ("Replacement",105,"e"),("Local_Today",95,"e"),("Edge_Local_MT",100,"e"),("Edge_CBOT_MT",100,"e"),
             ("Decision",155,"w"),
         ]
         self.im_tree=ttk.Treeview(frame,columns=[c[0] for c in cols],show="headings",height=18)
         headers={
-            "Remaining_MT":"Remaining MT","FIFO_Cost":"FIFO Cost","Live_CBOT":"Live CBOT","CBOT_Formula":"CIF Formula / Live CBOT",
+            "Remaining_MT":"Remaining MT","FIFO_Cost":"FIFO Cost",
+            "FIFO_Cost_Basis":"How the FIFO Cost is built",
+            "Live_CBOT":"Live CBOT","CBOT_Formula":"CIF Formula / Live CBOT",
             "FX_Today":"FX Today","Freight_Today":"Freight Today","Replacement":"CBOT Replacement","Local_Today":"Current Local",
             "Edge_Local_MT":"Edge vs Local/MT","Edge_CBOT_MT":"Edge vs CBOT/MT"}
         for name,w,anchor in cols:
@@ -14771,7 +14830,9 @@ class App(tk.Tk):
             g_local_mt=local_total/qty if qty and g_local_known else None
             g_repl_mt=repl_total/qty if qty and g_repl_known else None
             tv.insert("","end",iid=f"__IM_GRP_{base}",tags=("grp",),values=(
-                f"▸ {base} ({len(rs)} FIFO lots)","","","","","",fmt_num(qty,0),fmt_num(fifo,0),fmt_num(cbot,2),"","",
+                f"▸ {base} ({len(rs)} FIFO lots)","","","","","",fmt_num(qty,0),fmt_num(fifo,0),
+                "quantity-weighted across the lots below",
+                fmt_num(cbot,2),"","",
                 fmt_num((rs[0].get("fx_today") if rs else None),4),"",fmt_num(repl,0),fmt_num(local,0),fmt_num(g_local_mt,0),fmt_num(g_repl_mt,0),
                 f"{self._home_compact_money(local_total) if g_local_known else '—'} local | {self._home_compact_money(repl_total) if g_repl_known else '—'} repl"))
             for i,r in enumerate(rs):
@@ -14793,6 +14854,7 @@ class App(tk.Tk):
                     # "~" marks a cost derived from today's board rather than
                     # a fixed contract price, so the two are never confused.
                     (fmt_num(r.get("fifo_cost"),0) + (" ~" if r.get("fifo_cost_basis") == "live" and r.get("fifo_cost") is not None else "")),
+                    r.get("fifo_cost_formula_short") or r.get("fifo_cost_formula") or "",
                     fmt_num(r.get("live_cbot"),2),fmt_num(r.get("premium"),2),
                     r.get("formula"),fmt_num(r.get("fx_today"),4),fmt_num(r.get("freight_today"),0),fmt_num(r.get("replacement_cost"),0),
                     local_disp,fmt_num(r.get("edge_local_mt"),0),fmt_num(r.get("edge_repl_mt"),0),r.get("decision") or ""))
@@ -14833,12 +14895,15 @@ class App(tk.Tk):
         try:
             wb=openpyxl.Workbook(); ws=wb.active; ws.title="Inventory vs Market"
             ws.append(["Prometheus Procurement — Inventory vs Market"]); ws.append(["As of",dt.date.today().isoformat(),"Commodity",comm,"Status",status]); ws.append([])
-            hdr=["Ref","Supplier","Commodity","Origin","Status","Pricing","Remaining MT","FIFO Cost EGP/MT","Live CBOT","Premium","CIF Formula / Live CBOT","FX Today","Freight Today incl VAT","CBOT Replacement EGP/MT","Current Local EGP/MT","Edge vs Local EGP/MT","Total Edge vs Local EGP","Edge vs CBOT EGP/MT","Total Edge vs CBOT EGP","Decision","Local Price Date","Warnings"]
+            hdr=["Ref","Supplier","Commodity","Origin","Status","Pricing","Remaining MT","FIFO Cost EGP/MT","How the FIFO Cost is built","Live CBOT","Premium","CIF Formula / Live CBOT","FX Today","Freight Today incl VAT","CBOT Replacement EGP/MT","Current Local EGP/MT","Edge vs Local EGP/MT","Total Edge vs Local EGP","Edge vs CBOT EGP/MT","Total Edge vs CBOT EGP","Decision","Local Price Date","Warnings"]
             ws.append(hdr)
             for r in rows:
-                ws.append([r.get("ref"),r.get("supplier"),r.get("commodity"),r.get("origin"),r.get("status"),r.get("pricing_status"),r.get("remaining_mt"),r.get("fifo_cost"),r.get("live_cbot"),r.get("premium"),r.get("formula"),r.get("fx_today"),r.get("freight_today"),r.get("replacement_cost"),r.get("local"),r.get("edge_local_mt"),r.get("edge_local_total"),r.get("edge_repl_mt"),r.get("edge_repl_total"),r.get("decision"),r.get("local_date")," | ".join(r.get("issues") or [])])
+                ws.append([r.get("ref"),r.get("supplier"),r.get("commodity"),r.get("origin"),r.get("status"),r.get("pricing_status"),r.get("remaining_mt"),r.get("fifo_cost"),r.get("fifo_cost_formula"),r.get("live_cbot"),r.get("premium"),r.get("formula"),r.get("fx_today"),r.get("freight_today"),r.get("replacement_cost"),r.get("local"),r.get("edge_local_mt"),r.get("edge_local_total"),r.get("edge_repl_mt"),r.get("edge_repl_total"),r.get("decision"),r.get("local_date")," | ".join(r.get("issues") or [])])
             for cell in ws[4]: cell.font=Font(bold=True)
-            ws.freeze_panes="A5"; ws.auto_filter.ref=f"A4:V{ws.max_row}"
+            # Derive the filter range from the header instead of hardcoding a
+            # column letter — adding a column silently truncated it before.
+            ws.freeze_panes="A5"
+            ws.auto_filter.ref=f"A4:{get_column_letter(len(hdr))}{ws.max_row}"
             for col in range(1,ws.max_column+1):
                 ws.column_dimensions[get_column_letter(col)].width=min(max(12,max(len(str(ws.cell(row=r,column=col).value or "")) for r in range(1,min(ws.max_row,50)+1))+2),35)
             wb.save(path); messagebox.showinfo(APP_NAME, f"Inventory vs Market exported:\n{path}")

@@ -189,6 +189,65 @@ class DesktopSmokeTests(unittest.TestCase):
         self.assertIn("FIFO cost is indicative", source)
         self.assertIn('r.get("fifo_cost_basis") == "live"', source)
 
+    def test_fifo_cost_derivation_is_spelled_out(self):
+        """Every cost on the table must be auditable from the row itself."""
+        contract = self._corn_contract()
+        app = self._cost_app(contract)
+        derived = app._fifo_cost_formula(app._hd_cost_for_contract(
+            "C1", contract, use_latest_fx=False, fx_mode="locked"))
+        self.assertIn("532.75", derived)          # the board it came from
+        self.assertIn("194.25", derived)          # the premium
+        self.assertIn("0.3937", derived)          # the conversion factor
+        self.assertIn("50.9620", derived)         # the FX actually used
+        self.assertIn("665", derived)             # freight + discharge + clearance
+        self.assertIn("indicative", derived)
+        # The grid cell is width-bound, so it drops the fee split and the
+        # indicative words (the value's "~" and the warning carry those).
+        short = app._fifo_cost_formula(app._hd_cost_for_contract(
+            "C1", contract, use_latest_fx=False, fx_mode="locked"), compact=True)
+        self.assertLess(len(short), len(derived))
+        self.assertIn("FX 50.9620", short)
+        self.assertNotIn("frt", short)
+
+        fixed = self._corn_contract(priced=True, cif_usd_mt=286.12)
+        app = self._cost_app(fixed)
+        text = app._fifo_cost_formula(app._hd_cost_for_contract(
+            "C1", fixed, use_latest_fx=False, fx_mode="locked"))
+        self.assertIn("Fixed CIF 286.12", text)
+        self.assertNotIn("indicative", text)
+
+    def test_derivation_shows_the_contracts_own_fx_not_todays(self):
+        """The cost uses locked FX while the table's FX column shows today's;
+        the derivation is where that difference becomes visible."""
+        contract = self._corn_contract(priced=True, cif_usd_mt=286.12,
+                                       delivery_fx=48.5)
+        app = self._cost_app(contract)
+        text = app._fifo_cost_formula(app._hd_cost_for_contract(
+            "C1", contract, use_latest_fx=False, fx_mode="locked"))
+        self.assertIn("FX 48.5000", text)
+        self.assertNotIn("50.9620", text)
+
+    def test_derivation_explains_a_missing_cost_instead_of_going_blank(self):
+        contract = self._corn_contract(premium_cents=None)
+        app = self._cost_app(contract)
+        economics = app._hd_cost_for_contract(
+            "C1", contract, use_latest_fx=False, fx_mode="locked")
+        self.assertIsNone(economics["own_after"])
+        self.assertIn("No fixed CIF", app._fifo_cost_formula(economics))
+
+    def test_inventory_table_and_export_carry_the_derivation_column(self):
+        source = self.path.read_text(encoding="utf-8")
+        self.assertIn('("FIFO_Cost_Basis",510,"w")', source)
+        self.assertIn('"How the FIFO Cost is built"', source)
+        self.assertIn('r.get("fifo_cost_formula")', source)
+        self.assertIn('r.get("fifo_cost_formula_short")', source)
+        # Every row kind carries it: contract lots, subtotals, physical lots.
+        self.assertIn("quantity-weighted across the lots below", source)
+        self.assertIn("Physical adjustment — no contract economics", source)
+        # The Excel filter range must follow the header, not a fixed letter.
+        self.assertIn("get_column_letter(len(hdr))", source)
+        self.assertNotIn('auto_filter.ref=f"A4:V', source)
+
     # ── Sideways scrolling ────────────────────────────────────────────
     def test_shift_wheel_scrolls_the_table_not_the_width_locked_page(self):
         source = self.path.read_text(encoding="utf-8")
