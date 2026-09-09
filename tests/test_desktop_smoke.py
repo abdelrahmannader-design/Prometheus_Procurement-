@@ -123,6 +123,101 @@ class DesktopSmokeTests(unittest.TestCase):
             self.assertNotIn(legacy, builder,
                              f"{legacy} is hardcoded in the Home builder")
 
+    # ── FIFO cost resolution ──────────────────────────────────────────
+    def _cost_app(self, contract):
+        """An App with just enough state to price one contract."""
+        app = self.module.App.__new__(self.module.App)
+        app.state_obj = {
+            "contracts": {"C1": contract},
+            "commodities": {},
+            "local_prices": [],
+            "market_data": {"cbot_quotes": {"CORN": 532.75, "SBM": 305.0},
+                            "fx": {"price": 50.9620}},
+        }
+        return app
+
+    @staticmethod
+    def _corn_contract(**over):
+        base = {
+            "name": "460/20048300", "commodity": "CORN-BRZ", "origin": "BRAZIL",
+            "qty_mt": 2000, "status": "Open", "premium_cents": 194.25,
+            "delivery_date": "2026-08-20", "discharge_egp_mt": 120,
+            "clearance_egp_mt": 60, "freight_egp_mt": 485,
+        }
+        base.update(over)
+        return base
+
+    def test_unpriced_contract_without_a_saved_cif_still_gets_a_cost(self):
+        """`priced` defaults to True and is usually absent, so a contract with
+        no saved CIF used to produce no cost at all — the table showed
+        UNPRICED in one column and an empty FIFO Cost in the next."""
+        for label, contract in (
+            ("priced absent", self._corn_contract()),
+            ("priced=True", self._corn_contract(priced=True)),
+            ("priced=False", self._corn_contract(priced=False)),
+        ):
+            app = self._cost_app(contract)
+            economics = app._hd_cost_for_contract(
+                "C1", contract, use_latest_fx=False, fx_mode="locked")
+            self.assertIsNotNone(economics["own_after"], label)
+            self.assertEqual(economics["cif_basis"], "live", label)
+            # (532.75 + 194.25) x 0.3937 x 50.9620 + 120 + 60 + 485
+            self.assertAlmostEqual(economics["own_after"], 15251, delta=5)
+
+    def test_a_real_saved_cif_is_never_replaced_by_a_live_derivation(self):
+        contract = self._corn_contract(priced=True, cif_usd_mt=286.12)
+        app = self._cost_app(contract)
+        economics = app._hd_cost_for_contract(
+            "C1", contract, use_latest_fx=False, fx_mode="locked")
+        self.assertEqual(economics["cif_basis"], "saved")
+        self.assertAlmostEqual(economics["cif"], 286.12, places=4)
+
+    def test_unpriced_cost_uses_the_commoditys_own_conversion_factor(self):
+        """0.3937 is corn's factor; SBM converts at 1.1023 short tons/MT."""
+        contract = self._corn_contract(commodity="SBM", premium_cents=20.0,
+                                       priced=False)
+        app = self._cost_app(contract)
+        economics = app._hd_cost_for_contract(
+            "C1", contract, use_latest_fx=False, fx_mode="locked")
+        self.assertAlmostEqual(economics["cif"],
+                               (305.0 + 20.0) * self.module.SBM_ST_PER_MT,
+                               places=4)
+        self.assertNotIn("0.3937", economics["cif_formula"])
+
+    def test_a_derived_fifo_cost_is_labelled_indicative(self):
+        source = self.path.read_text(encoding="utf-8")
+        self.assertIn("FIFO cost is indicative", source)
+        self.assertIn('r.get("fifo_cost_basis") == "live"', source)
+
+    # ── Sideways scrolling ────────────────────────────────────────────
+    def test_shift_wheel_scrolls_the_table_not_the_width_locked_page(self):
+        source = self.path.read_text(encoding="utf-8")
+        handler = source[source.index("def _page_scroll_shift_mousewheel"):]
+        handler = handler[:handler.index("def _build_tabs")]
+        # The table must be consulted before the page canvas.
+        self.assertLess(handler.index("Treeview"), handler.index("_page_scroll_canvas_for_widget"))
+        self.assertIn("TREE_HSCROLL_PIXELS", handler)
+        self.assertIn("<Shift-Button-4>", source)
+        self.assertIn("<Shift-Button-5>", source)
+
+    def test_calculate_pages_are_scrollable(self):
+        source = self.path.read_text(encoding="utf-8")
+        self.assertIn("self.tab_single = self._make_scrollable_tab(self.tab_single_page", source)
+        self.assertIn("self.tab_future = self._make_scrollable_tab(self.tab_future_page", source)
+
+    def test_wheel_units_cover_windows_and_x11(self):
+        app = self.module.App.__new__(self.module.App)
+
+        class _E:
+            def __init__(self, delta=0, num=None):
+                self.delta, self.num = delta, num
+
+        self.assertEqual(app._wheel_units(_E(num=4)), -1)
+        self.assertEqual(app._wheel_units(_E(num=5)), 1)
+        self.assertEqual(app._wheel_units(_E(delta=-120)), 1)
+        self.assertEqual(app._wheel_units(_E(delta=120)), -1)
+        self.assertEqual(app._wheel_units(_E(delta=-40)), 1)
+
     def test_previous_ceo_dashboard_is_preserved(self):
         self.assertTrue((self.project / "legacy" / "V10_8_13_Frozen.py").exists())
 

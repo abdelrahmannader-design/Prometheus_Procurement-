@@ -6629,6 +6629,8 @@ class App(tk.Tk):
             # Linux/X11 wheel events; harmless on Windows.
             self.bind_all("<Button-4>", self._page_scroll_mousewheel, add="+")
             self.bind_all("<Button-5>", self._page_scroll_mousewheel, add="+")
+            self.bind_all("<Shift-Button-4>", self._page_scroll_shift_mousewheel, add="+")
+            self.bind_all("<Shift-Button-5>", self._page_scroll_shift_mousewheel, add="+")
         except Exception:
             pass
 
@@ -6687,16 +6689,59 @@ class App(tk.Tk):
             pass
         return None
 
+    #: Pixels a wide table scrolls sideways per wheel notch.
+    TREE_HSCROLL_PIXELS = 60
+
+    def _enclosing_widget_of_class(self, widget, class_names):
+        """Return the nearest ancestor (or the widget) of one of these classes."""
+        try:
+            class_names = set(class_names)
+            while widget is not None:
+                if widget.winfo_class() in class_names:
+                    return widget
+                widget = widget.master
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
+    def _wheel_units(event):
+        """Wheel delta as scroll units, across Windows and X11 conventions."""
+        num = getattr(event, "num", None)
+        if num == 4:
+            return -1
+        if num == 5:
+            return 1
+        delta = getattr(event, "delta", 0) or 0
+        units = int(-1 * (delta / 120))
+        if units == 0:
+            units = -1 if delta > 0 else 1
+        return units
+
     def _page_scroll_shift_mousewheel(self, event):
-        """Shift + wheel scrolls wide pages horizontally."""
-        canvas = self._page_scroll_canvas_for_widget(getattr(event, "widget", None))
+        """Shift + wheel scrolls sideways.
+
+        A wide table is the usual reason to want this, and the table owns its
+        own horizontal view — the page canvas underneath is often width-locked
+        to the viewport and would silently do nothing. So a Treeview under the
+        pointer wins; the page is only scrolled when there is no table there.
+        """
+        widget = getattr(event, "widget", None)
+        units = self._wheel_units(event)
+        tree = self._enclosing_widget_of_class(widget, {"Treeview"})
+        if tree is not None:
+            try:
+                # A Treeview's horizontal scroll unit is one pixel, so a raw
+                # wheel notch moves the table imperceptibly on a wide grid.
+                tree.xview_scroll(units * self.TREE_HSCROLL_PIXELS, "units")
+                return "break"
+            except Exception:
+                pass
+        canvas = self._page_scroll_canvas_for_widget(widget)
         if canvas is None:
             return None
         try:
-            delta = int(-1 * (event.delta / 120))
-            if delta == 0:
-                delta = -1 if event.delta > 0 else 1
-            canvas.xview_scroll(delta, "units")
+            canvas.xview_scroll(units, "units")
         except Exception:
             pass
         return None
@@ -6783,10 +6828,15 @@ class App(tk.Tk):
         self.tab_single_outer.rowconfigure(0, weight=1)
         _calc_nb = ttk.Notebook(self.tab_single_outer)
         _calc_nb.grid(row=0, column=0, sticky="nsew")
-        self.tab_single = ttk.Frame(_calc_nb, padding=10)
-        self.tab_future = ttk.Frame(_calc_nb, padding=10)
-        _calc_nb.add(self.tab_single, text="Deal Evaluator")
-        _calc_nb.add(self.tab_future, text="Scenario / What-If")
+        # These were plain frames, so anything wider or taller than the window
+        # was simply unreachable — no scrollbars at all. They now scroll like
+        # every other workflow tab.
+        self.tab_single_page = ttk.Frame(_calc_nb)
+        self.tab_future_page = ttk.Frame(_calc_nb)
+        _calc_nb.add(self.tab_single_page, text="Deal Evaluator")
+        _calc_nb.add(self.tab_future_page, text="Scenario / What-If")
+        self.tab_single = self._make_scrollable_tab(self.tab_single_page, padding=10)
+        self.tab_future = self._make_scrollable_tab(self.tab_future_page, padding=10)
 
         # Legacy alias kept for backward compatibility
         self.tab_dashboard = self.tab_home
@@ -6842,9 +6892,11 @@ class App(tk.Tk):
                 economics = self._hd_cost_for_contract(
                     cid, c, use_latest_fx=False, fx_mode="locked")
                 cost = to_float(economics.get("own_after"), None)
+                cost_basis = economics.get("cif_basis")
             except Exception as exc:
                 log_exception(exc, f"_fifo_contract_lots:{cid}")
                 cost = None
+                cost_basis = None
             rows.append({
                 "lot_id": f"CONTRACT-{cid}",
                 "contract_id": cid,
@@ -6857,6 +6909,7 @@ class App(tk.Tk):
                 "delivery_date": delivery.isoformat(),
                 "original_mt": qty,
                 "cost_egp_mt": cost,
+                "cost_basis": cost_basis,
                 "premium": to_float(c.get("premium_cents"), None),
                 "priced": bool(c.get("priced", False)),
             })
@@ -9936,6 +9989,9 @@ class App(tk.Tk):
         # separately so every refresh clearly shows the latest CBOT number used.
         cif_display = "?"
         cif_formula = ""
+        #: How the CIF was resolved: a fixed contract price ("saved"), a live
+        #: CBOT + premium derivation ("live"), or a manual override.
+        cif_basis = None
 
         # Resolve FX strictly from fx_mode when given — this is the user's
         # explicit Live/Locked toggle and should win over use_latest_fx.
@@ -9979,29 +10035,49 @@ class App(tk.Tk):
             cif = cif_override
             cif_display = fmt_num(cif, 2)
             cif_formula = "Manual override"
+            cif_basis = "override"
         elif is_open_live and cbot is not None and premium is not None:
             cif = (cbot + premium) * cbot_conv
             month = c.get("futures_month", "")
             cif_display = fmt_num(cif, 2)
             cif_formula = (f"({cbot:.2f}+{premium:.2f})×{cbot_conv}"
                           + (f" | {month}" if month else ""))
+            cif_basis = "live"
             if fx_mode is None:
                 fx_used = fx_today
         elif not priced:
+            # The conversion factor is per commodity: 0.3937 for corn is
+            # simply wrong for SBM (1.1023) or soybean/wheat (0.36745).
             if cbot is not None and premium is not None:
-                cif = (cbot + premium) * 0.3937
+                cif = (cbot + premium) * cbot_conv
                 month = c.get("futures_month", "")
                 cif_display = fmt_num(cif, 2)
-                cif_formula = f"({cbot:.2f}+{premium:.2f})×0.3937" + (f" | {month}" if month else "")
+                cif_formula = f"({cbot:.2f}+{premium:.2f})×{cbot_conv:.5g}" + (f" | {month}" if month else "")
+                cif_basis = "live"
             elif premium is not None:
                 cif_display = "?"
-                cif_formula = f"CBOT+{premium:.2f}¢ × 0.3937"
+                cif_formula = f"CBOT+{premium:.2f}¢ × {cbot_conv:.5g}"
             if fx_mode is None:
                 fx_used = fx_today
         else:
             cif = self._contract_cif_usd(c, cid)
             cif_display = fmt_num(cif, 2) if cif is not None else "?"
             cif_formula = "Saved contract CIF"
+            cif_basis = "saved"
+            if cif is None and cbot is not None and premium is not None:
+                # `priced` defaults to True and is often simply absent, so a
+                # contract with no saved CIF used to fall through to nothing
+                # at all — the row showed "UNPRICED" in one column and an
+                # empty cost in the next. Derive the same indicative CIF the
+                # unpriced branch would, and mark it as indicative.
+                cif = (cbot + premium) * cbot_conv
+                month = c.get("futures_month", "")
+                cif_display = fmt_num(cif, 2)
+                cif_formula = (f"({cbot:.2f}+{premium:.2f})×{cbot_conv:.5g}"
+                               + (f" | {month}" if month else "") + " (indicative)")
+                cif_basis = "live"
+                if fx_mode is None:
+                    fx_used = fx_today
 
         own_after = None
         if cif is not None and fx_used:
@@ -10041,7 +10117,8 @@ class App(tk.Tk):
         total_sav = sav_mt * qty if (sav_mt is not None and qty is not None) else None
 
         return {
-            "cif": cif, "cif_display": cif_display, "cif_formula": cif_formula, "fx": fx_used,
+            "cif": cif, "cif_display": cif_display, "cif_formula": cif_formula,
+            "cif_basis": cif_basis, "fx": fx_used,
             "disc": disc, "clr": clr, "freight": freight,
             "own_after": own_after, "local": local, "local_key": local_key,
             "local_date": local_date, "sav_mt": sav_mt, "qty": qty,
@@ -14566,8 +14643,18 @@ class App(tk.Tk):
                     formula = "Live CBOT missing"
                 else:
                     formula = "Premium missing — replacement incomplete"
+                cost_basis = layer.get("cost_basis")
                 issues = []
-                if fifo_cost is None: issues.append("Historical FIFO cost missing")
+                if fifo_cost is None:
+                    if premium is None:
+                        issues.append("FIFO cost unavailable — contract has no fixed CIF and no premium to derive one")
+                    elif cbot is None:
+                        issues.append("FIFO cost unavailable — contract has no fixed CIF and live CBOT is missing")
+                    else:
+                        issues.append("Historical FIFO cost missing")
+                elif cost_basis == "live":
+                    issues.append("FIFO cost is indicative — contract not priced yet, "
+                                  "derived from live CBOT + premium (it will move with the market)")
                 if local is None: issues.append("Current local price missing")
                 if cbot is None and factor is not None: issues.append("Live CBOT missing")
                 if factor is not None and premium_for_replacement is None: issues.append("Positive premium missing")
@@ -14577,7 +14664,8 @@ class App(tk.Tk):
                     "base": base, "contract_id": cid, "ref": self._hd_ref(cid, c),
                     "supplier": c.get("supplier") or "", "commodity": (c.get("commodity") or base).upper(),
                     "origin": c.get("origin") or "", "status": (c.get("status") or "Open").strip() or "Open",
-                    "remaining_mt": rem, "fifo_cost": fifo_cost, "pricing_status": pricing_status,
+                    "remaining_mt": rem, "fifo_cost": fifo_cost,
+                    "fifo_cost_basis": cost_basis, "pricing_status": pricing_status,
                     "live_cbot": cbot, "premium": premium_for_replacement,
                     "replacement_cif": metrics.get("replacement_cif_usd_mt"),
                     "formula": formula, "fx_today": fx_today, "freight_today": freight_today,
@@ -14701,7 +14789,11 @@ class App(tk.Tk):
                     except Exception: pass
                 tv.insert("","end",tags=(tag,),values=(
                     r.get("ref"),r.get("supplier"),r.get("commodity"),r.get("origin"),r.get("status"),r.get("pricing_status"),
-                    fmt_num(r.get("remaining_mt"),0),fmt_num(r.get("fifo_cost"),0),fmt_num(r.get("live_cbot"),2),fmt_num(r.get("premium"),2),
+                    fmt_num(r.get("remaining_mt"),0),
+                    # "~" marks a cost derived from today's board rather than
+                    # a fixed contract price, so the two are never confused.
+                    (fmt_num(r.get("fifo_cost"),0) + (" ~" if r.get("fifo_cost_basis") == "live" and r.get("fifo_cost") is not None else "")),
+                    fmt_num(r.get("live_cbot"),2),fmt_num(r.get("premium"),2),
                     r.get("formula"),fmt_num(r.get("fx_today"),4),fmt_num(r.get("freight_today"),0),fmt_num(r.get("replacement_cost"),0),
                     local_disp,fmt_num(r.get("edge_local_mt"),0),fmt_num(r.get("edge_repl_mt"),0),r.get("decision") or ""))
         local_txt=self._home_compact_money(total_local_edge) if local_known else "—"
@@ -14709,7 +14801,9 @@ class App(tk.Tk):
         self.im_summary_var.set(
             f"As of {dt.date.today().isoformat()} · {len(rows)} remaining FIFO contract lot(s) · {total_qty:,.0f} MT · "
             f"Inventory edge vs current local {local_txt} · inventory advantage vs CBOT replacement {repl_txt} · "
-            f"{issue_count} data warning(s).  * local carried forward more than 14 days.")
+            f"{issue_count} data warning(s).  * local carried forward more than 14 days.  "
+            "~ FIFO cost is indicative: the contract is not priced yet, so the figure "
+            "is derived from live CBOT + premium and moves with the market.")
 
     def _open_inventory_market_tab(self, commodity=None, status=None):
         try:
