@@ -6907,12 +6907,15 @@ class App(tk.Tk):
             head = f"Fixed CIF {cif:,.2f}"
 
         fees = freight + disc + clr
-        text = f"{head} × FX {fx:,.4f} + fees {fees:,.0f}"
         if compact:
-            # The grid cell has a fixed width, and the "~" on the FIFO Cost
-            # value plus the row's warning already carry the indicative flag.
-            return text
-        text += f" (frt {freight:,.0f} · dis {disc:,.0f} · clr {clr:,.0f})"
+            # Show the three fees as addends rather than one "fees" total:
+            # a lump sum only invites the question of what is inside it, and
+            # the sum is the one part a reader can do in their head. The "~"
+            # on the FIFO Cost value carries the indicative flag instead.
+            return (f"{head} × FX {fx:,.4f} + frt {freight:,.0f} "
+                    f"+ dis {disc:,.0f} + clr {clr:,.0f}")
+        text = (f"{head} × FX {fx:,.4f} + fees {fees:,.0f} "
+                f"(frt {freight:,.0f} · dis {disc:,.0f} · clr {clr:,.0f})")
         if basis == "live":
             text += " · indicative, not a fixed price"
         return text
@@ -14769,7 +14772,7 @@ class App(tk.Tk):
         cols=[
             ("Ref",170,"w"),("Supplier",110,"w"),("Commodity",90,"w"),("Origin",85,"w"),("Status",68,"w"),
             ("Pricing",78,"center"),("Remaining_MT",92,"e"),("FIFO_Cost",95,"e"),
-            ("FIFO_Cost_Basis",510,"w"),("Live_CBOT",82,"e"),
+            ("FIFO_Cost_Basis",620,"w"),("Live_CBOT",82,"e"),
             ("Premium",75,"e"),("CBOT_Formula",215,"w"),("FX_Today",80,"e"),("Freight_Today",95,"e"),
             ("Replacement",105,"e"),("Local_Today",95,"e"),("Edge_Local_MT",100,"e"),("Edge_CBOT_MT",100,"e"),
             ("Decision",155,"w"),

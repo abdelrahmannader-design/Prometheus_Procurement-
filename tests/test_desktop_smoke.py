@@ -201,13 +201,16 @@ class DesktopSmokeTests(unittest.TestCase):
         self.assertIn("50.9620", derived)         # the FX actually used
         self.assertIn("665", derived)             # freight + discharge + clearance
         self.assertIn("indicative", derived)
-        # The grid cell is width-bound, so it drops the fee split and the
-        # indicative words (the value's "~" and the warning carry those).
+        # The grid form spells the fees out as addends — a lump total only
+        # raises the question of what is in it — and leaves the indicative
+        # wording to the value's "~" and the row warning.
         short = app._fifo_cost_formula(app._hd_cost_for_contract(
             "C1", contract, use_latest_fx=False, fx_mode="locked"), compact=True)
-        self.assertLess(len(short), len(derived))
         self.assertIn("FX 50.9620", short)
-        self.assertNotIn("frt", short)
+        self.assertIn("frt 485", short)
+        self.assertIn("dis 120", short)
+        self.assertIn("clr 60", short)
+        self.assertNotIn("indicative", short)
 
         fixed = self._corn_contract(priced=True, cif_usd_mt=286.12)
         app = self._cost_app(fixed)
@@ -237,7 +240,7 @@ class DesktopSmokeTests(unittest.TestCase):
 
     def test_inventory_table_and_export_carry_the_derivation_column(self):
         source = self.path.read_text(encoding="utf-8")
-        self.assertIn('("FIFO_Cost_Basis",510,"w")', source)
+        self.assertIn('("FIFO_Cost_Basis",620,"w")', source)
         self.assertIn('"How the FIFO Cost is built"', source)
         self.assertIn('r.get("fifo_cost_formula")', source)
         self.assertIn('r.get("fifo_cost_formula_short")', source)
