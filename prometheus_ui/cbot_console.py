@@ -26,8 +26,8 @@ import tkinter as tk
 from .charts import AreaChart, BarChart, DonutGauge, RangeMeter, compact_number
 from .theme import Theme
 from .widgets import (Card, EmptyState, HeroBanner, ListRow, MetricRow,
-                      PillButton, ProgressTrack, SectionTitle, SegmentedControl,
-                      StatTile, bind_wraplength)
+                      Panel, PillButton, ProgressTrack, SectionTitle,
+                      SegmentedControl, StatTile, bind_wraplength)
 
 try:  # single source of truth for the conversion factors
     from prometheus_core.cbot import CBOT_CONV, cbot_conv_factor, commodity_base
@@ -367,22 +367,113 @@ class CBOTCommandCenter(tk.Frame):
     # -- construction ----------------------------------------------------
     def _build(self):
         t = self.theme
-        self.hero = HeroBanner(self, t, height=182)
-        self.hero.grid(row=0, column=0, sticky="ew", pady=(6, 12))
+        self.hero = HeroBanner(self, t, height=196)
+        self.hero.grid(row=0, column=0, sticky="ew", pady=(6, 10))
         self.hero.set_actions([
             ("Refresh quotes", self._act("refresh_quotes")),
             ("Basis Tracker", self._act("open_basis")),
             ("CBOT Slots", self._act("open_slots")),
         ])
+        # The desk covers four boards, not one: swipe the hero (drag, the
+        # chevrons, the dots, Shift+wheel or Left/Right) to change board.
+        self.hero.set_nav(TRACKED_COMMODITIES,
+                          TRACKED_COMMODITIES.index(self._commodity),
+                          self._on_board_swipe)
 
+        self._build_board_strip()
         self._build_tiles()
         self._build_main()
         self._build_lower()
 
+    def _build_board_strip(self):
+        """One mini-card per board — the answer to "it only shows CORN".
+
+        The hero shows the selected board in full; this strip keeps the
+        other three in view with their price and 30-day move, and selects
+        one on click.
+        """
+        t = self.theme
+        strip = tk.Frame(self, bg=t.c("bg"))
+        strip.grid(row=1, column=0, sticky="ew", pady=(0, 4))
+        self.board_cards = {}
+        for col, comm in enumerate(TRACKED_COMMODITIES):
+            strip.columnconfigure(col, weight=1, uniform="boards")
+            card = Panel(strip, t, radius="lg", cursor="hand2")
+            card.grid(row=0, column=col, sticky="nsew",
+                      padx=(0 if col == 0 else 6, 0))
+            card.columnconfigure(1, weight=1)
+            fill = card.fill
+
+            accent = tk.Frame(card, bg=t.c("stroke"), width=4)
+            accent.grid(row=0, column=0, rowspan=2, sticky="ns",
+                        padx=(12, 0), pady=12)
+            name = tk.Label(card, text=comm, bg=fill, fg=t.c("ink"), anchor="w",
+                            font=t.font("caption", "bold"))
+            name.grid(row=0, column=1, sticky="w", padx=(10, 12), pady=(12, 0))
+            price_var = tk.StringVar(value="—")
+            price = tk.Label(card, textvariable=price_var, bg=fill,
+                             fg=t.c("ink"), anchor="w",
+                             font=t.font("body_lg", "bold"))
+            price.grid(row=1, column=1, sticky="w", padx=(10, 12), pady=(0, 12))
+            delta_var = tk.StringVar(value="")
+            delta = tk.Label(card, textvariable=delta_var, bg=fill,
+                             fg=t.c("ink_3"), anchor="e",
+                             font=t.font("caption", "bold"))
+            delta.grid(row=1, column=2, sticky="e", padx=(0, 14), pady=(0, 12))
+
+            self.board_cards[comm] = {
+                "card": card, "accent": accent, "name": name,
+                "price": price, "price_var": price_var,
+                "delta": delta, "delta_var": delta_var, "fill": fill,
+            }
+            for widget in (card, accent, name, price, delta):
+                widget.bind("<Button-1>",
+                            lambda _e, c=comm: self._select_board(c))
+
+    def _select_board(self, commodity):
+        """Point every panel on the screen at one board."""
+        if commodity not in TRACKED_COMMODITIES:
+            return
+        self._commodity = commodity
+        index = TRACKED_COMMODITIES.index(commodity)
+        try:
+            self.hero.set_nav_index(index)
+            self.commodity_pick.set_value(commodity)
+        except Exception:
+            pass
+        self.refresh()
+
+    def _on_board_swipe(self, index):
+        self._select_board(TRACKED_COMMODITIES[index])
+
+    def _refresh_board_strip(self):
+        t = self.theme
+        for comm, parts in getattr(self, "board_cards", {}).items():
+            price, _ts = self.feed.quote(comm)
+            change = self.feed.change(comm, 30)
+            unit = UNITS.get(comm, "")
+            parts["price_var"].set(
+                f"{price:,.2f} {unit}".strip() if price is not None else "—")
+            if change is None:
+                parts["delta_var"].set("")
+                tone_ink = t.c("ink_3")
+            else:
+                parts["delta_var"].set(f"{change:+.1f}%")
+                # A falling board is good news for a buyer.
+                tone_ink = t.c("mint") if change < 0 else t.c("rose")
+            parts["delta"].configure(fg=tone_ink)
+            active = comm == self._commodity
+            parts["accent"].configure(
+                bg=t.c("brand") if active else t.c("stroke"))
+            parts["name"].configure(
+                fg=t.c("brand_ink") if active else t.c("ink_2"),
+                font=t.font("caption", "bold"))
+            parts["price"].configure(fg=t.c("ink") if active else t.c("ink_2"))
+
     def _build_tiles(self):
         t = self.theme
         strip = tk.Frame(self, bg=t.c("bg"))
-        strip.grid(row=1, column=0, sticky="ew")
+        strip.grid(row=2, column=0, sticky="ew")
         self.tiles = {}
         specs = [
             ("board",       "Board price",      "◈", "brand"),
@@ -400,7 +491,7 @@ class CBOTCommandCenter(tk.Frame):
     def _build_main(self):
         t = self.theme
         main = tk.Frame(self, bg=t.c("bg"))
-        main.grid(row=2, column=0, sticky="nsew", pady=(12, 0))
+        main.grid(row=3, column=0, sticky="nsew", pady=(12, 0))
         main.columnconfigure(0, weight=3, uniform="main")
         main.columnconfigure(1, weight=2, uniform="main")
         main.rowconfigure(0, weight=1)
@@ -495,7 +586,7 @@ class CBOTCommandCenter(tk.Frame):
     def _build_lower(self):
         t = self.theme
         lower = tk.Frame(self, bg=t.c("bg"))
-        lower.grid(row=3, column=0, sticky="nsew", pady=(12, 8))
+        lower.grid(row=4, column=0, sticky="nsew", pady=(12, 8))
         lower.columnconfigure(0, weight=3, uniform="lower")
         lower.columnconfigure(1, weight=2, uniform="lower")
         lower.rowconfigure(0, weight=1)
@@ -541,8 +632,7 @@ class CBOTCommandCenter(tk.Frame):
 
     # -- interaction -----------------------------------------------------
     def _on_commodity(self, value):
-        self._commodity = value
-        self.refresh()
+        self._select_board(value)
 
     def _on_range(self, value):
         self._range = value
@@ -573,8 +663,8 @@ class CBOTCommandCenter(tk.Frame):
         self.hero.set_content(
             eyebrow=f"{greeting} · CBOT desk",
             headline="CBOT Command Center",
-            support=("Live board, basis and the tons still exposed to it — "
-                     "one screen before you price anything."),
+            support=("Live board, basis and the tons still exposed to it. "
+                     "Swipe or use ‹ › to change board."),
             metric_label=f"{comm} {unit}".strip(),
             metric_value=f"{price:,.2f}" if price is not None else "—",
             metric_delta=delta_text,
@@ -583,6 +673,7 @@ class CBOTCommandCenter(tk.Frame):
             footnote=f"quote stored {str(ts)[:10]}" if ts else "no quote timestamp",
         )
 
+        self._refresh_board_strip()
         self._refresh_tiles(comm, price, change_30, exposure)
         self._refresh_chart(comm, unit)
         self._refresh_cover(exposure)

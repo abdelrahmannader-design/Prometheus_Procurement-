@@ -954,10 +954,25 @@ class HeroBanner(tk.Canvas):
         self.footnote = ""
         self._actions = []
         self._action_hits = {}
+        # Optional carousel over the metric block: chevrons, dots, drag-swipe.
+        self._nav_labels = []
+        self._nav_index = 0
+        self._nav_command = None
+        self._nav_hits = {}
+        self._press = None
         self.bind("<Configure>", lambda _e: self.redraw())
         self.bind("<Motion>", self._on_motion)
-        self.bind("<Button-1>", self._on_click)
+        self.bind("<ButtonPress-1>", self._on_press)
+        self.bind("<ButtonRelease-1>", self._on_release)
         self.bind("<Leave>", lambda _e: self._set_hot(None))
+        # Shift+wheel only: a plain wheel over the hero must still scroll the
+        # page it sits in.
+        self.bind("<Shift-MouseWheel>",
+                  lambda e: self._step(-1 if e.delta > 0 else 1))
+        self.bind("<Shift-Button-4>", lambda _e: self._step(-1))
+        self.bind("<Shift-Button-5>", lambda _e: self._step(1))
+        self.bind("<Left>", lambda _e: self._step(-1))
+        self.bind("<Right>", lambda _e: self._step(1))
         self._hot = None
 
     def set_content(self, eyebrow=None, headline=None, support=None,
@@ -972,6 +987,36 @@ class HeroBanner(tk.Canvas):
             if value is not None:
                 setattr(self, name, value)
         self.redraw()
+
+    def set_nav(self, labels, index=0, command=None):
+        """Turn the metric block into a swipeable carousel.
+
+        ``labels`` names each slide (used for the chevron affordance and the
+        dot count); ``command`` is called with the new index whenever the
+        viewer swipes, clicks a chevron or a dot, or presses Left/Right.
+        """
+        self._nav_labels = list(labels or [])
+        self._nav_index = max(0, min(int(index), len(self._nav_labels) - 1)) if self._nav_labels else 0
+        self._nav_command = command
+        if self._nav_labels:
+            self.configure(takefocus=1)
+        self.redraw()
+
+    def set_nav_index(self, index):
+        if not self._nav_labels:
+            return
+        self._nav_index = max(0, min(int(index), len(self._nav_labels) - 1))
+        self.redraw()
+
+    def _step(self, delta):
+        """Move the carousel by ``delta`` slides, wrapping at both ends."""
+        if len(self._nav_labels) < 2:
+            return "break"
+        self._nav_index = (self._nav_index + delta) % len(self._nav_labels)
+        self.redraw()
+        if callable(self._nav_command):
+            self._nav_command(self._nav_index)
+        return "break"
 
     def set_actions(self, actions):
         """``actions`` is a list of ``(label, callback)`` pairs."""
@@ -992,20 +1037,64 @@ class HeroBanner(tk.Canvas):
             self.redraw()
 
     def _on_motion(self, event):
-        self._set_hot(self._hit(event.x, event.y))
+        hit = self._hit(event.x, event.y)
+        self._set_hot(hit if hit is not None else self._nav_hit(event.x, event.y))
 
-    def _on_click(self, event):
-        key = self._hit(event.x, event.y)
-        if key is None:
+    def _nav_hit(self, x, y):
+        for key, (x1, y1, x2, y2) in self._nav_hits.items():
+            if x1 <= x <= x2 and y1 <= y <= y2:
+                return key
+        return None
+
+    def _on_press(self, event):
+        self._press = (event.x, event.y,
+                       self._hit(event.x, event.y),
+                       self._nav_hit(event.x, event.y))
+        if self._nav_labels:
+            try:
+                self.focus_set()
+            except Exception:
+                pass
+
+    #: Horizontal travel that counts as a swipe rather than a click.
+    SWIPE_THRESHOLD = 40
+
+    def _on_release(self, event):
+        press, self._press = self._press, None
+        if press is None:
             return
-        _label, callback = self._actions[key]
-        if callable(callback):
-            callback()
+        x0, y0, action_key, nav_key = press
+        dx, dy = event.x - x0, event.y - y0
+
+        # A real swipe: mostly horizontal, and far enough to be deliberate.
+        if abs(dx) >= self.SWIPE_THRESHOLD and abs(dx) > abs(dy):
+            self._step(-1 if dx > 0 else 1)
+            return
+
+        # Otherwise it is a click — but only where it both started and ended.
+        if nav_key is not None and nav_key == self._nav_hit(event.x, event.y):
+            if nav_key == "prev":
+                self._step(-1)
+            elif nav_key == "next":
+                self._step(1)
+            elif isinstance(nav_key, tuple) and nav_key[0] == "dot":
+                index = nav_key[1]
+                if index != self._nav_index:
+                    self._nav_index = index
+                    self.redraw()
+                    if callable(self._nav_command):
+                        self._nav_command(index)
+            return
+        if action_key is not None and action_key == self._hit(event.x, event.y):
+            _label, callback = self._actions[action_key]
+            if callable(callback):
+                callback()
 
     # -- paint ----------------------------------------------------------
     def redraw(self):
         self.delete("all")
         self._action_hits = {}
+        self._nav_hits = {}
         self._actions_right = 0
         w, h = self.winfo_width(), self.winfo_height()
         if w <= 4 or h <= 4:
@@ -1042,13 +1131,34 @@ class HeroBanner(tk.Canvas):
                              fill=ink_soft, font=f_support,
                              width=max(200, w * 0.46))
 
-        # Live metric block, right-aligned.
+        # Live metric block, right-aligned. With nav set, the label row
+        # becomes the carousel control: ‹ LABEL › with dots under the chip.
         if self.metric_value:
             mx = w - pad
             my = pad
+            has_nav = len(self._nav_labels) > 1
             if self.metric_label:
-                self.create_text(mx, my, anchor="ne", text=self.metric_label.upper(),
-                                 fill=ink_soft, font=f_eyebrow)
+                label = self.metric_label.upper()
+                if has_nav:
+                    lw = text_width(self, f_eyebrow, label)
+                    lh = line_height(self, f_eyebrow)
+                    cy = my + lh / 2
+                    chev = mix(c2, "#ffffff", 0.55)
+                    chev_hot = "#ffffff"
+                    right_x, left_x = mx - 4, mx - 22 - lw - 14
+                    self.create_text(right_x, cy, anchor="e", text="›",
+                                     fill=chev_hot if self._hot == "next" else chev,
+                                     font=(t.family, t.size("subtitle"), "bold"))
+                    self.create_text(left_x, cy, anchor="w", text="‹",
+                                     fill=chev_hot if self._hot == "prev" else chev,
+                                     font=(t.family, t.size("subtitle"), "bold"))
+                    self.create_text(mx - 22, my, anchor="ne", text=label,
+                                     fill=ink_soft, font=f_eyebrow)
+                    self._nav_hits["next"] = (right_x - 16, cy - 14, right_x + 8, cy + 14)
+                    self._nav_hits["prev"] = (left_x - 8, cy - 14, left_x + 16, cy + 14)
+                else:
+                    self.create_text(mx, my, anchor="ne", text=label,
+                                     fill=ink_soft, font=f_eyebrow)
                 my += line_height(self, f_eyebrow) + 6
             self.create_text(mx, my, anchor="ne", text=self.metric_value,
                              fill=ink, font=f_metric)
@@ -1064,6 +1174,19 @@ class HeroBanner(tk.Canvas):
                                  text=self.metric_delta,
                                  fill=readable_ink(chip_fill),
                                  font=f_chip)
+                my += chip_h + 10
+            if has_nav:
+                # Dots: position in the set, and a direct target for each.
+                n = len(self._nav_labels)
+                gap, r = 16, 3.5
+                total = (n - 1) * gap
+                start = mx - total
+                for i in range(n):
+                    cx = start + i * gap
+                    active = i == self._nav_index
+                    pr.dot(self, cx, my + 6, r if not active else r + 1.5,
+                           fill="#ffffff" if active else mix(c2, "#ffffff", 0.45))
+                    self._nav_hits[("dot", i)] = (cx - 8, my - 2, cx + 8, my + 14)
 
         # Action pills along the bottom-left.
         if self._actions:

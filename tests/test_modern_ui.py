@@ -462,6 +462,120 @@ class ShellAndConsoleTests(unittest.TestCase):
             root.update_idletasks()
         self.assertEqual(console._commodity, TRACKED_COMMODITIES[-1])
 
+    def test_hero_carousel_swipes_between_boards(self):
+        """Drag, chevrons, dots and Shift+wheel all change board, and every
+        panel follows — the desk covers four boards, not just CORN."""
+        from prometheus_ui.cbot_console import CBOTCommandCenter
+
+        class _Event:
+            def __init__(self, x, y):
+                self.x, self.y = x, y
+
+        root, theme = self._root()
+        console = CBOTCommandCenter(root, theme, CBOTFeed(_state(), today=TODAY))
+        console.pack(fill="both", expand=True)
+        console.refresh()
+        root.update_idletasks()
+        hero = console.hero
+        width = hero.winfo_width()
+
+        def _drag(dx):
+            hero._on_press(_Event(width // 2, 90))
+            hero._on_release(_Event(width // 2 + dx, 90))
+            root.update_idletasks()
+
+        self.assertEqual(console._commodity, TRACKED_COMMODITIES[0])
+
+        _drag(-120)                                   # swipe left -> next
+        self.assertEqual(console._commodity, TRACKED_COMMODITIES[1])
+        _drag(+120)                                   # swipe right -> back
+        self.assertEqual(console._commodity, TRACKED_COMMODITIES[0])
+
+        x1, y1, x2, y2 = hero._nav_hits["next"]       # chevron
+        hero._on_press(_Event((x1 + x2) // 2, (y1 + y2) // 2))
+        hero._on_release(_Event((x1 + x2) // 2, (y1 + y2) // 2))
+        root.update_idletasks()
+        self.assertEqual(console._commodity, TRACKED_COMMODITIES[1])
+
+        x1, y1, x2, y2 = hero._nav_hits[("dot", 3)]   # dot
+        hero._on_press(_Event((x1 + x2) // 2, (y1 + y2) // 2))
+        hero._on_release(_Event((x1 + x2) // 2, (y1 + y2) // 2))
+        root.update_idletasks()
+        self.assertEqual(console._commodity, TRACKED_COMMODITIES[3])
+
+        hero._step(1)                                 # wraps past the end
+        root.update_idletasks()
+        self.assertEqual(console._commodity, TRACKED_COMMODITIES[0])
+
+    def test_every_control_that_changes_board_stays_in_sync(self):
+        from prometheus_ui.cbot_console import CBOTCommandCenter
+        root, theme = self._root()
+        console = CBOTCommandCenter(root, theme, CBOTFeed(_state(), today=TODAY))
+        console.pack(fill="both", expand=True)
+        console.refresh()
+        root.update_idletasks()
+        for source in ("strip", "segmented", "hero"):
+            for index, comm in enumerate(TRACKED_COMMODITIES):
+                if source == "strip":
+                    console._select_board(comm)
+                elif source == "segmented":
+                    console.commodity_pick.set_value(comm, notify=True)
+                else:
+                    console._on_board_swipe(index)
+                root.update_idletasks()
+                self.assertEqual(console._commodity, comm)
+                self.assertEqual(console.hero._nav_index, index, source)
+                self.assertEqual(console.commodity_pick.value, comm, source)
+                self.assertIn(comm, console.hero.metric_label)
+                self.assertIn(comm, console._chart_title.get())
+
+    def test_a_short_drag_is_a_click_not_a_swipe(self):
+        from prometheus_ui.cbot_console import CBOTCommandCenter
+
+        class _Event:
+            def __init__(self, x, y):
+                self.x, self.y = x, y
+
+        root, theme = self._root()
+        console = CBOTCommandCenter(root, theme, CBOTFeed(_state(), today=TODAY))
+        console.pack(fill="both", expand=True)
+        console.refresh()
+        root.update_idletasks()
+        hero = console.hero
+        before = console._commodity
+        hero._on_press(_Event(400, 90))
+        hero._on_release(_Event(400 - (hero.SWIPE_THRESHOLD - 5), 90))
+        root.update_idletasks()
+        self.assertEqual(console._commodity, before)
+
+    def test_board_strip_shows_every_tracked_board(self):
+        from prometheus_ui.cbot_console import CBOTCommandCenter
+        root, theme = self._root()
+        console = CBOTCommandCenter(root, theme, CBOTFeed(_state(), today=TODAY))
+        console.pack(fill="both", expand=True)
+        console.refresh()
+        root.update_idletasks()
+        self.assertEqual(set(console.board_cards), set(TRACKED_COMMODITIES))
+        # CORN and SBM have stored quotes in the fixture; both must render a
+        # price rather than the placeholder.
+        for comm in ("CORN", "SBM"):
+            self.assertNotEqual(console.board_cards[comm]["price_var"].get(), "—")
+
+    def test_hero_nav_dot_keys_cannot_collide_with_action_pills(self):
+        """Both used to be plain ints in the same hover slot, so hovering
+        dot 0 lit action pill 0."""
+        from prometheus_ui.widgets import HeroBanner
+        root, theme = self._root()
+        hero = HeroBanner(root, theme)
+        hero.pack(fill="x")
+        hero.set_content(metric_label="CORN", metric_value="1", metric_delta="x")
+        hero.set_actions([("A", lambda: None), ("B", lambda: None)])
+        hero.set_nav(["CORN", "SBM"], 0, lambda _i: None)
+        root.update_idletasks()
+        self.assertTrue(any(isinstance(k, tuple) and k[0] == "dot"
+                            for k in hero._nav_hits))
+        self.assertFalse(set(hero._nav_hits) & set(hero._action_hits))
+
     def test_console_renders_against_an_empty_state(self):
         from prometheus_ui.cbot_console import CBOTCommandCenter
         root, theme = self._root()
