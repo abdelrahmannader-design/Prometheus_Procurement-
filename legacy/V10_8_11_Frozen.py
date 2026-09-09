@@ -153,7 +153,7 @@ def iso_date_or_keep(s):
 # - controlled origins to avoid dirty grouping like Brazil/BRZ/brasil
 # - explicit demo/data-source policy to avoid mixing real and seed data silently
 CBOT_HISTORY_START = "2025-12-01"
-APP_BUILD = "V10.8.15-modern-contracts-workspace"
+APP_BUILD = "V10.8.11-sbm-equivalent-price"
 
 # V10.8.7 one-time SBM date alignment supplied by CPC in SBM Purchases.xlsx.
 # The workbook mixes DD/MM/YYYY text cells with numeric Excel cells displayed
@@ -361,7 +361,7 @@ try:
 except Exception:
     REPORTLAB_OK = False
 
-APP_NAME = "Prometheus Procurement (V10.8.15 · Modern Contracts Workspace)"
+APP_NAME = "Prometheus Procurement (V10.8.11 · SBM Equivalent Price)"
 DEFAULT_LOCAL_TRANSPORT_EGP_MT = 323.13
 
 # ══════════════════════════════════════════════════════════════════════
@@ -2288,41 +2288,6 @@ def _sensitivity_fx(snapshot, mode="direct"):
         return local - (((imp+carry)*fxv) + intake)
     return [(fx-1, sav(fx-1)), (fx, sav(fx)), (fx+1, sav(fx+1))]
 
-def _snapshot_effective_conversion_factor(snapshot):
-    """Return the factor actually used to convert the quoted market unit to USD/MT.
-
-    Older snapshots may store the legacy physical conversion value (for example
-    39.37 bushels/MT for corn). Excel exports must show the monetary factor
-    actually used by the calculation: 0.3937 for corn, 0.36745 for soybean and
-    wheat, and 1.1023 for SBM.
-    """
-    snap = snapshot or {}
-    base = str(snap.get("commodity") or "").strip().upper().split("-")[0]
-    canonical = CBOT_CONV.get(base)
-    if canonical is not None:
-        return float(canonical)
-
-    explicit = to_float(snap.get("conversion_factor") or snap.get("locked_factor"), None)
-    if explicit is not None:
-        return explicit
-
-    raw = to_float(snap.get("conversion_value"), 1.0) or 1.0
-    conversion_type = str(snap.get("conversion_type") or "none").strip().lower()
-    if conversion_type == "bu_per_mt":
-        return raw / 100.0
-    return raw
-
-
-def _snapshot_premium_mode(snapshot):
-    """Return the premium unit policy used by formula-driven Excel exports."""
-    snap = snapshot or {}
-    mode = str(snap.get("premium_mode") or "").strip().upper()
-    if mode:
-        return mode
-    base = str(snap.get("commodity") or "").strip().upper().split("-")[0]
-    return "CBOT_UNIT" if base in CBOT_CONV else "USD_MT"
-
-
 def export_compare_excel(fp, a, b):
     """Export two snapshots comparison to Excel with CFO-style summary, charts, sensitivity, and driver bridge.
     NOTE: This version builds a formula-driven workbook (inputs in Calc A / Calc B, outputs referenced everywhere).
@@ -2382,8 +2347,8 @@ def export_compare_excel(fp, a, b):
             ("Interest Rate %", _f(snap.get("interest_rate"))),
             ("Direct Intake (EGP/MT)", _f(snap.get("supplier_direct_egp_mt") or snap.get("direct_intake_egp_mt") or _intake_direct_egp(snap))),
             ("Indirect Intake (EGP/MT)", _f(snap.get("supplier_indirect_egp_mt") or snap.get("indirect_intake_egp_mt") or _intake_indirect_egp(snap))),
-            ("Conversion Factor Used", _snapshot_effective_conversion_factor(snap)),
-            ("Premium Mode", _snapshot_premium_mode(snap)),
+            ("Conversion Value", _f(snap.get("conversion_value"))),
+            ("CORN Locked Factor", 0.3937),
         ]
         set_cell(ws, 2, 1, "Input", True, None, "center")
         set_cell(ws, 2, 2, "Value", True, None, "center")
@@ -2427,10 +2392,9 @@ def export_compare_excel(fp, a, b):
 
         # Named cell references in this sheet:
         # Inputs start at row 3: B3 Commodity, B4 Qty, B5 FX, B6 Local, B7 CBOT, B8 Premium, B9 ImportUSDInput, B10 Days, B11 Rate,
-        # B12 DirectIntake, B13 IndirectIntake, B14 EffectiveFactor, B15 PremiumMode
-        # Import USD/MT (E3). The factor is the actual monetary conversion
-        # used by the app (for CORN this is 0.3937, never 39.37).
-        ws["E3"] = '=IF(ISNUMBER($B$7),IF($B$15="CBOT_UNIT",($B$7+$B$8)*$B$14,$B$7*$B$14+$B$8),$B$9)'
+        # B12 DirectIntake, B13 IndirectIntake, B14 ConvVal, B15 CornFactor
+        # Import USD/MT (E3)
+        ws["E3"] = "=IF(ISNUMBER($B$7),IF($B$3=\"CORN\",($B$7+$B$8)*$B$15,($B$7/100)*$B$14 + $B$8),$B$9)"
         ws["E4"] = "=E3*($B$11/100)*($B$10/360)"
         ws["E5"] = "=E3+E4"
         ws["E6"] = "=E5*$B$5"
@@ -2708,8 +2672,7 @@ def export_compare_excel(fp, a, b):
         ("Premium", a.get("premium_usd_mt"), b.get("premium_usd_mt"), None, "varies", ""),
         ("Finance Days", a.get("finance_days"), b.get("finance_days"), None, "days", ""),
         ("Interest Rate %", a.get("interest_rate"), b.get("interest_rate"), None, "%", ""),
-        ("Conversion Factor Used", _snapshot_effective_conversion_factor(a), _snapshot_effective_conversion_factor(b), None, "", "Actual factor used in the calculation"),
-        ("Premium Mode", _snapshot_premium_mode(a), _snapshot_premium_mode(b), None, "", "CBOT_UNIT means premium is added before conversion"),
+        ("Conversion Value", a.get("conversion_value"), b.get("conversion_value"), None, "", ""),
     ]
 
     start = 4
@@ -2814,8 +2777,8 @@ def export_snapshot_excel(fp, snap):
         ("Interest Rate %", _f(snap.get("interest_rate")), "%", ""),
         ("Direct Intake (EGP/MT)", _f(snap.get("supplier_direct_egp_mt") or snap.get("direct_intake_egp_mt")), "EGP/MT", ""),
         ("Indirect Intake (EGP/MT)", _f(snap.get("supplier_indirect_egp_mt") or snap.get("indirect_intake_egp_mt")), "EGP/MT", ""),
-        ("Conversion Factor Used", _snapshot_effective_conversion_factor(snap), "USD/MT per quoted unit", "CORN 0.3937; SOYBEAN/WHEAT 0.36745; SBM 1.1023"),
-        ("Premium Mode", _snapshot_premium_mode(snap), "", "CBOT_UNIT means CBOT + premium is converted together"),
+        ("Conversion Value", _f(snap.get("conversion_value")), "", "Used for non-CORN CBOT"),
+        ("CORN Locked Factor", 0.3937, "", "Locked rule for CORN"),
     ]
 
     start = 7
@@ -2852,8 +2815,8 @@ def export_snapshot_excel(fp, snap):
         "rate": f"B{start+9}",
         "intake_d": f"B{start+10}",
         "intake_i": f"B{start+11}",
-        "factor": f"B{start+12}",
-        "premium_mode": f"B{start+13}",
+        "conv": f"B{start+12}",
+        "corn_fac": f"B{start+13}",
     }
 
     # ---------------------
@@ -2869,7 +2832,7 @@ def export_snapshot_excel(fp, snap):
     set_cell(out_top+1, 4, "Formula", True, align="center")
 
     # Formulas
-    f_import_usd = f'=IF(ISNUMBER({addr["cbot"]}),IF({addr["premium_mode"]}="CBOT_UNIT",({addr["cbot"]}+{addr["premium"]})*{addr["factor"]},{addr["cbot"]}*{addr["factor"]}+{addr["premium"]}),{addr["imp_usd_in"]})'
+    f_import_usd = f"=IF(ISNUMBER({addr['cbot']}),IF({addr['commodity']}=\"CORN\",({addr['cbot']}+{addr['premium']})*{addr['corn_fac']},({addr['cbot']}/100)*{addr['conv']}+{addr['premium']}),{addr['imp_usd_in']})"
     f_carry_usd = f"=B{out_top+2}*({addr['rate']}/100)*({addr['fin_days']}/360)"
     f_own_after_usd = f"=B{out_top+2}+B{out_top+3}"
     f_own_after_egp = f"=B{out_top+4}*{addr['fx']}"
@@ -6273,14 +6236,6 @@ class App(tk.Tk):
 
         # ── Scrollable inner frames (existing builders keep their names) ─
         self.tab_contracts       = self._make_scrollable_tab(self.tab_contracts_outer, padding=10)
-        # Contracts is a dashboard-style workspace: fit cards and actions to
-        # the visible notebook width. The contract Treeview keeps its own
-        # horizontal scrollbar for detailed columns.
-        try:
-            self.tab_contracts.master._force_viewport_width = True
-            self.tab_contracts.master._sync_scrollregion()
-        except Exception:
-            pass
         self.tab_local_purchases = self._make_scrollable_tab(self.tab_local_purchases_outer, padding=10)
         self.tab_slots           = self._make_scrollable_tab(self.tab_slots_outer, padding=10)
         self.tab_setup           = self._make_scrollable_tab(self.tab_setup_outer, padding=10)
@@ -6366,212 +6321,6 @@ class App(tk.Tk):
         base = (contract.get("commodity") or "").strip().upper().split("-")[0]
         return base == selected
 
-    @staticmethod
-    def _home_compact_money(value):
-        """Format an EGP amount for compact executive cards."""
-        val = to_float(value, None)
-        if val is None:
-            return "—"
-        sign = "+" if val > 0 else ("−" if val < 0 else "")
-        amount = abs(val)
-        if amount >= 1_000_000_000:
-            text = f"{amount / 1_000_000_000:.1f}bn"
-        elif amount >= 1_000_000:
-            text = f"{amount / 1_000_000:.1f}m"
-        elif amount >= 1_000:
-            text = f"{amount / 1_000:.1f}k"
-        else:
-            text = f"{amount:,.0f}"
-        return f"{sign}EGP {text}"
-
-    def _home_contract_pricing_split(self, contract):
-        """Return (priced_mt, unpriced_mt) for one open contract.
-
-        Pricing lots take precedence because CORN/SOYBEAN contracts can be
-        fixed in several lots on different dates. A final-priced contract with
-        no lots is treated as fully priced; otherwise the remaining quantity is
-        exposed.
-        """
-        qty = to_float(contract.get("remaining_mt") or contract.get("qty_mt"), 0.0) or 0.0
-        lots = []
-        try:
-            lots = self._contract_pricing_lots(contract)
-        except Exception:
-            lots = [x for x in (contract.get("pricing_lots", []) or []) if isinstance(x, dict)]
-        if lots:
-            priced_qty = sum(to_float(lot.get("qty_mt"), 0.0) or 0.0 for lot in lots)
-            priced_qty = min(max(priced_qty, 0.0), qty)
-            return priced_qty, max(qty - priced_qty, 0.0)
-        final_cif = None
-        try:
-            final_cif = self._contract_cif_usd(contract)
-        except Exception:
-            final_cif = to_float(contract.get("cif_usd_mt"), None)
-        is_priced = bool(contract.get("priced", True)) and final_cif is not None
-        return (qty, 0.0) if is_priced else (0.0, qty)
-
-    def _home_coverage_for_commodity(self, commodity, open_qty=0.0):
-        """Return coverage including current stock and open inbound contracts."""
-        base = (commodity or "").strip().upper().split("-")[0]
-        if not base:
-            return {"days": None, "on_hand": 0.0, "rate": None, "status": "No commodity"}
-        keys = set()
-        keys.update((self.state_obj.get("commodities", {}) or {}).keys())
-        keys.update((c.get("commodity") or "") for c in (self.state_obj.get("contracts", {}) or {}).values())
-        keys.update((r.get("commodity") or "") for r in (self.state_obj.get("consumption_log", []) or []))
-        aliases = sorted({str(k).strip().upper() for k in keys
-                          if str(k).strip() and str(k).strip().upper().split("-")[0] == base})
-        if not aliases:
-            aliases = [base]
-        try:
-            stock_map = self._compute_stock_with_adjustments(aliases)
-            on_hand = sum(to_float(stock_map.get(k, (0.0, None))[0], 0.0) or 0.0 for k in aliases)
-        except Exception:
-            on_hand = 0.0
-        rate = self.get_consumption_mt_day(base) if hasattr(self, "get_consumption_mt_day") else None
-        if not rate:
-            rates = []
-            for alias in aliases:
-                try:
-                    value = self.get_consumption_mt_day(alias)
-                except Exception:
-                    value = None
-                if value:
-                    rates.append(value)
-            rate = sum(rates) if rates else None
-        if not rate or rate <= 0:
-            return {"days": None, "on_hand": on_hand, "rate": rate,
-                    "status": "Set consumption rate"}
-        days = (on_hand + (open_qty or 0.0)) / rate
-        if days < 7:
-            status = "Critical"
-        elif days < 14:
-            status = "Low"
-        else:
-            status = "Covered"
-        return {"days": days, "on_hand": on_hand, "rate": rate, "status": status}
-
-    def _home_exec_metrics(self, commodity="ALL", fx_mode="live"):
-        """Build the executive KPI set for one base commodity or the portfolio.
-
-        Realised savings is closed-only. Open position is indicative MTM. The
-        two are intentionally never added together.
-        """
-        selected = (commodity or "ALL").strip().upper()
-        f_comm = "All" if selected == "ALL" else selected
-        realized_rows, totals = self._sv_collect_savings_rows(f_comm, "All", "All", "Closed")
-        realized_saving = to_float(totals.get("grand_sav"), 0.0) or 0.0
-        realized_qty = to_float(totals.get("grand_qty"), 0.0) or 0.0
-        realized_per_mt = realized_saving / realized_qty if realized_qty else None
-
-        contracts = self.state_obj.get("contracts", {}) or {}
-        open_count = 0
-        open_qty = open_value = open_position = unpriced_qty = 0.0
-        closed_qty = 0.0
-        open_gap_contracts = 0
-        open_contract_num = open_contract_local = 0.0
-        open_avg_qty = 0.0
-        for cid, contract in contracts.items():
-            if not self._home_contract_matches_filter(contract, selected):
-                continue
-            status = (contract.get("status") or "Open").strip() or "Open"
-            qty = to_float(contract.get("qty_mt"), 0.0) or 0.0
-            if status == "Closed":
-                closed_qty += qty
-                continue
-            open_count += 1
-            metrics = self._hd_cost_for_contract(
-                cid, contract, use_latest_fx=True, fx_mode=fx_mode)
-            metric_qty = to_float(metrics.get("qty"), qty) or 0.0
-            open_qty += metric_qty
-            if metrics.get("own_after") is not None and metric_qty:
-                open_value += metrics["own_after"] * metric_qty
-                open_contract_num += metrics["own_after"] * metric_qty
-                open_avg_qty += metric_qty
-            if metrics.get("local") is not None and metric_qty:
-                open_contract_local += metrics["local"] * metric_qty
-            if metrics.get("total_sav") is not None:
-                open_position += metrics["total_sav"]
-            _priced, unpriced = self._home_contract_pricing_split(contract)
-            unpriced_qty += unpriced
-            missing = False
-            if not metric_qty or metrics.get("cif") is None or not metrics.get("fx"):
-                missing = True
-            if metrics.get("local") is None:
-                missing = True
-            if to_float(contract.get("freight_egp_mt"), None) is None and \
-               self._contract_route_freight_rate(contract) is None:
-                missing = True
-            if missing:
-                open_gap_contracts += 1
-
-        closed_contract_num = closed_local_num = closed_avg_qty = 0.0
-        missing_realized_dates = 0
-        for row in realized_rows:
-            qty = to_float(row.get("qty"), 0.0) or 0.0
-            if not row.get("realized_date"):
-                missing_realized_dates += 1
-            if qty and row.get("own_after") is not None and row.get("local") is not None:
-                closed_contract_num += row["own_after"] * qty
-                closed_local_num += row["local"] * qty
-                closed_avg_qty += qty
-        if closed_avg_qty:
-            avg_contract = closed_contract_num / closed_avg_qty
-            avg_local = closed_local_num / closed_avg_qty
-            avg_scope = "closed"
-        elif open_avg_qty:
-            avg_contract = open_contract_num / open_avg_qty
-            avg_local = open_contract_local / open_avg_qty if open_contract_local else None
-            avg_scope = "open MTM"
-        else:
-            avg_contract = avg_local = None
-            avg_scope = "no comparable data"
-
-        if selected == "ALL":
-            coverage_rows = []
-            for comm in self._home_commodity_options():
-                comm_open_qty = sum(
-                    to_float(c.get("remaining_mt") or c.get("qty_mt"), 0.0) or 0.0
-                    for c in contracts.values()
-                    if (c.get("status") or "Open").strip() != "Closed"
-                    and self._home_contract_matches_filter(c, comm))
-                cov = self._home_coverage_for_commodity(comm, comm_open_qty)
-                if cov.get("days") is not None:
-                    coverage_rows.append((cov["days"], comm, cov))
-            if coverage_rows:
-                coverage_days, coverage_commodity, coverage = min(coverage_rows, key=lambda x: x[0])
-            else:
-                coverage_days, coverage_commodity = None, ""
-                coverage = {"status": "Set consumption rates", "on_hand": 0.0, "rate": None}
-        else:
-            coverage = self._home_coverage_for_commodity(selected, open_qty)
-            coverage_days = coverage.get("days")
-            coverage_commodity = selected
-
-        data_gaps = (to_float(totals.get("warnings"), 0.0) or 0.0) + open_gap_contracts + missing_realized_dates
-        return {
-            "scope": selected,
-            "realized_saving": realized_saving,
-            "realized_qty": realized_qty,
-            "realized_per_mt": realized_per_mt,
-            "closed_qty": closed_qty,
-            "closed_count": sum(1 for c in contracts.values()
-                                if (c.get("status") or "Open").strip() == "Closed"
-                                and self._home_contract_matches_filter(c, selected)),
-            "open_count": open_count,
-            "open_qty": open_qty,
-            "open_value": open_value,
-            "open_position": open_position,
-            "unpriced_qty": unpriced_qty,
-            "avg_contract": avg_contract,
-            "avg_local": avg_local,
-            "avg_scope": avg_scope,
-            "coverage_days": coverage_days,
-            "coverage_commodity": coverage_commodity,
-            "coverage_status": coverage.get("status", ""),
-            "data_gaps": int(data_gaps),
-        }
-
     def _home_select_commodity(self, commodity):
         """Filter the complete Home portfolio, not only the savings table."""
         label = (commodity or "All").strip().upper()
@@ -6593,7 +6342,7 @@ class App(tk.Tk):
             try:
                 active = key.upper() == label.upper()
                 vars_["card"].configure(
-                    highlightbackground="#3b82f6" if active else "#1f3550",
+                    highlightbackground="#2563eb" if active else "#d0dcea",
                     highlightthickness=2 if active else 1)
             except Exception:
                 pass
@@ -6611,7 +6360,7 @@ class App(tk.Tk):
             log_exception(exc, "_home_select_commodity:secondary_panels")
 
     def _rebuild_home_commodity_cards(self):
-        """Build one clickable CEO card for every commodity option."""
+        """Build one clickable portfolio card for every commodity option."""
         frame = getattr(self, "_hd_comm_cards_frame", None)
         if frame is None:
             return
@@ -6620,543 +6369,80 @@ class App(tk.Tk):
         options = self._home_commodity_options()
         self._hd_comm_card_options = tuple(options)
         self._hd_comm_kpi_vars = {}
-        columns = 3
+        columns = 4
         for col in range(columns):
             frame.columnconfigure(col, weight=1, uniform="home-commodity")
         for index, comm in enumerate(options):
             row, col = divmod(index, columns)
-            card = tk.Frame(frame, bg="#0b1728", highlightthickness=1,
-                            highlightbackground="#1f3550", cursor="hand2")
+            card = tk.Frame(frame, bg="#ffffff", highlightthickness=1,
+                            highlightbackground="#d0dcea", cursor="hand2")
             card.grid(row=row, column=col, sticky="nsew",
-                      padx=(0, 8), pady=(0, 8), ipady=2)
-            accent = tk.Frame(card, bg="#64748b", height=4)
-            accent.pack(fill="x", side="top")
-            tk.Label(card, text=comm, font=("Segoe UI", 11, "bold"),
-                     bg="#0b1728", fg="#f8fafc").pack(anchor="w", padx=10, pady=(7, 2))
-            line_specs = [
-                ("realized", "Realised —", ("Segoe UI", 9, "bold"), "#72e39a"),
-                ("saving_mt", "Saving/MT —", ("Segoe UI", 9), "#dbeafe"),
-                ("closed", "Closed —", ("Segoe UI", 8), "#7890a8"),
-                ("open", "Open —", ("Segoe UI", 9, "bold"), "#dbeafe"),
-                ("unpriced", "Unpriced —", ("Segoe UI", 8), "#fbbf24"),
-                ("position", "Indicative —", ("Segoe UI", 9, "bold"), "#60a5fa"),
-                ("average", "Average —", ("Segoe UI", 8), "#9fb3c8"),
-                ("coverage", "Coverage —", ("Segoe UI", 8), "#9fb3c8"),
-                ("quality", "Data —", ("Segoe UI", 8), "#7890a8"),
-            ]
-            vars_ = {"card": card, "accent": accent}
-            for key, default, font, fg in line_specs:
-                var = tk.StringVar(value=default)
-                lbl = tk.Label(card, textvariable=var, font=font,
-                               bg="#0b1728", fg=fg)
-                lbl.pack(anchor="w", padx=10, pady=(0, 1))
-                vars_[key] = var
-                vars_[key + "_label"] = lbl
-            tk.Frame(card, bg="#0b1728", height=4).pack(fill="x")
+                      padx=(0, 8), pady=(0, 8), ipady=3)
+            tk.Frame(card, bg="#2563eb", height=3).pack(fill="x", side="top")
+            tk.Label(card, text=comm, font=("Segoe UI", 10, "bold"),
+                     bg="#ffffff", fg="#0f172a").pack(anchor="w", padx=10, pady=(7, 1))
+            open_v = tk.StringVar(value="Open —")
+            qty_v = tk.StringVar(value="— MT")
+            edge_v = tk.StringVar(value="Edge —")
+            realized_v = tk.StringVar(value="Realized —")
+            tk.Label(card, textvariable=open_v, font=("Segoe UI", 9, "bold"),
+                     bg="#ffffff", fg="#334155").pack(anchor="w", padx=10)
+            tk.Label(card, textvariable=qty_v, font=("Segoe UI", 9),
+                     bg="#ffffff", fg="#64748b").pack(anchor="w", padx=10)
+            edge_lbl = tk.Label(card, textvariable=edge_v, font=("Segoe UI", 9, "bold"),
+                                bg="#ffffff", fg="#0f766e")
+            edge_lbl.pack(anchor="w", padx=10)
+            realized_lbl = tk.Label(card, textvariable=realized_v, font=("Segoe UI", 9),
+                                    bg="#ffffff", fg="#166534")
+            realized_lbl.pack(anchor="w", padx=10, pady=(0, 7))
             for widget in (card, *card.winfo_children()):
                 widget.bind("<Button-1>", lambda _e, c=comm: self._home_select_commodity(c))
-            self._hd_comm_kpi_vars[comm] = vars_
+            self._hd_comm_kpi_vars[comm] = {
+                "open": open_v, "qty": qty_v, "edge": edge_v,
+                "realized": realized_v, "edge_label": edge_lbl,
+                "realized_label": realized_lbl, "card": card,
+            }
 
     def _refresh_home_commodity_cards(self):
-        """Update CEO commodity cards with realised, open, coverage and quality KPIs."""
+        """Update open exposure and realized savings on each commodity card."""
         if not hasattr(self, "_hd_comm_cards_frame"):
             return
         current = tuple(self._home_commodity_options())
         if current != getattr(self, "_hd_comm_card_options", ()):
             self._rebuild_home_commodity_cards()
+        contracts = self.state_obj.get("contracts", {}) or {}
         fx_mode_sel = getattr(self, "_hd_fx_mode_var", None)
         fx_mode = fx_mode_sel.get() if fx_mode_sel else "live"
         for comm, vars_ in getattr(self, "_hd_comm_kpi_vars", {}).items():
-            metrics = self._home_exec_metrics(comm, fx_mode=fx_mode)
-            realised = metrics["realized_saving"]
-            per_mt = metrics["realized_per_mt"]
-            vars_["realized"].set(f"Realised  {self._home_compact_money(realised)}")
-            vars_["saving_mt"].set(
-                f"Saving/MT  EGP {per_mt:+,.0f}" if per_mt is not None else "Saving/MT  —")
-            vars_["closed"].set(
-                f"Closed  {metrics['closed_qty']:,.0f} MT · {metrics['closed_count']}")
-            vars_["open"].set(
-                f"Open  {metrics['open_qty']:,.0f} MT · {metrics['open_count']}")
-            vars_["unpriced"].set(f"Unpriced  {metrics['unpriced_qty']:,.0f} MT")
-            vars_["position"].set(
-                f"Indicative  {self._home_compact_money(metrics['open_position'])}"
-                if metrics["open_count"] else "Indicative  —")
-            if metrics["avg_contract"] is not None and metrics["avg_local"] is not None:
-                vars_["average"].set(
-                    f"Avg {metrics['avg_scope']}  {metrics['avg_contract']:,.0f} vs local {metrics['avg_local']:,.0f}")
-            else:
-                vars_["average"].set("Average comparison  —")
-            if metrics["coverage_days"] is not None:
-                vars_["coverage"].set(
-                    f"Coverage  {metrics['coverage_days']:.0f} days incl. inbound")
-            else:
-                vars_["coverage"].set(f"Coverage  — · {metrics['coverage_status']}")
-            gaps = metrics["data_gaps"]
-            vars_["quality"].set("Data  complete" if not gaps else f"Data  {gaps} gap(s)")
-
-            if (gaps or metrics["open_position"] < 0 or
-                    (metrics["coverage_days"] is not None and metrics["coverage_days"] < 7)):
-                accent_colour = "#dc2626"
-            elif (metrics["unpriced_qty"] > 0 or
-                  (metrics["coverage_days"] is not None and metrics["coverage_days"] < 14)):
-                accent_colour = "#d97706"
-            elif realised >= 0 and metrics["open_position"] >= 0:
-                accent_colour = "#16a34a"
-            else:
-                accent_colour = "#64748b"
-            vars_["accent"].configure(bg=accent_colour)
-            vars_["realized_label"].configure(fg="#72e39a" if realised >= 0 else "#fb7185")
-            vars_["position_label"].configure(
-                fg="#72e39a" if metrics["open_position"] >= 0 else "#fb7185")
-            vars_["quality_label"].configure(fg="#7890a8" if not gaps else "#fbbf24")
-
-    def _refresh_home_executive_kpis(self, month_total=None):
-        """Refresh the 12 CEO cards for the selected Home scope."""
-        selected = self._home_active_commodity()
-        fx_mode_sel = getattr(self, "_hd_fx_mode_var", None)
-        fx_mode = fx_mode_sel.get() if fx_mode_sel else "live"
-        metrics = self._home_exec_metrics(selected, fx_mode=fx_mode)
-        scope_label = "ALL COMMODITIES" if selected == "ALL" else selected
-        if hasattr(self, "hd_kpi_scope_var"):
-            self.hd_kpi_scope_var.set(
-                f"EXECUTIVE SCOPE · {scope_label}  |  Realised = closed only  |  Indicative = open MTM")
-        self.hd_kpi_prev.set(self._home_compact_money(metrics["realized_saving"]))
-        self.hd_kpi_realized_mt.set(
-            f"EGP {metrics['realized_per_mt']:+,.0f}"
-            if metrics["realized_per_mt"] is not None else "—")
-        self.hd_kpi_closed_qty.set(
-            f"{metrics['closed_qty']:,.0f} MT · {metrics['closed_count']}")
-        if month_total is not None:
-            self.hd_kpi_saving.set(self._home_compact_money(month_total))
-        self.hd_kpi_open_value.set(self._home_compact_money(metrics["open_value"]))
-        self.hd_kpi_open_edge.set(
-            self._home_compact_money(metrics["open_position"])
-            if metrics["open_count"] else "—")
-        self.hd_kpi_open_qty.set(
-            f"{metrics['open_qty']:,.0f} MT · {metrics['open_count']}")
-        self.hd_kpi_unpriced_qty.set(f"{metrics['unpriced_qty']:,.0f} MT")
-        self.hd_kpi_avg_contract.set(
-            f"EGP {metrics['avg_contract']:,.0f}" if metrics["avg_contract"] is not None else "—")
-        self.hd_kpi_avg_local.set(
-            f"EGP {metrics['avg_local']:,.0f}" if metrics["avg_local"] is not None else "—")
-        if metrics["coverage_days"] is not None:
-            prefix = f"{metrics['coverage_commodity']} · " if selected == "ALL" else ""
-            self.hd_kpi_coverage.set(f"{prefix}{metrics['coverage_days']:.0f} days")
-        else:
-            self.hd_kpi_coverage.set("—")
-        self.hd_kpi_data_gaps.set(str(metrics["data_gaps"]))
-        self._refresh_home_modern_panels(metrics)
-
-
-    # ------------------------------------------------------------------
-    # V10.8.14 — modern dark executive Home overview
-    # ------------------------------------------------------------------
-    @staticmethod
-    def _home_dark_panel(parent, title, subtitle="", columnspan=1):
-        """Create one reusable dark dashboard panel."""
-        panel = tk.Frame(parent, bg="#0b1728", highlightthickness=1,
-                         highlightbackground="#1f3550")
-        panel.columnconfigure(0, weight=1)
-        tk.Label(panel, text=title, bg="#0b1728", fg="#f8fafc",
-                 font=("Segoe UI", 10, "bold")).grid(
-                     row=0, column=0, sticky="w", padx=12, pady=(10, 0))
-        if subtitle:
-            tk.Label(panel, text=subtitle, bg="#0b1728", fg="#7890a8",
-                     font=("Segoe UI", 8)).grid(
-                         row=1, column=0, sticky="w", padx=12, pady=(0, 4))
-        return panel
-
-    @staticmethod
-    def _home_draw_line_chart(canvas, values, labels=None, positive=True):
-        """Draw a dependency-free line/area chart on a Tk canvas."""
-        canvas.delete("all")
-        width = max(int(canvas.cget("width")), 260)
-        height = max(int(canvas.cget("height")), 130)
-        pad_l, pad_r, pad_t, pad_b = 42, 16, 16, 26
-        plot_w = width - pad_l - pad_r
-        plot_h = height - pad_t - pad_b
-        grid = "#18304a"
-        text_c = "#71859b"
-        line_c = "#3b82f6" if positive else "#ef4444"
-        fill_c = "#102d52" if positive else "#3b1822"
-        for i in range(4):
-            y = pad_t + (plot_h * i / 3)
-            canvas.create_line(pad_l, y, width-pad_r, y, fill=grid)
-        if not values:
-            canvas.create_text(width/2, height/2, text="No realised history yet",
-                               fill=text_c, font=("Segoe UI", 9))
-            return
-        vals = [float(v or 0) for v in values]
-        v_min = min(0.0, min(vals))
-        v_max = max(0.0, max(vals))
-        if abs(v_max - v_min) < 1e-9:
-            v_max = v_min + 1.0
-        pts = []
-        count = max(len(vals)-1, 1)
-        for idx, value in enumerate(vals):
-            x = pad_l + plot_w * idx / count
-            y = pad_t + plot_h * (v_max - value) / (v_max - v_min)
-            pts.extend((x, y))
-        baseline = pad_t + plot_h * (v_max - 0.0) / (v_max - v_min)
-        polygon = [pad_l, baseline] + pts + [pad_l + plot_w, baseline]
-        canvas.create_polygon(polygon, fill=fill_c, outline="")
-        if len(pts) >= 4:
-            canvas.create_line(*pts, fill=line_c, width=2.3, smooth=True)
-        for idx in range(0, len(pts), 2):
-            canvas.create_oval(pts[idx]-2.5, pts[idx+1]-2.5,
-                               pts[idx]+2.5, pts[idx+1]+2.5,
-                               fill=line_c, outline="#9cc2ff")
-        if labels:
-            shown = list(labels)
-            for idx, label in enumerate(shown):
-                if idx not in {0, len(shown)-1} and len(shown) > 4 and idx % 2:
+            open_count = 0
+            open_qty = 0.0
+            open_edge = 0.0
+            for cid, contract in contracts.items():
+                base = (contract.get("commodity") or "").upper().split("-")[0]
+                if base != comm or (contract.get("status") or "Open").strip() == "Closed":
                     continue
-                x = pad_l + plot_w * idx / max(len(shown)-1, 1)
-                canvas.create_text(x, height-10, text=str(label), fill=text_c,
-                                   font=("Segoe UI", 7))
-        top = max(vals, key=abs)
-        
-    @staticmethod
-    def _home_draw_donut(canvas, items):
-        """Draw an open-exposure donut chart with a compact legend."""
-        canvas.delete("all")
-        width = max(int(canvas.cget("width")), 280)
-        height = max(int(canvas.cget("height")), 150)
-        colours = ["#3b82f6", "#22c55e", "#8b5cf6", "#f59e0b", "#06b6d4", "#ef4444"]
-        values = [(name, float(value or 0)) for name, value in items if (value or 0) > 0]
-        total = sum(value for _, value in values)
-        cx, cy, radius = 82, height/2, min(58, height/2-12)
-        if total <= 0:
-            canvas.create_oval(cx-radius, cy-radius, cx+radius, cy+radius,
-                               outline="#29425d", width=12)
-            canvas.create_text(cx, cy, text="No open\nexposure", fill="#7890a8",
-                               font=("Segoe UI", 9), justify="center")
-            return
-        start = 90.0
-        for idx, (name, value) in enumerate(values):
-            extent = -360.0 * value / total
-            canvas.create_arc(cx-radius, cy-radius, cx+radius, cy+radius,
-                              start=start, extent=extent, style="arc",
-                              outline=colours[idx % len(colours)], width=15)
-            start += extent
-        canvas.create_text(cx, cy-8, text="EGP", fill="#7890a8",
-                           font=("Segoe UI", 8))
-        compact = f"{total/1_000_000:.1f}M" if total >= 1_000_000 else f"{total/1_000:.0f}K"
-        canvas.create_text(cx, cy+8, text=compact, fill="#f8fafc",
-                           font=("Segoe UI", 12, "bold"))
-        y = 20
-        for idx, (name, value) in enumerate(values[:5]):
-            colour = colours[idx % len(colours)]
-            canvas.create_oval(158, y-4, 166, y+4, fill=colour, outline=colour)
-            share = value / total * 100
-            canvas.create_text(174, y, anchor="w",
-                               text=f"{name}  {share:.0f}%", fill="#cbd5e1",
-                               font=("Segoe UI", 8, "bold"))
-            canvas.create_text(width-12, y, anchor="e",
-                               text=(f"EGP {value/1_000_000:.1f}M" if value >= 1_000_000 else f"EGP {value/1_000:.0f}K"),
-                               fill="#7890a8", font=("Segoe UI", 8))
-            y += 24
-
-    def _home_open_analysis_tab(self, subtab=None):
-        self.nb.select(self.tab_analysis_outer)
-        if subtab is not None and hasattr(self, "_an_nb"):
+                open_count += 1
+                metrics = self._hd_cost_for_contract(
+                    cid, contract, use_latest_fx=True, fx_mode=fx_mode)
+                open_qty += to_float(metrics.get("qty"), 0.0) or 0.0
+                open_edge += to_float(metrics.get("total_sav"), 0.0) or 0.0
+            _rows, totals = self._sv_collect_savings_rows(
+                comm, "All", "All", "Closed")
+            realized = totals.get("grand_sav", 0.0) or 0.0
+            realized_count = totals.get("counted", 0) or 0
+            vars_["open"].set(f"{open_count} open contract{'s' if open_count != 1 else ''}")
+            vars_["qty"].set(f"{open_qty:,.0f} MT open")
+            vars_["edge"].set(f"Open edge  EGP {open_edge:+,.0f}" if open_count else "Open edge  —")
+            vars_["realized"].set(
+                f"Realized  EGP {realized:+,.0f} · {realized_count} closed"
+                if realized_count else "Realized  —")
             try:
-                self._an_nb.select(subtab)
+                vars_["edge_label"].configure(
+                    fg="#166534" if open_edge >= 0 else "#b91c1c")
+                vars_["realized_label"].configure(
+                    fg="#166534" if realized >= 0 else "#b91c1c")
             except Exception:
                 pass
-
-    def _build_home_modern_overview(self, parent):
-        """Build the dark executive section shown above operational detail."""
-        bg = "#07111f"
-        parent.configure(bg=bg)
-        parent.columnconfigure(0, weight=1)
-
-        header = tk.Frame(parent, bg=bg)
-        header.grid(row=0, column=0, sticky="ew", padx=4, pady=(2, 8))
-        header.columnconfigure(0, weight=1)
-        tk.Label(header, text="Commodity Performance", bg=bg, fg="#f8fafc",
-                 font=("Segoe UI", 12, "bold")).grid(row=0, column=0, sticky="w")
-        tk.Label(header,
-                 text="Click a commodity to filter every executive and operational panel",
-                 bg=bg, fg="#7890a8", font=("Segoe UI", 8)).grid(
-                     row=1, column=0, sticky="w")
-        self._hd_modern_status_var = tk.StringVar(value="AUDITABLE · REALISED AND INDICATIVE KEPT SEPARATE")
-        tk.Label(header, textvariable=self._hd_modern_status_var,
-                 bg="#12311f", fg="#72e39a", padx=10, pady=4,
-                 font=("Segoe UI", 8, "bold")).grid(row=0, column=1, rowspan=2,
-                                                      sticky="e", padx=(8, 0))
-
-        cards = tk.Frame(parent, bg=bg)
-        cards.grid(row=1, column=0, sticky="ew")
-        self._hd_comm_cards_frame = cards
-        self._rebuild_home_commodity_cards()
-
-        overview = tk.Frame(parent, bg=bg)
-        overview.grid(row=2, column=0, sticky="ew", pady=(5, 0))
-        for col, weight in enumerate((2, 1, 1, 1)):
-            overview.columnconfigure(col, weight=weight, uniform="home-overview")
-
-        trend = self._home_dark_panel(overview, "Savings Trend", "Closed-contract realised savings")
-        trend.grid(row=0, column=0, columnspan=2, sticky="nsew", padx=(0, 8), pady=(0, 8))
-        self._hd_modern_trend_title = tk.StringVar(value="Realised savings by period")
-        tk.Label(trend, textvariable=self._hd_modern_trend_title,
-                 bg="#0b1728", fg="#60a5fa", font=("Segoe UI", 8, "bold")).grid(
-                     row=2, column=0, sticky="w", padx=12, pady=(0, 2))
-        self._hd_modern_trend_canvas = tk.Canvas(trend, width=560, height=155,
-                                                 bg="#0b1728", highlightthickness=0)
-        self._hd_modern_trend_canvas.grid(row=3, column=0, sticky="ew", padx=4, pady=(0, 4))
-
-        exposure = self._home_dark_panel(overview, "Open Exposure by Commodity", "Current own-after value")
-        exposure.grid(row=0, column=2, sticky="nsew", padx=(0, 8), pady=(0, 8))
-        self._hd_modern_exposure_canvas = tk.Canvas(exposure, width=330, height=165,
-                                                    bg="#0b1728", highlightthickness=0)
-        self._hd_modern_exposure_canvas.grid(row=2, column=0, sticky="ew", padx=4, pady=(2, 4))
-
-        actions = self._home_dark_panel(overview, "Action Centre", "Highest-priority management issues")
-        actions.grid(row=0, column=3, sticky="nsew", pady=(0, 8))
-        self._hd_modern_action_rows = []
-        for idx in range(4):
-            row = tk.Frame(actions, bg="#0b1728")
-            row.grid(row=2+idx, column=0, sticky="ew", padx=10, pady=2)
-            row.columnconfigure(1, weight=1)
-            icon = tk.Label(row, text="●", bg="#0b1728", fg="#f59e0b",
-                            font=("Segoe UI", 9, "bold"))
-            icon.grid(row=0, column=0, sticky="n", padx=(0, 7))
-            var = tk.StringVar(value="Refresh to load actions")
-            lbl = tk.Label(row, textvariable=var, bg="#0b1728", fg="#cbd5e1",
-                           font=("Segoe UI", 8), justify="left", wraplength=220)
-            lbl.grid(row=0, column=1, sticky="w")
-            badge = tk.Label(row, text="", bg="#10243c", fg="#93c5fd",
-                             font=("Segoe UI", 7, "bold"), padx=5, pady=2)
-            badge.grid(row=0, column=2, sticky="e", padx=(5, 0))
-            self._hd_modern_action_rows.append((icon, var, lbl, badge))
-
-        recent = self._home_dark_panel(overview, "Top Contracts / Recent Decisions", "Latest contract activity")
-        recent.grid(row=1, column=0, columnspan=2, sticky="nsew", padx=(0, 8), pady=(0, 8))
-        hdr = tk.Frame(recent, bg="#0b1728")
-        hdr.grid(row=2, column=0, sticky="ew", padx=12, pady=(3, 2))
-        widths = (("Contract", 16), ("Commodity", 12), ("Supplier", 18), ("Qty", 12), ("Status", 12))
-        for col, (name, width) in enumerate(widths):
-            hdr.columnconfigure(col, weight=1 if col == 2 else 0)
-            tk.Label(hdr, text=name, width=width, anchor="w", bg="#0b1728", fg="#7890a8",
-                     font=("Segoe UI", 7, "bold")).grid(row=0, column=col, sticky="w")
-        self._hd_modern_recent_rows = []
-        for idx in range(4):
-            rf = tk.Frame(recent, bg="#0e1c2f")
-            rf.grid(row=3+idx, column=0, sticky="ew", padx=10, pady=1)
-            rf.columnconfigure(2, weight=1)
-            vars_ = []
-            for col, (_name, width) in enumerate(widths):
-                v = tk.StringVar(value="—")
-                lbl = tk.Label(rf, textvariable=v, width=width, anchor="w",
-                               bg="#0e1c2f", fg="#dbeafe", font=("Segoe UI", 8))
-                lbl.grid(row=0, column=col, sticky="ew", padx=(3, 0), pady=4)
-                vars_.append((v, lbl))
-            self._hd_modern_recent_rows.append(vars_)
-
-        coverage = self._home_dark_panel(overview, "Coverage Days", "Stock plus open inbound")
-        coverage.grid(row=1, column=2, sticky="nsew", padx=(0, 8), pady=(0, 8))
-        self._hd_modern_coverage_rows = []
-        for idx in range(5):
-            row = tk.Frame(coverage, bg="#0b1728")
-            row.grid(row=2+idx, column=0, sticky="ew", padx=12, pady=2)
-            row.columnconfigure(0, weight=1)
-            name = tk.StringVar(value="—")
-            days = tk.StringVar(value="—")
-            dot = tk.Label(row, text="●", bg="#0b1728", fg="#64748b",
-                           font=("Segoe UI", 8))
-            dot.grid(row=0, column=0, sticky="w")
-            tk.Label(row, textvariable=name, bg="#0b1728", fg="#cbd5e1",
-                     font=("Segoe UI", 8, "bold")).grid(row=0, column=0, sticky="w", padx=(15, 0))
-            dl = tk.Label(row, textvariable=days, bg="#0b1728", fg="#f8fafc",
-                          font=("Segoe UI", 8, "bold"))
-            dl.grid(row=0, column=1, sticky="e")
-            self._hd_modern_coverage_rows.append((dot, name, days, dl))
-
-        quality = self._home_dark_panel(overview, "Data Quality & Quick Links", "Can management trust the numbers?")
-        quality.grid(row=1, column=3, sticky="nsew", pady=(0, 8))
-        self._hd_modern_quality_var = tk.StringVar(value="Refresh to assess")
-        self._hd_modern_quality_lbl = tk.Label(
-            quality, textvariable=self._hd_modern_quality_var,
-            bg="#0b1728", fg="#72e39a", font=("Segoe UI", 12, "bold"),
-            justify="left")
-        self._hd_modern_quality_lbl.grid(row=2, column=0, sticky="w", padx=12, pady=(6, 2))
-        self._hd_modern_quality_note = tk.StringVar(value="")
-        tk.Label(quality, textvariable=self._hd_modern_quality_note,
-                 bg="#0b1728", fg="#7890a8", font=("Segoe UI", 8),
-                 wraplength=240, justify="left").grid(row=3, column=0, sticky="w",
-                                                       padx=12, pady=(0, 8))
-        links = tk.Frame(quality, bg="#0b1728")
-        links.grid(row=4, column=0, sticky="ew", padx=10, pady=(0, 10))
-        for col in range(2):
-            links.columnconfigure(col, weight=1)
-        quick = [
-            ("Contracts", lambda: self.nb.select(self.tab_contracts_group)),
-            ("Basis Tracker", lambda: self._home_open_analysis_tab(getattr(self, "tab_basis", None))),
-            ("Exposure", lambda: self._home_open_analysis_tab(getattr(self, "tab_exposure", None))),
-            ("Setup & Data", lambda: self.nb.select(self.tab_setup_outer)),
-        ]
-        for idx, (label, command) in enumerate(quick):
-            tk.Button(links, text=label, command=command, bg="#10243c", fg="#dbeafe",
-                      activebackground="#173a63", activeforeground="white",
-                      relief="flat", cursor="hand2", font=("Segoe UI", 8, "bold"),
-                      pady=5).grid(row=idx//2, column=idx%2, sticky="ew", padx=2, pady=2)
-
-    def _refresh_home_modern_panels(self, metrics=None):
-        """Refresh charts and compact executive panels from existing engines."""
-        if not hasattr(self, "_hd_modern_trend_canvas"):
-            return
-        selected = self._home_active_commodity()
-        fx_mode_var = getattr(self, "_hd_fx_mode_var", None)
-        fx_mode = fx_mode_var.get() if fx_mode_var is not None else "live"
-        metrics = metrics or self._home_exec_metrics(selected, fx_mode=fx_mode)
-
-        # Savings trend: aggregate closed realised rows by month, newest six.
-        f_comm = "All" if selected == "ALL" else selected
-        rows, _totals = self._sv_collect_savings_rows(f_comm, "All", "All", "Closed")
-        buckets = {}
-        for row in rows:
-            dd = parse_date_flex(row.get("realized_date") or row.get("delivery_date") or "")
-            value = to_float(row.get("total_sav"), None)
-            if dd is None or value is None:
-                continue
-            key = dd.strftime("%Y-%m")
-            buckets[key] = buckets.get(key, 0.0) + value
-        keys = sorted(buckets)[-6:]
-        vals = [buckets[k] for k in keys]
-        labels = []
-        for key in keys:
-            try:
-                labels.append(dt.date.fromisoformat(key + "-01").strftime("%b"))
-            except Exception:
-                labels.append(key)
-        self._home_draw_line_chart(self._hd_modern_trend_canvas, vals, labels,
-                                   positive=(sum(vals) >= 0 if vals else True))
-        self._hd_modern_trend_title.set(
-            f"{('All commodities' if selected == 'ALL' else selected)} · "
-            f"{self._home_compact_money(sum(vals)) if vals else 'No dated closes'}")
-
-        # Portfolio exposure donut remains portfolio-wide for CEO context.
-        exposure_items = []
-        for comm in self._home_commodity_options():
-            cm = self._home_exec_metrics(comm, fx_mode=fx_mode)
-            exposure_items.append((comm, cm.get("open_value", 0.0)))
-        self._home_draw_donut(self._hd_modern_exposure_canvas, exposure_items)
-
-        # Action centre — concise, deterministic and linked to the same KPIs.
-        actions = []
-        if metrics.get("data_gaps", 0):
-            actions.append(("High", f"{metrics['data_gaps']} data gap(s) affect executive figures"))
-        if metrics.get("open_position", 0.0) < 0:
-            actions.append(("High", f"Open position is {self._home_compact_money(metrics['open_position'])} vs local"))
-        if metrics.get("unpriced_qty", 0.0) > 0:
-            actions.append(("Medium", f"{metrics['unpriced_qty']:,.0f} MT remains unpriced"))
-        cov_days = metrics.get("coverage_days")
-        if cov_days is not None and cov_days < 14:
-            actions.append(("Medium", f"Coverage is only {cov_days:.0f} days"))
-        if metrics.get("open_count", 0) and metrics.get("open_position", 0.0) >= 0:
-            actions.append(("Low", f"Open book is favorable by {self._home_compact_money(metrics['open_position'])}"))
-        if not actions:
-            actions.append(("OK", "No urgent management actions in the selected scope"))
-        actions = actions[:4]
-        colour_map = {"High": "#ef4444", "Medium": "#f59e0b", "Low": "#3b82f6", "OK": "#22c55e"}
-        for idx, widgets in enumerate(self._hd_modern_action_rows):
-            icon, var, lbl, badge = widgets
-            if idx < len(actions):
-                level, message = actions[idx]
-                var.set(message)
-                colour = colour_map.get(level, "#7890a8")
-                icon.configure(fg=colour)
-                badge.configure(text=level, fg=colour)
-                lbl.configure(fg="#e2e8f0")
-            else:
-                var.set("")
-                badge.configure(text="")
-                icon.configure(fg="#0b1728")
-
-        # Coverage rows for up to five commodities.
-        coverage_data = []
-        contracts = self.state_obj.get("contracts", {}) or {}
-        for comm in self._home_commodity_options():
-            open_qty = sum(
-                to_float(c.get("remaining_mt") or c.get("qty_mt"), 0.0) or 0.0
-                for c in contracts.values()
-                if (c.get("status") or "Open").strip() != "Closed"
-                and self._home_contract_matches_filter(c, comm))
-            cov = self._home_coverage_for_commodity(comm, open_qty)
-            coverage_data.append((comm, cov.get("days"), cov.get("status", "")))
-        for idx, widgets in enumerate(self._hd_modern_coverage_rows):
-            dot, name_var, days_var, days_lbl = widgets
-            if idx < len(coverage_data):
-                comm, days, status = coverage_data[idx]
-                name_var.set(comm)
-                if days is None:
-                    days_var.set("No rate")
-                    colour = "#64748b"
-                else:
-                    days_var.set(f"{days:.0f} days")
-                    colour = "#22c55e" if days >= 14 else ("#f59e0b" if days >= 7 else "#ef4444")
-                dot.configure(fg=colour)
-                days_lbl.configure(fg=colour if days is not None else "#7890a8")
-            else:
-                name_var.set("")
-                days_var.set("")
-                dot.configure(fg="#0b1728")
-
-        # Recent contract activity, newest logical date first.
-        realised_map = {}
-        all_realised, _ = self._sv_collect_savings_rows("All", "All", "All", "Closed")
-        for row in all_realised:
-            realised_map[str(row.get("cid"))] = row
-        recent = []
-        for cid, contract in contracts.items():
-            date_text = (contract.get("closed_date") or contract.get("pricing_date") or
-                         contract.get("delivery_date") or contract.get("storage_start") or "")
-            dd = parse_date_flex(date_text)
-            sort_key = dd.isoformat() if dd else "0000-00-00"
-            recent.append((sort_key, str(cid), contract))
-        recent.sort(reverse=True, key=lambda item: item[0])
-        for idx, row_widgets in enumerate(self._hd_modern_recent_rows):
-            if idx < len(recent):
-                _date, cid, contract = recent[idx]
-                qty = to_float(contract.get("qty_mt"), 0.0) or 0.0
-                status = (contract.get("status") or "Open").strip() or "Open"
-                realised = realised_map.get(cid)
-                impact = to_float((realised or {}).get("total_sav"), None)
-                status_text = status
-                if impact is not None:
-                    status_text = ("Favourable" if impact >= 0 else "Review")
-                values = [
-                    self._hd_ref(cid, contract),
-                    (contract.get("commodity") or "").upper().split("-")[0],
-                    contract.get("supplier") or "—",
-                    f"{qty:,.0f} MT",
-                    status_text,
-                ]
-                for col, (var, lbl) in enumerate(row_widgets):
-                    var.set(values[col])
-                    if col == 4:
-                        colour = "#72e39a" if status_text == "Favourable" else ("#f59e0b" if status_text == "Review" else "#60a5fa")
-                        lbl.configure(fg=colour)
-                    else:
-                        lbl.configure(fg="#dbeafe")
-            else:
-                for var, lbl in row_widgets:
-                    var.set("")
-
-        gaps = int(metrics.get("data_gaps", 0) or 0)
-        if gaps == 0:
-            self._hd_modern_quality_var.set("Healthy")
-            self._hd_modern_quality_lbl.configure(fg="#72e39a")
-            self._hd_modern_quality_note.set("All selected executive calculations have the required data.")
-        elif gaps <= 3:
-            self._hd_modern_quality_var.set("Review")
-            self._hd_modern_quality_lbl.configure(fg="#fbbf24")
-            self._hd_modern_quality_note.set(f"{gaps} data gap(s) need attention before relying on every KPI.")
-        else:
-            self._hd_modern_quality_var.set("At Risk")
-            self._hd_modern_quality_lbl.configure(fg="#fb7185")
-            self._hd_modern_quality_note.set(f"{gaps} data gaps materially reduce dashboard confidence.")
 
     def _build_home_dashboard(self):
         """Build a premium Home tab command center.
@@ -7216,7 +6502,7 @@ class App(tk.Tk):
                   pady=2, padx=10).grid(row=0, column=16, sticky="e", padx=(4, 14), pady=5)
 
         # ── ROW 1: scrollable body ───────────────────────────────────────
-        canvas = tk.Canvas(p, highlightthickness=0, borderwidth=0, bg="#06101d")
+        canvas = tk.Canvas(p, highlightthickness=0, borderwidth=0, bg="#f4f7fb")
         ysb = ttk.Scrollbar(p, orient="vertical", command=canvas.yview)
         xsb = ttk.Scrollbar(p, orient="horizontal", command=canvas.xview)
         canvas.configure(yscrollcommand=ysb.set, xscrollcommand=xsb.set)
@@ -7224,7 +6510,7 @@ class App(tk.Tk):
         ysb.grid(row=1, column=1, sticky="ns")
         xsb.grid(row=2, column=0, sticky="ew")
 
-        body = tk.Frame(canvas, bg="#06101d")
+        body = tk.Frame(canvas, bg="#f4f7fb")
         body_id = canvas.create_window((0, 0), window=body, anchor="nw")
 
         def _sync_scroll_region(event=None):
@@ -7243,7 +6529,7 @@ class App(tk.Tk):
 
         body.bind("<Configure>", _sync_scroll_region)
         canvas.bind("<Configure>", _sync_canvas_width)
-        body.columnconfigure(0, weight=0, minsize=260)
+        body.columnconfigure(0, weight=0, minsize=300)
         body.columnconfigure(1, weight=1)
         body.rowconfigure(0, weight=1)
 
@@ -7252,36 +6538,17 @@ class App(tk.Tk):
         left.grid(row=0, column=0, sticky="nsw", padx=(12, 10), pady=12)
         left.columnconfigure(0, weight=1)
         left.grid_propagate(False)
-        left.configure(width=260)
+        left.configure(width=300)
 
-        tk.Label(left, text="◆  PROMETHEUS", bg="#0f172a", fg="#f8fafc",
-                 font=("Segoe UI", 14, "bold")).grid(row=0, column=0, sticky="w", padx=14, pady=(15, 0))
-        tk.Label(left, text="PROCUREMENT INTELLIGENCE", bg="#0f172a", fg="#60a5fa",
-                 font=("Segoe UI", 8, "bold")).grid(row=1, column=0, sticky="w", padx=14, pady=(0, 4))
+        tk.Label(left, text="IMPORT DESK", bg="#0f172a", fg="#e2e8f0",
+                 font=("Segoe UI", 15, "bold")).grid(row=0, column=0, sticky="w", padx=16, pady=(16, 0))
+        tk.Label(left, text="Daily market inputs + shortcuts", bg="#0f172a", fg="#94a3b8",
+                 font=("Segoe UI", 9)).grid(row=1, column=0, sticky="w", padx=16, pady=(0, 4))
         tk.Label(left, text=dt.date.today().strftime("%A, %d %b %Y"), bg="#0f172a", fg="#38bdf8",
-                 font=("Segoe UI", 9, "bold")).grid(row=2, column=0, sticky="w", padx=14, pady=(0, 10))
-
-        nav_card = tk.Frame(left, bg="#0f172a")
-        nav_card.grid(row=3, column=0, sticky="ew", padx=10, pady=(0, 9))
-        nav_card.columnconfigure(0, weight=1)
-        nav_specs = [
-            ("⌂  Home", lambda: self.nb.select(self.tab_home), True),
-            ("▤  Contracts", lambda: self.nb.select(self.tab_contracts_group), False),
-            ("◫  Analysis", lambda: self.nb.select(self.tab_analysis_outer), False),
-            ("◈  Consumption", lambda: self.nb.select(self.tab_consumption_outer), False),
-            ("⚙  Setup & Data", lambda: self.nb.select(self.tab_setup_outer), False),
-        ]
-        for idx, (label, command, active) in enumerate(nav_specs):
-            tk.Button(nav_card, text=label, command=command, anchor="w",
-                      bg="#1d4ed8" if active else "#0f172a",
-                      fg="white" if active else "#cbd5e1",
-                      activebackground="#2563eb", activeforeground="white",
-                      relief="flat", cursor="hand2", padx=10, pady=5,
-                      font=("Segoe UI", 9, "bold" if active else "normal")).grid(
-                          row=idx, column=0, sticky="ew", pady=1)
+                 font=("Segoe UI", 9, "bold")).grid(row=2, column=0, sticky="w", padx=16, pady=(0, 12))
 
         input_card = tk.Frame(left, bg="#111c31", highlightthickness=1, highlightbackground="#24344f")
-        input_card.grid(row=4, column=0, sticky="ew", padx=12, pady=(0, 10))
+        input_card.grid(row=3, column=0, sticky="ew", padx=12, pady=(0, 10))
         input_card.columnconfigure(0, weight=1)
         tk.Label(input_card, text="USD / EGP TODAY", bg="#111c31", fg="#93c5fd",
                  font=("Segoe UI", 9, "bold")).grid(row=0, column=0, sticky="w", padx=10, pady=(10, 2))
@@ -7290,7 +6557,7 @@ class App(tk.Tk):
             row=1, column=0, sticky="ew", padx=10, pady=(0, 10))
 
         local_card = tk.Frame(left, bg="#111c31", highlightthickness=1, highlightbackground="#24344f")
-        local_card.grid(row=5, column=0, sticky="ew", padx=12, pady=(0, 10))
+        local_card.grid(row=4, column=0, sticky="ew", padx=12, pady=(0, 10))
         local_card.columnconfigure(1, weight=1)
         tk.Label(local_card, text="LOCAL PRICES  EGP/MT", bg="#111c31", fg="#93c5fd",
                  font=("Segoe UI", 9, "bold")).grid(row=0, column=0, columnspan=2, sticky="w", padx=10, pady=(10, 6))
@@ -7305,7 +6572,7 @@ class App(tk.Tk):
             row += 1
 
         btn_card = tk.Frame(left, bg="#0f172a")
-        btn_card.grid(row=6, column=0, sticky="ew", padx=12, pady=(0, 8))
+        btn_card.grid(row=5, column=0, sticky="ew", padx=12, pady=(0, 8))
         btn_card.columnconfigure(0, weight=1)
         tk.Label(btn_card, text="→ saves into Setup → Local Prices & FX History\n(same data — this is just the fast way in)",
                  bg="#111c31", fg="#94a3b8", justify="left",
@@ -7333,14 +6600,14 @@ class App(tk.Tk):
 
         self.hd_saved_var = tk.StringVar(value="")
         tk.Label(left, textvariable=self.hd_saved_var, bg="#0f172a", fg="#94a3b8",
-                 font=("Segoe UI", 9), wraplength=225, justify="left").grid(
-                     row=7, column=0, sticky="w", padx=14, pady=(0, 10))
+                 font=("Segoe UI", 9), wraplength=260, justify="left").grid(
+                     row=6, column=0, sticky="w", padx=14, pady=(0, 10))
 
         # (Removed "QUICK OPEN" navigation card: it duplicated the tab bar
         #  40px above it and relied on hardcoded, breakable tab indices.)
 
         # ── RIGHT: executive cockpit ─────────────────────────────────────
-        main = tk.Frame(body, bg="#06101d")
+        main = tk.Frame(body, bg="#f4f7fb")
         main.grid(row=0, column=1, sticky="nsew", padx=(0, 12), pady=12)
         main.columnconfigure(0, weight=1)
         main.rowconfigure(6, weight=1)
@@ -7351,18 +6618,18 @@ class App(tk.Tk):
         self.hd_formula_rule_var = tk.StringVar(value="Open CORN MTM CIF = (Latest CBOT + Contract Premium) × 0.3937 · cash landed basis, excl. finance carry (Finance-sheet convention)")
         self.hd_decision_line_var = tk.StringVar(value="Refresh to load current open exposure and realized savings.")
 
-        hero = tk.Frame(main, bg="#07111f", highlightthickness=1, highlightbackground="#1f3550")
+        hero = tk.Frame(main, bg="#111827", highlightthickness=1, highlightbackground="#233147")
         hero.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         hero.columnconfigure(0, weight=1)
         hero.columnconfigure(1, weight=0)
-        tk.Label(hero, text="CEO Dashboard", bg="#07111f", fg="#f8fafc",
+        tk.Label(hero, text="Home Command Center", bg="#111827", fg="#f8fafc",
                  font=("Segoe UI", 18, "bold")).grid(row=0, column=0, sticky="w", padx=16, pady=(14, 0))
-        tk.Label(hero, text="Executive overview of procurement performance",
-                 bg="#07111f", fg="#7890a8", font=("Segoe UI", 9)).grid(row=1, column=0, sticky="w", padx=16, pady=(0, 3))
+        tk.Label(hero, text="Live MTM exposure • realized closed-contract savings • alerts • pricing scenarios",
+                 bg="#111827", fg="#94a3b8", font=("Segoe UI", 9)).grid(row=1, column=0, sticky="w", padx=16, pady=(0, 3))
         tk.Label(hero, textvariable=self.hd_formula_rule_var,
-                 bg="#07111f", fg="#60a5fa", font=("Segoe UI", 9, "bold")).grid(row=2, column=0, sticky="w", padx=16, pady=(0, 4))
+                 bg="#111827", fg="#7dd3fc", font=("Segoe UI", 9, "bold")).grid(row=2, column=0, sticky="w", padx=16, pady=(0, 4))
         tk.Label(hero, textvariable=self.hd_market_status_var,
-                 bg="#07111f", fg="#9fb3c8", font=("Segoe UI", 9)).grid(row=3, column=0, sticky="w", padx=16, pady=(0, 14))
+                 bg="#111827", fg="#cbd5e1", font=("Segoe UI", 9)).grid(row=3, column=0, sticky="w", padx=16, pady=(0, 14))
         tk.Button(hero, text="🔄 Refresh Everything",
                   command=lambda: self.refresh_all(fetch_market=True),
                   bg="#2563eb", fg="white", relief="flat", cursor="hand2",
@@ -7370,7 +6637,7 @@ class App(tk.Tk):
                       row=0, column=1, rowspan=4, sticky="e", padx=16, pady=16)
 
         # KPI cards: visually separated open MTM and realized numbers.
-        kpi_frame = tk.Frame(main, bg="#06101d")
+        kpi_frame = tk.Frame(main, bg="#f4f7fb")
         kpi_frame.grid(row=1, column=0, sticky="ew", pady=(0, 10))
         for i in range(4):
             kpi_frame.columnconfigure(i, weight=1)
@@ -7384,55 +6651,40 @@ class App(tk.Tk):
         self.hd_kpi_saving         = tk.StringVar(value="-")
         self.hd_kpi_prev           = tk.StringVar(value="-")
         self.hd_kpi_contracts      = tk.StringVar(value="-")
-        self.hd_kpi_realized_mt    = tk.StringVar(value="-")
-        self.hd_kpi_closed_qty     = tk.StringVar(value="-")
-        self.hd_kpi_unpriced_qty   = tk.StringVar(value="-")
-        self.hd_kpi_avg_contract   = tk.StringVar(value="-")
-        self.hd_kpi_avg_local      = tk.StringVar(value="-")
-        self.hd_kpi_coverage       = tk.StringVar(value="-")
-        self.hd_kpi_data_gaps      = tk.StringVar(value="-")
-        self.hd_kpi_scope_var      = tk.StringVar(value="EXECUTIVE SCOPE · ALL COMMODITIES")
-        tk.Label(kpi_frame, textvariable=self.hd_kpi_scope_var, bg="#06101d", fg="#7890a8",
-                 font=("Segoe UI", 9, "bold")).grid(
-                     row=0, column=0, columnspan=4, sticky="w", pady=(0, 5))
 
         def _metric_card(row, col, title, var, subtitle, bg, accent="#38bdf8"):
-            card_bg = "#0b1728"
-            box = tk.Frame(kpi_frame, bg=card_bg, highlightthickness=1,
-                           highlightbackground="#1f3550")
+            box = tk.Frame(kpi_frame, bg=bg, highlightthickness=1, highlightbackground="#d7e0ea")
             box.grid(row=row, column=col, sticky="nsew", padx=(0, 8), pady=(0, 8))
-            tk.Label(box, text=title, bg=card_bg, fg="#9fb3c8",
-                     font=("Segoe UI", 8, "bold")).pack(anchor="w", padx=11, pady=(9, 1))
-            tk.Label(box, textvariable=var, bg=card_bg, fg="#f8fafc",
-                     font=("Segoe UI", 14, "bold")).pack(anchor="w", padx=11, pady=(0, 1))
-            tk.Label(box, text=subtitle, bg=card_bg, fg="#647f9a",
-                     font=("Segoe UI", 8)).pack(anchor="w", padx=11, pady=(0, 8))
-            spark = tk.Canvas(box, height=18, bg=card_bg, highlightthickness=0)
-            spark.pack(fill="x", padx=10, pady=(0, 4))
-            spark.create_line(0, 14, 24, 11, 48, 12, 72, 7, 96, 9, 122, 3,
-                              fill=accent, width=2, smooth=True)
+            tk.Label(box, text=title.upper(), bg=bg, fg="#64748b",
+                     font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=10, pady=(8, 0))
+            tk.Label(box, textvariable=var, bg=bg, fg="#0f172a",
+                     font=("Segoe UI", 14, "bold")).pack(anchor="w", padx=10, pady=(0, 0))
+            tk.Label(box, text=subtitle, bg=bg, fg="#64748b",
+                     font=("Segoe UI", 9)).pack(anchor="w", padx=10, pady=(0, 8))
+            tk.Frame(box, bg=accent, height=3).pack(fill="x", side="bottom")
 
-        _metric_card(1, 0, "Realised Savings", self.hd_kpi_prev,          "closed contracts only", "#f0fdf4", "#16a34a")
-        _metric_card(1, 1, "Saving / MT",      self.hd_kpi_realized_mt,  "weighted realised efficiency", "#f0fdf4", "#22c55e")
-        _metric_card(1, 2, "Closed Quantity",  self.hd_kpi_closed_qty,   "MT · contract count", "#ffffff", "#16a34a")
-        _metric_card(1, 3, "MTD Realised",     self.hd_kpi_saving,       "current month closes", "#f0fdf4", "#22c55e")
-        _metric_card(2, 0, "Open Exposure",    self.hd_kpi_open_value,   "current own-after value", "#ffffff", "#0ea5e9")
-        _metric_card(2, 1, "Indicative Open",  self.hd_kpi_open_edge,    "open MTM vs local", "#fff7ed", "#f97316")
-        _metric_card(2, 2, "Open Quantity",    self.hd_kpi_open_qty,     "MT · contract count", "#ffffff", "#38bdf8")
-        _metric_card(2, 3, "Unpriced Quantity",self.hd_kpi_unpriced_qty, "CBOT price risk still open", "#fff7ed", "#f59e0b")
-        _metric_card(3, 0, "Avg Contract Cost",self.hd_kpi_avg_contract, "weighted delivered EGP/MT", "#ffffff", "#2563eb")
-        _metric_card(3, 1, "Avg Local Market", self.hd_kpi_avg_local,    "same comparable rows", "#ffffff", "#2563eb")
-        _metric_card(3, 2, "Lowest Coverage",  self.hd_kpi_coverage,     "stock + open inbound", "#ffffff", "#7c3aed")
-        _metric_card(3, 3, "Data Gaps",        self.hd_kpi_data_gaps,    "contracts excluded / incomplete", "#fff7ed", "#dc2626")
+        _metric_card(0, 0, "Open Contracts", self.hd_kpi_open_contracts, "live / unsettled", "#ffffff", "#38bdf8")
+        _metric_card(0, 1, "Open Qty",       self.hd_kpi_open_qty,       "MT exposure", "#ffffff", "#38bdf8")
+        _metric_card(0, 2, "Open MTM Value", self.hd_kpi_open_value,     "current own-after value", "#ffffff", "#0ea5e9")
+        _metric_card(0, 3, "Open MTM Edge",  self.hd_kpi_open_edge,      "vs current local", "#ffffff", "#f97316")
+        _metric_card(1, 0, "Alerts",         self.hd_kpi_alerts,         "data + risk checks", "#fff7ed", "#f97316")
+        _metric_card(1, 1, "Month",          self.hd_kpi_month,          "realized month", "#f8fafc", "#64748b")
+        _metric_card(1, 2, "MTD Realized",   self.hd_kpi_saving,         "closed contracts only", "#f0fdf4", "#22c55e")
+        _metric_card(1, 3, "Realized Total", self.hd_kpi_prev,           "closed contracts only", "#f0fdf4", "#16a34a")
 
         # Commodity portfolio cards belong near the top of Home so directors
         # can see every commodity without scrolling into the closed-savings
         # section. Clicking a card filters the realized scorecard below.
-        comm_portfolio = tk.Frame(main, bg="#07111f", highlightthickness=1,
-                                  highlightbackground="#1f3550", padx=10, pady=8)
+        comm_portfolio = ttk.LabelFrame(
+            main,
+            text="📦 Commodity Portfolio — open exposure + realized savings (click to filter)",
+            padding=8)
         comm_portfolio.grid(row=2, column=0, sticky="ew", pady=(0, 10))
         comm_portfolio.columnconfigure(0, weight=1)
-        self._build_home_modern_overview(comm_portfolio)
+        comm_kpi_f = tk.Frame(comm_portfolio, bg="#f4f7fb")
+        comm_kpi_f.grid(row=0, column=0, sticky="ew")
+        self._hd_comm_cards_frame = comm_kpi_f
+        self._rebuild_home_commodity_cards()
 
         decision = tk.Frame(main, bg="#e0f2fe", highlightthickness=1, highlightbackground="#bae6fd")
         decision.grid(row=3, column=0, sticky="ew", pady=(0, 10))
@@ -9092,7 +8344,6 @@ class App(tk.Tk):
             f"EGP {month_total:,.0f}" if month_total else
             f"EGP 0 · no {today.strftime('%b')} closes")
         self.hd_kpi_prev.set(f"EGP {grand_total:,.0f}")
-        self._refresh_home_executive_kpis(month_total=month_total)
 
         base_saved   = self.state_obj.get("meta", {}).get("saved_ts", "")
         msg          = f"Last saved: {base_saved}" if base_saved else ""
@@ -11587,47 +10838,18 @@ class App(tk.Tk):
         ttk.Entry(settings, textvariable=self._al_days_var, width=10).grid(
             row=4, column=1, sticky="w", pady=(4, 0))
 
-        ttk.Label(settings, text="Alert: Form 4 vs pricing FX gap ≥ (%)").grid(
-            row=6, column=0, sticky="w", pady=(4, 0), padx=(0, 8))
-        self._al_fxgap_var = tk.StringVar(
-            value=str(self.state_obj.get("ui", {}).get("alert_fx_pricing_gap_pct", 2.0)))
-        ttk.Entry(settings, textvariable=self._al_fxgap_var, width=10).grid(
-            row=6, column=1, sticky="w", pady=(4, 0))
-        ttk.Label(settings,
-                  text="Compares the bank's Form 4 FX to the weighted FX across pricing "
-                       "lots — flags the gap whichever way it moved.",
-                  foreground=CLR["muted"]).grid(row=6, column=3, columnspan=2,
-                                                sticky="w", padx=(8, 0), pady=(4, 0))
-
-        ttk.Label(settings, text="Alert: supplier concentration ≥ (% of open MT)").grid(
-            row=7, column=0, sticky="w", pady=(4, 0), padx=(0, 8))
-        self._al_supconc_var = tk.StringVar(
-            value=str(self.state_obj.get("ui", {}).get("alert_supplier_concentration_pct", 40.0)))
-        ttk.Entry(settings, textvariable=self._al_supconc_var, width=10).grid(
-            row=7, column=1, sticky="w", pady=(4, 0))
-        ttk.Label(settings,
-                  text="Flags when one supplier holds this share (or more) of total open MT.",
-                  foreground=CLR["muted"]).grid(row=7, column=3, columnspan=2,
-                                                sticky="w", padx=(8, 0), pady=(4, 0))
-
         def _save_alert_thr():
             ui = self.state_obj.setdefault("ui", {})
             v1 = to_float(self._al_cbot_var.get(), None)
             v2 = to_float(self._al_days_var.get(), None)
-            v3 = to_float(self._al_fxgap_var.get(), None)
-            v4 = to_float(self._al_supconc_var.get(), None)
             if v1 is not None and v1 > 0:
                 ui["alert_cbot_move_pct"] = round(v1, 2)
             if v2 is not None and v2 > 0:
                 ui["alert_near_delivery_days"] = int(v2)
-            if v3 is not None and v3 > 0:
-                ui["alert_fx_pricing_gap_pct"] = round(v3, 2)
-            if v4 is not None and v4 > 0:
-                ui["alert_supplier_concentration_pct"] = round(v4, 2)
             save_state(self.state_obj)
             messagebox.showinfo(APP_NAME, "Alert thresholds saved.")
         ttk.Button(settings, text="Save Alert Thresholds",
-                   command=_save_alert_thr).grid(row=7, column=2, sticky="w",
+                   command=_save_alert_thr).grid(row=4, column=2, sticky="w",
                                                  pady=(4, 0))
 
         ttk.Label(settings, text="Font size (visibility)").grid(
@@ -15969,21 +15191,12 @@ class App(tk.Tk):
                              activebackground="#1d4ed8" if primary else "#234c78",
                              activeforeground="#ffffff", relief="flat", cursor="hand2",
                              padx=12, pady=7, font=(FONT_FAMILY, FS_BODY, "bold"))
-        hero_actions = [
-            ("＋ New", None, self._contracts_prepare_new, False),
-            ("Save / Update", None, self._contracts_save_from_editor, True),
-            ("Compare 2", None, self._open_contract_comparison, False),
-            ("Refresh", None, lambda: self.refresh_all(fetch_market=True), False),
-            (None, self._contract_editor_button_var, self._toggle_contract_editor, False),
-            (None, self._contract_history_button_var, self._toggle_contract_history, False),
-            ("Export Visible", None, lambda: self._export_contracts_excel("visible"), False),
-            ("Export All", None, lambda: self._export_contracts_excel("all"), False),
-        ]
-        for idx, (label, label_var, command, primary) in enumerate(hero_actions):
-            btn = _hero_button(text_value=label_var, text=label, command=command, primary=primary)
-            btn.grid(row=idx // 4, column=idx % 4, sticky="ew", padx=3, pady=3)
-        for idx in range(4):
-            actions.columnconfigure(idx, weight=1)
+        _hero_button(text="＋ New", command=self._contracts_prepare_new).pack(side="left", padx=(0, 6))
+        _hero_button(text="Save / Update", command=self._contracts_save_from_editor, primary=True).pack(side="left", padx=(0, 6))
+        _hero_button(text_value=self._contract_editor_button_var, command=self._toggle_contract_editor).pack(side="left", padx=(0, 6))
+        _hero_button(text_value=self._contract_history_button_var, command=self._toggle_contract_history).pack(side="left", padx=(0, 6))
+        _hero_button(text="Refresh", command=lambda: self.refresh_all(fetch_market=True)).pack(side="left", padx=(0, 6))
+        _hero_button(text="Export", command=self._export_portfolio_excel).pack(side="left")
 
         # ── Summary line (replaces header) ───────────────────────────────
         self.contracts_summary_var = tk.StringVar(value="")
@@ -16427,7 +15640,6 @@ class App(tk.Tk):
         self.contract_filter_commodity_var = tk.StringVar(value="ALL")
         self.contract_filter_status_var = tk.StringVar(value="ALL")
         self.contract_filter_origin_var = tk.StringVar(value="ALL")
-        self.contract_sort_var = tk.StringVar(value="Delivery Date · Newest First")
         self.contract_open_only_var = tk.BooleanVar(value=False)
         ttk.Label(cflt, text="Search").pack(side="left")
         csearch = ttk.Entry(cflt, textvariable=self.contract_search_var, width=22)
@@ -16441,23 +15653,9 @@ class App(tk.Tk):
         ttk.Label(cflt, text="Origin").pack(side="left")
         self.contract_filter_origin_combo = ttk.Combobox(cflt, textvariable=self.contract_filter_origin_var, values=["ALL"], width=16, state="readonly")
         self.contract_filter_origin_combo.pack(side="left", padx=(4,10))
-        ttk.Label(cflt, text="Order").pack(side="left")
-        self.contract_sort_combo = ttk.Combobox(
-            cflt, textvariable=self.contract_sort_var,
-            values=[
-                "Delivery Date · Newest First",
-                "Delivery Date · Oldest First",
-                "Contract ID · Newest First",
-                "Commodity · A–Z",
-                "Supplier · A–Z",
-                "Status · Open First",
-            ],
-            width=27, state="readonly")
-        self.contract_sort_combo.pack(side="left", padx=(4,10))
         ttk.Checkbutton(cflt, text="Open only", variable=self.contract_open_only_var, command=self.refresh_contracts_tree).pack(side="left")
         ttk.Button(cflt, text="Clear Filters", command=self.clear_contract_filters).pack(side="right")
-        for _w in (csearch, self.contract_filter_commodity_combo, self.contract_filter_status_combo,
-                   self.contract_filter_origin_combo, self.contract_sort_combo):
+        for _w in (csearch, self.contract_filter_commodity_combo, self.contract_filter_status_combo, self.contract_filter_origin_combo):
             _w.bind("<KeyRelease>", lambda e: self.refresh_contracts_tree())
             _w.bind("<<ComboboxSelected>>", lambda e: self.refresh_contracts_tree())
 
@@ -16470,13 +15668,12 @@ class App(tk.Tk):
         ctable_wrap.rowconfigure(0, weight=1)
         self.contract_tree = ttk.Treeview(
             ctable_wrap,
-            columns=["ContractID","DeliveryDate","Name","Status","Supplier","Commodity","Origin","QtyMT","RemainingMT",
-                     "CIFUSD_MT","Premium","PricingDate","Lots","FreightEGP_MT","OwnAfterEGP_MT","FX","FXDay","Form4FX"],
+            columns=["ContractID","Name","Supplier","Commodity","Origin","QtyMT","RemainingMT",
+                     "CIFUSD_MT","Premium","PricingDate","Lots","FreightEGP_MT","OwnAfterEGP_MT","FX","FXDay","Form4FX","Status"],
             show="headings", height=12, selectmode="extended", style="Contracts.Treeview"
         )
         contract_headings = {
-            "ContractID": "ID", "DeliveryDate": "Delivery Date", "Name": "Contract",
-            "Status": "Status", "Supplier": "Supplier",
+            "ContractID": "ID", "Name": "Contract", "Supplier": "Supplier",
             "Commodity": "Commodity", "Origin": "Origin", "QtyMT": "Qty MT",
             "RemainingMT": "Remaining MT", "CIFUSD_MT": "CIF $/MT",
             "Premium": "Basis/Premium", "PricingDate": "Pricing Date",
@@ -16485,24 +15682,23 @@ class App(tk.Tk):
             "FXDay": "FX Date", "Form4FX": "Form 4 FX", "Status": "Status",
         }
         for c,w,a in [
-            ("ContractID",88,"w"),
-            ("DeliveryDate",105,"center"),
-            ("Name",175,"w"),
-            ("Status",82,"center"),
+            ("ContractID",85,"w"),
+            ("Name",180,"w"),
             ("Supplier",125,"w"),
-            ("Commodity",92,"w"),
+            ("Commodity",90,"w"),
             ("Origin",105,"w"),
             ("QtyMT",85,"e"),
             ("RemainingMT",95,"e"),
             ("CIFUSD_MT",95,"e"),
             ("Premium",85,"e"),
-            ("PricingDate",110,"center"),
+            ("PricingDate",105,"center"),
             ("Lots",55,"e"),
             ("FreightEGP_MT",110,"e"),
             ("OwnAfterEGP_MT",125,"e"),
             ("FX",80,"e"),
             ("FXDay",100,"center"),
             ("Form4FX",85,"e"),
+            ("Status",85,"center"),
         ]:
             self.contract_tree.heading(c, text=contract_headings.get(c, c), command=lambda col=c: self._sort_treeview(self.contract_tree, col))
             self.contract_tree.column(c, width=w, anchor=a)
@@ -16517,9 +15713,7 @@ class App(tk.Tk):
         self.contract_tree.tag_configure("missing", background="#fff7ed")
         self.contract_tree.tag_configure("loss", foreground="#b91c1c")
         self.contract_tree.tag_configure("gain", foreground="#166534")
-        self.contract_tree.bind("<<TreeviewSelect>>", self._on_contract_tree_selection)
-        self.contract_tree.bind("<Double-1>", lambda _e: self._open_contract_comparison()
-                                if len(self.contract_tree.selection()) == 2 else None, add="+")
+        self.contract_tree.bind("<<TreeviewSelect>>", lambda e: (self.load_contract_from_tree(), self.update_contract_detail_panel()))
         self.contract_tree.bind("<MouseWheel>", lambda e: self.contract_tree.yview_scroll(int(-1*(e.delta/120)), "units"))
         self.contract_tree.bind("<Shift-MouseWheel>", lambda e: self.contract_tree.xview_scroll(int(-1*(e.delta/120)), "units"))
         contract_pane.add(ctable_wrap, weight=5)
@@ -17982,8 +17176,6 @@ class App(tk.Tk):
             "supplier_indirect_egp_mt": intake_i,
             "conversion_type": comm_meta.get("conversion_type","none"),
             "conversion_value": conv_val,
-            "conversion_factor": cbot_conv_factor(comm, strict=True) if ctype == "CBOT" else (conv_val / 100.0 if comm_meta.get("conversion_type") == "bu_per_mt" else conv_val),
-            "premium_mode": comm_meta.get("premium_mode", "CBOT_UNIT" if ctype == "CBOT" else "USD_MT"),
             "commodity_type": ctype,
         }
         return snap
@@ -18969,7 +18161,7 @@ class App(tk.Tk):
             return
         contracts = self.state_obj.get("contracts", {}) or {}
         values = []
-        for cid, c in self._contracts_table_items(contracts):
+        for cid, c in self._sorted_contract_items(contracts):
             if (c.get("status") or "Open") == "Closed":
                 continue
             commodity = (c.get("commodity") or "").upper()
@@ -19920,15 +19112,13 @@ class App(tk.Tk):
           fx_unsecured_usd          USD without a Form 4 (bank FX not yet
                                     allocated) — genuine currency exposure
           buckets                   days-to-delivery risk ladder
-          by_supplier / top_supplier  concentration of open MT by supplier
         """
         today = dt.date.today()
         out = {"open_mt": 0.0, "open_usd": 0.0, "priced_mt": 0.0,
                "unpriced_mt": 0.0, "fx_unsecured_usd": 0.0,
                "fx_unsecured_mt": 0.0, "contracts": 0,
                "buckets": {"<7d": [], "7-30d": [], ">30d": [], "no date": []},
-               "unpriced_near": [], "wavg_premium": None,
-               "by_supplier": {}, "top_supplier": None}
+               "unpriced_near": [], "wavg_premium": None}
         prem_num = prem_den = 0.0
         for cid, c in (self.state_obj.get("contracts", {}) or {}).items():
             if (c.get("status") or "Open").strip().lower() != "open":
@@ -19960,93 +19150,9 @@ class App(tk.Tk):
                 out["buckets"][key].append((label, qty))
                 if not priced and days <= self._alert_near_days():
                     out["unpriced_near"].append((label, qty, days))
-            supplier = (c.get("supplier") or "").strip() or "(no supplier)"
-            sup_rec = out["by_supplier"].setdefault(supplier, {"mt": 0.0, "usd": 0.0})
-            sup_rec["mt"] += qty
-            sup_rec["usd"] += usd
         if prem_den:
             out["wavg_premium"] = prem_num / prem_den
-        if out["open_mt"] and out["by_supplier"]:
-            top_name, top_rec = max(out["by_supplier"].items(),
-                                     key=lambda kv: kv[1]["mt"])
-            out["top_supplier"] = {
-                "name": top_name, "mt": top_rec["mt"],
-                "usd": top_rec["usd"],
-                "pct": top_rec["mt"] / out["open_mt"] * 100.0,
-            }
         return out
-
-    def portfolio_stress_test(self, fx_shock_pct, cbot_shock_pct):
-        """First-order shock across the whole open book, combining an FX
-        move and a CBOT move simultaneously — the portfolio-level view that
-        the per-contract Scenario/What-If tab doesn't give.
-
-        - FX shock applies to FX-unsecured USD exposure only (contracts with
-          no Form 4 FX yet): a fx_shock_pct move in USD/EGP changes their
-          landed EGP cost by usd_exposure * fx_now * fx_shock_pct/100.
-        - CBOT shock applies to unpriced MT only (contracts with no CBOT/
-          premium locked yet), grouped by commodity, using each commodity's
-          latest CBOT print and its cents/bu -> USD/MT conversion factor.
-        Both are linear/first-order approximations, not a full curve
-        re-price — good enough to flag "how big could this book move."
-        """
-        s = self.state_obj
-        fxh = sorted(((e.get("date", ""), to_float(e.get("rate"), None))
-                      for e in s.get("fx_history", []) or []), key=lambda t: t[0])
-        fx_now = fxh[-1][1] if fxh else None
-
-        cbot_rows = {}
-        for e in s.get("cbot_history", []) or []:
-            comm = (e.get("commodity") or "").upper()
-            px = to_float(e.get("close", e.get("price")), None)
-            if comm and px is not None and e.get("date"):
-                cbot_rows.setdefault(comm, []).append((e["date"], px))
-        latest_cbot = {c: sorted(rows)[-1][1] for c, rows in cbot_rows.items() if rows}
-
-        fx_exposed_usd = 0.0
-        unpriced_by_comm = {}
-        for cid, c in (s.get("contracts", {}) or {}).items():
-            if (c.get("status") or "Open").strip().lower() != "open":
-                continue
-            qty = to_float(c.get("qty_mt"), 0) or 0.0
-            cif = to_float(c.get("cif_usd_mt"), None)
-            usd = (qty * cif) if cif is not None else 0.0
-            if not to_float(c.get("form4_fx"), None):
-                fx_exposed_usd += usd
-            priced = bool(c.get("priced", True)) and cif is not None
-            if not priced:
-                base = (c.get("commodity") or "").upper().split("-")[0]
-                unpriced_by_comm[base] = unpriced_by_comm.get(base, 0.0) + qty
-
-        fx_impact_egp = (fx_exposed_usd * (fx_shock_pct / 100.0) * fx_now
-                          if fx_now is not None else None)
-
-        cbot_impact_egp = 0.0
-        cbot_impact_known = False
-        cbot_gaps = []
-        for comm, qty in unpriced_by_comm.items():
-            px = latest_cbot.get(comm)
-            try:
-                factor = cbot_conv_factor(comm, strict=False)
-            except Exception:
-                factor = None
-            if px is None or not factor or fx_now is None:
-                cbot_gaps.append(comm)
-                continue
-            cbot_impact_known = True
-            move_usd_mt = px * (cbot_shock_pct / 100.0) * factor
-            cbot_impact_egp += move_usd_mt * qty * fx_now
-
-        total_impact_egp = (fx_impact_egp or 0.0) + (cbot_impact_egp if cbot_impact_known else 0.0)
-        return {
-            "fx_now": fx_now,
-            "fx_exposed_usd": fx_exposed_usd,
-            "fx_impact_egp": fx_impact_egp,
-            "unpriced_by_comm": unpriced_by_comm,
-            "cbot_impact_egp": cbot_impact_egp if cbot_impact_known else None,
-            "cbot_gaps": cbot_gaps,
-            "total_impact_egp": total_impact_egp,
-        }
 
     # ══════════════════════════════════════════════════════════════════
     #  BASIS SERIES — physical premium vs CBOT over time.
@@ -23485,27 +22591,6 @@ class App(tk.Tk):
         v = to_float(self.state_obj.get("ui", {}).get("alert_near_delivery_days"), 21)
         return int(v) if v else 21
 
-    def _alert_fx_pricing_gap_pct(self):
-        return to_float(self.state_obj.get("ui", {}).get("alert_fx_pricing_gap_pct"), 2.0) or 2.0
-
-    def _alert_supplier_concentration_pct(self):
-        return to_float(self.state_obj.get("ui", {}).get(
-            "alert_supplier_concentration_pct"), 40.0) or 40.0
-
-    def _resolve_pricing_fx(self, c):
-        """Best-available FX 'at pricing time' for one contract: the
-        qty-weighted FX across its pricing lots, falling back to an explicit
-        contract-level pricing/contract FX field. Mirrors the priority used
-        by the Basis Tracker's PRICING-mode FX resolver."""
-        lots_fx = self._weighted_pricing_lot_value(c, "fx")
-        if lots_fx is not None and lots_fx > 0:
-            return lots_fx, "weighted pricing lots"
-        for key in ("pricing_fx", "contract_fx", "fx_rate"):
-            fx = to_float((c or {}).get(key), None)
-            if fx is not None and fx > 0:
-                return fx, f"contract {key}"
-        return None, ""
-
     def evaluate_alerts(self):
         """Return list of dicts {priority, issue, action} for the Action
         Center + the Exposure & Risk tab."""
@@ -23599,47 +22684,6 @@ class App(tk.Tk):
                     alerts.append({"priority": "Medium",
                         "issue": f"{c.get('name', cid)}: no Form 4 FX, delivery in {days}d",
                         "action": "Bank FX not secured — issue Form 4 / confirm allocation."})
-
-        # 4. Form 4 FX vs pricing-date FX — flags the cash-cost gap either way
-        gap_thr = self._alert_fx_pricing_gap_pct()
-        for cid, c in (s.get("contracts", {}) or {}).items():
-            f4 = to_float(c.get("form4_fx"), None)
-            if f4 is None:
-                continue
-            pfx, _src = self._resolve_pricing_fx(c)
-            if not pfx:
-                continue
-            gap_pct = (f4 - pfx) / pfx * 100.0
-            if abs(gap_pct) < gap_thr:
-                continue
-            cif = to_float(c.get("cif_usd_mt"), None)
-            impact = (f4 - pfx) * cif if cif is not None else None
-            impact_txt = (f" (~{impact:+,.0f} EGP/MT vs the pricing-date plan)"
-                          if impact is not None else "")
-            if gap_pct > 0:
-                alerts.append({"priority": "Medium",
-                    "issue": f"{c.get('name', cid)}: Form 4 FX {fmt_num(f4,2)} is "
-                             f"{gap_pct:+.1f}% ABOVE pricing-date FX {fmt_num(pfx,2)}"
-                             f"{impact_txt} — cash cost overran the plan",
-                    "action": "Review the budgeted landed cost against the actual bank rate."})
-            else:
-                alerts.append({"priority": "Low",
-                    "issue": f"{c.get('name', cid)}: Form 4 FX {fmt_num(f4,2)} is "
-                             f"{gap_pct:+.1f}% BELOW pricing-date FX {fmt_num(pfx,2)}"
-                             f"{impact_txt} — FX timing gain locked in",
-                    "action": "No action needed — landed cost came in under the pricing-date plan."})
-
-        # 5. Supplier concentration — too much open exposure with one supplier
-        sup_thr = self._alert_supplier_concentration_pct()
-        ex = self.portfolio_exposure()
-        top = ex.get("top_supplier")
-        if top and top["pct"] >= sup_thr:
-            alerts.append({"priority": "Medium",
-                "issue": f"Supplier concentration: {top['name']} holds "
-                         f"{top['pct']:.0f}% of open MT ({top['mt']:,.0f} / "
-                         f"{ex['open_mt']:,.0f} MT, ~${top['usd']:,.0f})",
-                "action": "Diversify sourcing or confirm this supplier's "
-                          "delivery/credit risk is acceptable at this size."})
         return alerts
 
     def refresh_risk_alerts(self):
@@ -23874,15 +22918,15 @@ class App(tk.Tk):
     def _build_exposure_risk(self):
         p = self.tab_exposure
         p.columnconfigure(0, weight=1)
-        p.rowconfigure(4, weight=1)
+        p.rowconfigure(3, weight=1)
         ttk.Label(p, text="Exposure & Risk — portfolio snapshot (open contracts)",
                   font=(FONT_FAMILY, 12, "bold"),
                   foreground="#1a4fa0").grid(row=0, column=0, sticky="w")
         bar = ttk.Frame(p); bar.grid(row=1, column=0, sticky="w", pady=(4, 6))
         ttk.Button(bar, text="▶ Refresh", command=self.refresh_exposure_risk
                    ).pack(side="left", padx=(0, 12))
-        ttk.Label(bar, text="Alert thresholds (CBOT move %, near-delivery days, FX/supplier "
-                            "gaps) are editable in Setup & Data → Data Management.",
+        ttk.Label(bar, text="Alert thresholds (CBOT move %, near-delivery days) "
+                            "are editable in Setup & Data → Data Management.",
                   foreground=CLR["muted"]).pack(side="left")
 
         cards = ttk.Frame(p); cards.grid(row=2, column=0, sticky="ew", pady=(0, 8))
@@ -23893,8 +22937,7 @@ class App(tk.Tk):
                 ("priced", "Priced vs Unpriced MT"),
                 ("fx_unsec", "USD without Form 4 (FX risk)"),
                 ("wprem", "W.avg premium ¢/bu"),
-                ("near", "Delivery <7d / 7-30d / >30d"),
-                ("top_supplier", "Top supplier share of open MT")]):
+                ("near", "Delivery <7d / 7-30d / >30d")]):
             card = tk.Frame(cards, bg="#ffffff", highlightthickness=1,
                             highlightbackground=CLR["border"])
             card.grid(row=0, column=i, sticky="ew", padx=(0, 8))
@@ -23908,29 +22951,6 @@ class App(tk.Tk):
                                                               padx=8, pady=(0, 6))
             self._exp_vars[key] = v
 
-        stress = ttk.LabelFrame(p, text="Portfolio Stress Test — shock the whole open book",
-                                padding=8)
-        stress.grid(row=3, column=0, sticky="ew", pady=(0, 8))
-        ttk.Label(stress, text="EGP/USD shock (%)").grid(row=0, column=0, sticky="w",
-                                                          padx=(0, 6))
-        self._stress_fx_var = tk.StringVar(value="10")
-        ttk.Entry(stress, textvariable=self._stress_fx_var, width=8).grid(
-            row=0, column=1, sticky="w", padx=(0, 16))
-        ttk.Label(stress, text="CBOT shock (%)").grid(row=0, column=2, sticky="w",
-                                                       padx=(0, 6))
-        self._stress_cbot_var = tk.StringVar(value="-5")
-        ttk.Entry(stress, textvariable=self._stress_cbot_var, width=8).grid(
-            row=0, column=3, sticky="w", padx=(0, 16))
-        ttk.Button(stress, text="Run Stress Test",
-                   command=self._run_exposure_stress_test).grid(row=0, column=4, sticky="w")
-        self._stress_result_var = tk.StringVar(
-            value="Positive shocks = EGP devaluation / higher CBOT. "
-                  "Enter both and click Run.")
-        ttk.Label(stress, textvariable=self._stress_result_var,
-                  foreground=CLR["muted"], wraplength=1150,
-                  justify="left").grid(row=1, column=0, columnspan=5, sticky="w",
-                                       pady=(6, 0))
-
         cols = [("Priority", 70), ("Issue", 560), ("Action", 420)]
         self.exp_alert_tree = ttk.Treeview(p, columns=[c for c, _ in cols],
                                            show="headings", height=12)
@@ -23939,39 +22959,11 @@ class App(tk.Tk):
             self.exp_alert_tree.column(c, width=w, anchor="w")
         self.exp_alert_tree.tag_configure("High", foreground="#b00020")
         self.exp_alert_tree.tag_configure("Medium", foreground="#b45309")
-        self.exp_alert_tree.tag_configure("Low", foreground="#15803d")
-        self.exp_alert_tree.grid(row=4, column=0, sticky="nsew")
+        self.exp_alert_tree.grid(row=3, column=0, sticky="nsew")
         ysb = ttk.Scrollbar(p, orient="vertical",
                             command=self.exp_alert_tree.yview)
         self.exp_alert_tree.configure(yscrollcommand=ysb.set)
-        ysb.grid(row=4, column=1, sticky="ns")
-
-    def _run_exposure_stress_test(self):
-        try:
-            fx_shock = to_float(self._stress_fx_var.get(), None)
-            cbot_shock = to_float(self._stress_cbot_var.get(), None)
-            if fx_shock is None or cbot_shock is None:
-                self._stress_result_var.set("Enter numeric shocks for both FX and CBOT (e.g. 10 and -5).")
-                return
-            st = self.portfolio_stress_test(fx_shock, cbot_shock)
-            if st["fx_now"] is None:
-                self._stress_result_var.set("No FX history saved — can't run the stress test yet.")
-                return
-            parts = [f"FX {fx_shock:+.1f}% on ${st['fx_exposed_usd']:,.0f} FX-unsecured "
-                     f"exposure: {st['fx_impact_egp']:+,.0f} EGP"]
-            if st["cbot_impact_egp"] is not None:
-                comms = ", ".join(f"{c} {q:,.0f}MT" for c, q in st["unpriced_by_comm"].items()
-                                  if c not in st["cbot_gaps"])
-                parts.append(f"CBOT {cbot_shock:+.1f}% on unpriced ({comms or 'none'}): "
-                             f"{st['cbot_impact_egp']:+,.0f} EGP")
-            elif st["unpriced_by_comm"]:
-                parts.append("CBOT impact unavailable — missing CBOT history for the unpriced commodities.")
-            if st["cbot_gaps"]:
-                parts.append(f"(no CBOT price on file for: {', '.join(st['cbot_gaps'])})")
-            parts.append(f"Combined landed-cost impact: {st['total_impact_egp']:+,.0f} EGP")
-            self._stress_result_var.set("   ·   ".join(parts))
-        except Exception as e:
-            self._surface_error("_run_exposure_stress_test", e, show=True)
+        ysb.grid(row=3, column=1, sticky="ns")
 
     def refresh_exposure_risk(self):
         try:
@@ -23990,10 +22982,6 @@ class App(tk.Tk):
                 f"{sum(q for _, q in b['<7d']):,.0f} / "
                 f"{sum(q for _, q in b['7-30d']):,.0f} / "
                 f"{sum(q for _, q in b['>30d']):,.0f} MT")
-            top = ex.get("top_supplier")
-            self._exp_vars["top_supplier"].set(
-                f"{top['pct']:.0f}%  {top['name']} ({top['mt']:,.0f} MT)"
-                if top else "—")
             alerts = self.refresh_risk_alerts()
             tv = self.exp_alert_tree
             for i in tv.get_children():
@@ -26415,7 +25403,7 @@ class App(tk.Tk):
                 continue
             hay = " ".join([
                 cid, c.get("name", ""), c.get("supplier", ""), c.get("commodity", ""), origin,
-                c.get("note", ""), c.get("delivery_date", ""), c.get("storage_start", ""), c.get("storage_end", ""),
+                c.get("note", ""), c.get("storage_start", ""), c.get("storage_end", ""),
                 c.get("pricing_date", ""), c.get("contract_date", ""), c.get("deal_date", ""),
                 " ".join(str(l.get("date", "")) for l in (c.get("pricing_lots", []) or []) if isinstance(l, dict))
             ]).lower()
@@ -26485,12 +25473,9 @@ class App(tk.Tk):
             if status == "Open" and latest_local_for_tag is not None and own_after is not None:
                 tags.append("gain" if latest_local_for_tag - own_after >= 0 else "loss")
 
-            delivery_date = (c.get("delivery_date") or c.get("storage_start") or "")
             self.contract_tree.insert("", "end", iid=cid, tags=tuple(tags), values=(
                 cid,
-                delivery_date,
                 c.get("name", ""),
-                status,
                 c.get("supplier", ""),
                 comm,
                 origin,
@@ -26506,6 +25491,7 @@ class App(tk.Tk):
                 mkt.get("fx_day", ""),
                 (fmt_num(to_float(c.get("form4_fx"), None), 4)
                  if c.get("form4_fx") not in (None, "") else ""),
+                status,
             ))
 
         fx_quote = (self.state_obj.get("market_data", {}) or {}).get("fx", {}) or {}
@@ -26727,470 +25713,6 @@ class App(tk.Tk):
         messagebox.showinfo(APP_NAME, f"Created {created} market-update snapshots with FX={new_fx}.")
 
 
-    def _on_contract_tree_selection(self, _event=None):
-        """Keep the editor/detail workspace stable during multi-selection."""
-        try:
-            sels = list(self.contract_tree.selection()) if hasattr(self, "contract_tree") else []
-            if sels:
-                self.load_contract_from_tree()
-                self.update_contract_detail_panel()
-            if hasattr(self, "contracts_summary_var") and len(sels) == 2:
-                base = self.contracts_summary_var.get().split("  |  Selected:", 1)[0]
-                self.contracts_summary_var.set(base + "  |  Selected: 2 · Compare ready")
-        except Exception as exc:
-            log_exception(exc, "_on_contract_tree_selection")
-
-    def _contracts_table_items(self, contracts=None):
-        """Return Contracts-tab rows in the selected, deterministic order.
-
-        The operational default is delivery date newest-first.  Missing dates
-        always fall behind dated contracts so legacy records never jump above
-        current deliveries.
-        """
-        contracts = contracts if contracts is not None else (
-            self.state_obj.get("contracts", {}) or {})
-        items = list(contracts.items())
-        mode = (self.contract_sort_var.get() if hasattr(self, "contract_sort_var")
-                else "Delivery Date · Newest First")
-
-        if mode == "Delivery Date · Oldest First":
-            dated = [it for it in items if self._contract_sort_key(it)[0] > dt.date.min.toordinal()]
-            missing = [it for it in items if self._contract_sort_key(it)[0] <= dt.date.min.toordinal()]
-            dated.sort(key=self._contract_sort_key)
-            missing.sort(key=lambda it: (self._contract_numeric_id_key(it[0]), str(it[0]).upper()), reverse=True)
-            return dated + missing
-        if mode == "Contract ID · Newest First":
-            return sorted(items, key=lambda it: (self._contract_numeric_id_key(it[0]), str(it[0]).upper()), reverse=True)
-        if mode == "Commodity · A–Z":
-            return sorted(items, key=lambda it: (
-                str((it[1] or {}).get("commodity") or "").upper(),
-                -self._contract_sort_key(it)[0],
-                tuple(-n for n in self._contract_numeric_id_key(it[0]))))
-        if mode == "Supplier · A–Z":
-            return sorted(items, key=lambda it: (
-                str((it[1] or {}).get("supplier") or "").upper(),
-                -self._contract_sort_key(it)[0],
-                tuple(-n for n in self._contract_numeric_id_key(it[0]))))
-        if mode == "Status · Open First":
-            return sorted(items, key=lambda it: (
-                0 if self._contract_is_open(it[1]) else 1,
-                -self._contract_sort_key(it)[0],
-                tuple(-n for n in self._contract_numeric_id_key(it[0]))))
-        return self._sorted_contract_items(contracts)
-
-    def _contract_priced_and_unpriced_qty(self, c):
-        qty = to_float((c or {}).get("qty_mt"), None)
-        lots = self._contract_pricing_lots(c or {})
-        priced_qty = sum((to_float(lot.get("qty_mt"), 0) or 0)
-                         for lot in lots if isinstance(lot, dict))
-        if not lots and self._contract_cif_usd(c or {}) is not None and qty is not None:
-            priced_qty = qty
-        if qty is None:
-            return priced_qty or None, None
-        return min(priced_qty, qty), max(qty - priced_qty, 0.0)
-
-    def _contract_export_row(self, cid, c):
-        """Build one auditable management row used by screen comparison/export."""
-        c = c or {}
-        status = (c.get("status") or "Open").strip() or "Open"
-        is_open = self._contract_is_open(c)
-        economics = self._hd_cost_for_contract(
-            cid, c, use_latest_fx=is_open,
-            fx_mode="live" if is_open else "locked")
-        bal = self._calc_contract_balance_row(cid, c)
-        qty = to_float(c.get("qty_mt"), None)
-        remaining = to_float(bal.get("RemainingMT"), None)
-        cif = to_float(economics.get("cif"), None)
-        fx = to_float(economics.get("fx"), None)
-        goods_egp = cif * fx if cif is not None and fx is not None else None
-        lots = self._contract_pricing_lots(c)
-        lot_dates = sorted({str(lot.get("date") or "") for lot in lots
-                            if isinstance(lot, dict) and str(lot.get("date") or "").strip()})
-        priced_qty, unpriced_qty = self._contract_priced_and_unpriced_qty(c)
-        data_gaps = []
-        if not (c.get("delivery_date") or c.get("storage_start")):
-            data_gaps.append("Missing delivery date")
-        if cif is None:
-            data_gaps.append("Missing/estimated CIF")
-        if fx is None:
-            data_gaps.append("Missing FX")
-        if economics.get("local") is None:
-            data_gaps.append("Missing local comparison")
-        if is_open and c.get("freight_egp_mt") in (None, ""):
-            data_gaps.append("Missing freight")
-        return {
-            "contract_id": cid,
-            "delivery_date": c.get("delivery_date") or c.get("storage_start") or "",
-            "contract": c.get("name") or cid,
-            "supplier": c.get("supplier") or "",
-            "commodity": c.get("commodity") or "",
-            "origin": c.get("origin") or "",
-            "status": status,
-            "result_type": "Indicative" if is_open else "Realised",
-            "qty_mt": qty,
-            "remaining_mt": remaining,
-            "priced_qty_mt": priced_qty,
-            "unpriced_qty_mt": unpriced_qty,
-            "cif_usd_mt": cif,
-            "premium": to_float(c.get("premium_cents"), None),
-            "pricing_date": c.get("pricing_date") or "",
-            "pricing_lot_dates": ", ".join(lot_dates),
-            "pricing_lots": len(lots),
-            "contract_fx": fx,
-            "contract_fx_saved": to_float(c.get("delivery_fx"), None),
-            "fx_reference_date": economics.get("local_date") or "",
-            "form4_fx": to_float(c.get("form4_fx"), None),
-            "discharge_egp_mt": to_float(economics.get("disc"), 0) or 0.0,
-            "clearance_egp_mt": to_float(economics.get("clr"), 0) or 0.0,
-            "freight_egp_mt": to_float(economics.get("freight"), 0) or 0.0,
-            "contract_goods_egp_mt": goods_egp,
-            "own_after_egp_mt": to_float(economics.get("own_after"), None),
-            "local_egp_mt": to_float(economics.get("local"), None),
-            "local_date": economics.get("local_date") or "",
-            "saving_egp_mt": to_float(economics.get("sav_mt"), None),
-            "total_saving_egp": to_float(economics.get("total_sav"), None),
-            "notes": c.get("note") or "",
-            "data_quality": "; ".join(data_gaps) if data_gaps else "Complete",
-        }
-
-    def _contract_export_items(self, scope="all"):
-        contracts = self.state_obj.get("contracts", {}) or {}
-        if scope == "visible" and hasattr(self, "contract_tree"):
-            items = []
-            for cid in self.contract_tree.get_children(""):
-                c = contracts.get(cid)
-                if c is not None:
-                    items.append((cid, c))
-            return items
-        return self._sorted_contract_items(contracts)
-
-    def _build_contracts_workbook(self, items, scope_label="All contracts"):
-        """Create the Contracts-tab Excel workbook without opening dialogs."""
-        from openpyxl import Workbook
-        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-        from openpyxl.utils import get_column_letter
-
-        rows = [self._contract_export_row(cid, c) for cid, c in items]
-        wb = Workbook()
-        ws = wb.active
-        ws.title = "Contracts"
-        summary = wb.create_sheet("Summary", 0)
-        lots_ws = wb.create_sheet("Pricing Lots")
-
-        navy = "0B1F3A"; blue = "2563EB"; pale = "EAF2FF"
-        green = "E8F7E8"; red = "FDECEA"; amber = "FFF7E6"; grey = "64748B"
-        thin = Side(style="thin", color="D8E1EC")
-        border = Border(left=thin, right=thin, top=thin, bottom=thin)
-        header_fill = PatternFill("solid", fgColor=navy)
-        sub_fill = PatternFill("solid", fgColor=pale)
-        title_font = Font(name="Calibri", bold=True, size=16, color=navy)
-        header_font = Font(name="Calibri", bold=True, color="FFFFFF", size=9)
-        body_font = Font(name="Calibri", size=9, color="1E293B")
-
-        summary["A1"] = "PROMETHEUS PROCUREMENT — CONTRACT PORTFOLIO"
-        summary["A1"].font = title_font
-        summary["A2"] = f"Scope: {scope_label}"
-        summary["A3"] = f"Generated: {now_ts()}"
-        summary["A5"] = "Contracts"; summary["B5"] = len(rows)
-        summary["A6"] = "Open"; summary["B6"] = sum(1 for r in rows if r["status"] != "Closed")
-        summary["A7"] = "Closed"; summary["B7"] = sum(1 for r in rows if r["status"] == "Closed")
-        summary["A8"] = "Total Qty MT"; summary["B8"] = sum(r["qty_mt"] or 0 for r in rows)
-        summary["A9"] = "Remaining MT"; summary["B9"] = sum(r["remaining_mt"] or 0 for r in rows)
-        summary["A10"] = "Unpriced MT"; summary["B10"] = sum(r["unpriced_qty_mt"] or 0 for r in rows)
-        summary["A11"] = "Realised Savings EGP"; summary["B11"] = sum(r["total_saving_egp"] or 0 for r in rows if r["result_type"] == "Realised")
-        summary["A12"] = "Indicative Open Position EGP"; summary["B12"] = sum(r["total_saving_egp"] or 0 for r in rows if r["result_type"] == "Indicative")
-        for row in range(5, 13):
-            summary.cell(row, 1).font = Font(name="Calibri", bold=True, color=grey)
-            summary.cell(row, 1).fill = sub_fill
-            summary.cell(row, 1).border = summary.cell(row, 2).border = border
-        for cell in (summary["B8"], summary["B9"], summary["B10"]):
-            cell.number_format = "#,##0"
-        for cell in (summary["B11"], summary["B12"]):
-            cell.number_format = "#,##0;[Red]-#,##0"
-        summary.column_dimensions["A"].width = 31
-        summary.column_dimensions["B"].width = 22
-
-        # Commodity summary.
-        summary["D5"] = "Commodity"; summary["E5"] = "Contracts"; summary["F5"] = "Qty MT"; summary["G5"] = "Open MT"; summary["H5"] = "Saving / Position EGP"
-        for col in range(4, 9):
-            c = summary.cell(5, col); c.fill = header_fill; c.font = header_font; c.alignment = Alignment(horizontal="center"); c.border = border
-        comms = sorted({str(r["commodity"] or "UNKNOWN") for r in rows})
-        for idx, comm in enumerate(comms, 6):
-            group = [r for r in rows if str(r["commodity"] or "UNKNOWN") == comm]
-            vals = [comm, len(group), sum(r["qty_mt"] or 0 for r in group),
-                    sum(r["remaining_mt"] or 0 for r in group if r["status"] != "Closed"),
-                    sum(r["total_saving_egp"] or 0 for r in group)]
-            for offset, val in enumerate(vals, 4):
-                c = summary.cell(idx, offset, val); c.border = border; c.font = body_font
-                if offset >= 6: c.number_format = "#,##0;[Red]-#,##0"
-        for col, width in zip(range(4, 9), [16, 12, 14, 14, 23]):
-            summary.column_dimensions[get_column_letter(col)].width = width
-
-        headers = [
-            ("delivery_date", "Delivery Date", 13), ("contract_id", "Contract ID", 13),
-            ("contract", "Contract", 22), ("status", "Status", 10),
-            ("result_type", "Result Type", 12), ("supplier", "Supplier", 18),
-            ("commodity", "Commodity", 13), ("origin", "Origin", 14),
-            ("qty_mt", "Qty MT", 12), ("remaining_mt", "Remaining MT", 14),
-            ("priced_qty_mt", "Priced MT", 12), ("unpriced_qty_mt", "Unpriced MT", 12),
-            ("cif_usd_mt", "CIF USD/MT", 13), ("premium", "Basis / Premium", 15),
-            ("pricing_date", "Header Pricing Date", 16), ("pricing_lot_dates", "Lot Pricing Dates", 28),
-            ("pricing_lots", "Lots", 8), ("contract_fx_saved", "Stored Contract FX", 16),
-            ("contract_fx", "FX Used", 12), ("fx_reference_date", "FX / Local Ref Date", 17),
-            ("form4_fx", "Form 4 FX", 12), ("discharge_egp_mt", "Discharge EGP/MT", 17),
-            ("clearance_egp_mt", "Clearance EGP/MT", 17), ("freight_egp_mt", "Freight EGP/MT", 16),
-            ("contract_goods_egp_mt", "Contract Goods EGP/MT", 20),
-            ("own_after_egp_mt", "Own-After EGP/MT", 18),
-            ("local_egp_mt", "Matched Local EGP/MT", 20), ("local_date", "Local Date", 13),
-            ("saving_egp_mt", "Saving / Position EGP/MT", 23),
-            ("total_saving_egp", "Total Saving / Position EGP", 26),
-            ("data_quality", "Data Quality", 30), ("notes", "Notes", 35),
-        ]
-        ws["A1"] = "PROMETHEUS PROCUREMENT — CONTRACTS"
-        ws["A1"].font = title_font
-        ws["A2"] = scope_label
-        for col, (_key, label, width) in enumerate(headers, 1):
-            c = ws.cell(4, col, label); c.fill = header_fill; c.font = header_font; c.border = border; c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-            ws.column_dimensions[get_column_letter(col)].width = width
-        ws.row_dimensions[4].height = 34
-        numeric_keys = {"qty_mt", "remaining_mt", "priced_qty_mt", "unpriced_qty_mt", "cif_usd_mt", "premium", "contract_fx_saved", "contract_fx", "form4_fx", "discharge_egp_mt", "clearance_egp_mt", "freight_egp_mt", "contract_goods_egp_mt", "own_after_egp_mt", "local_egp_mt", "saving_egp_mt", "total_saving_egp"}
-        for ridx, row in enumerate(rows, 5):
-            for cidx, (key, _label, _width) in enumerate(headers, 1):
-                val = row.get(key)
-                cell = ws.cell(ridx, cidx, val); cell.border = border; cell.font = body_font
-                cell.alignment = Alignment(horizontal="right" if key in numeric_keys else "left", vertical="center", wrap_text=key in {"data_quality", "notes", "pricing_lot_dates"})
-                if key in {"qty_mt", "remaining_mt", "priced_qty_mt", "unpriced_qty_mt", "pricing_lots"}:
-                    cell.number_format = "#,##0"
-                elif key in {"cif_usd_mt", "premium", "contract_fx_saved", "contract_fx", "form4_fx"}:
-                    cell.number_format = "#,##0.0000"
-                elif key in numeric_keys:
-                    cell.number_format = "#,##0.00;[Red]-#,##0.00"
-            sav = row.get("saving_egp_mt")
-            if sav is not None:
-                fill = PatternFill("solid", fgColor=green if sav >= 0 else red)
-                ws.cell(ridx, 29).fill = fill; ws.cell(ridx, 30).fill = fill
-            if row.get("data_quality") != "Complete":
-                ws.cell(ridx, 31).fill = PatternFill("solid", fgColor=amber)
-        ws.freeze_panes = "A5"
-        ws.auto_filter.ref = f"A4:{get_column_letter(len(headers))}{max(4, 4 + len(rows))}"
-
-        lot_headers = ["Contract ID", "Contract", "Commodity", "Delivery Date", "Lot #", "Pricing Date", "Qty MT", "Premium", "CBOT", "FX", "Futures Month", "Notes"]
-        for cidx, label in enumerate(lot_headers, 1):
-            c = lots_ws.cell(1, cidx, label); c.fill = header_fill; c.font = header_font; c.border = border; c.alignment = Alignment(horizontal="center")
-        lot_row = 2
-        for cid, c in items:
-            for idx, lot in enumerate(self._contract_pricing_lots(c), 1):
-                values = [cid, c.get("name") or cid, c.get("commodity") or "", c.get("delivery_date") or c.get("storage_start") or "", idx,
-                          lot.get("date") or "", to_float(lot.get("qty_mt"), None), to_float(lot.get("premium_cents"), None),
-                          to_float(lot.get("cbot"), None), to_float(lot.get("fx"), None), lot.get("futures_month") or "", lot.get("notes") or ""]
-                for cidx, val in enumerate(values, 1):
-                    cell = lots_ws.cell(lot_row, cidx, val); cell.border = border; cell.font = body_font
-                    if cidx in (7, 8, 9, 10): cell.number_format = "#,##0.00"
-                lot_row += 1
-        for idx, width in enumerate([13, 22, 13, 13, 8, 13, 12, 12, 12, 12, 15, 35], 1):
-            lots_ws.column_dimensions[get_column_letter(idx)].width = width
-        lots_ws.freeze_panes = "A2"
-        lots_ws.auto_filter.ref = f"A1:L{max(1, lot_row - 1)}"
-        return wb, rows
-
-    def _export_contracts_excel(self, scope="all"):
-        if not _need_openpyxl():
-            return
-        try:
-            items = self._contract_export_items(scope)
-            if not items:
-                messagebox.showinfo(APP_NAME, "No contracts match the current filters.")
-                return
-            if scope == "visible":
-                comm = (self.contract_filter_commodity_var.get() if hasattr(self, "contract_filter_commodity_var") else "ALL") or "ALL"
-                status = (self.contract_filter_status_var.get() if hasattr(self, "contract_filter_status_var") else "ALL") or "ALL"
-                origin = (self.contract_filter_origin_var.get() if hasattr(self, "contract_filter_origin_var") else "ALL") or "ALL"
-                scope_label = f"Visible contracts · Commodity={comm} · Status={status} · Origin={origin}"
-                file_scope = comm if comm != "ALL" else "Filtered"
-            else:
-                scope_label = "All contracts · delivery date newest first"
-                file_scope = "All"
-            fp = filedialog.asksaveasfilename(
-                initialdir=get_default_export_dir(),
-                initialfile=f"Contracts_{file_scope}_{dt.date.today().isoformat()}.xlsx",
-                defaultextension=".xlsx", filetypes=[("Excel", "*.xlsx")],
-                title="Export Contracts")
-            if not fp:
-                return
-            wb, rows = self._build_contracts_workbook(items, scope_label)
-            wb.save(fp)
-            append_audit_event(self.state_obj, "export_contracts_excel", "contracts", scope, {"count": len(rows), "file": os.path.basename(fp)})
-            messagebox.showinfo(APP_NAME, f"Exported {len(rows)} contract(s):\n{fp}")
-        except Exception as exc:
-            self._surface_error("_export_contracts_excel", exc, show=True)
-
-    def _contract_comparison_rows(self, cid_a, cid_b):
-        contracts = self.state_obj.get("contracts", {}) or {}
-        if cid_a not in contracts or cid_b not in contracts:
-            raise ValueError("Choose two valid contracts.")
-        a = self._contract_export_row(cid_a, contracts[cid_a])
-        b = self._contract_export_row(cid_b, contracts[cid_b])
-
-        def fmt(value, digits=2, suffix=""):
-            if value is None or value == "":
-                return "—"
-            if isinstance(value, (int, float)):
-                return f"{value:,.{digits}f}{suffix}"
-            return str(value)
-
-        def compare_numeric(key, lower_is_better=False, suffix=""):
-            av = to_float(a.get(key), None); bv = to_float(b.get(key), None)
-            if av is None or bv is None:
-                return "Need data"
-            delta = bv - av
-            if abs(delta) < 0.005:
-                return "Equal"
-            if lower_is_better:
-                winner = "A" if av < bv else "B"
-            else:
-                winner = "A" if av > bv else "B"
-            return f"{winner} better by {abs(delta):,.2f}{suffix}"
-
-        rows = [
-            ("IDENTITY", "Contract", a["contract"], b["contract"], ""),
-            ("IDENTITY", "Commodity", a["commodity"], b["commodity"], "Same commodity" if a["commodity"] == b["commodity"] else "Different commodities"),
-            ("IDENTITY", "Supplier", a["supplier"], b["supplier"], ""),
-            ("IDENTITY", "Origin", a["origin"], b["origin"], ""),
-            ("DATES", "Delivery Date", a["delivery_date"], b["delivery_date"], ""),
-            ("DATES", "Pricing Date(s)", a["pricing_lot_dates"] or a["pricing_date"], b["pricing_lot_dates"] or b["pricing_date"], ""),
-            ("VOLUME", "Quantity MT", fmt(a["qty_mt"], 0), fmt(b["qty_mt"], 0), compare_numeric("qty_mt", suffix=" MT")),
-            ("VOLUME", "Remaining MT", fmt(a["remaining_mt"], 0), fmt(b["remaining_mt"], 0), compare_numeric("remaining_mt", lower_is_better=True, suffix=" MT")),
-            ("VOLUME", "Unpriced MT", fmt(a["unpriced_qty_mt"], 0), fmt(b["unpriced_qty_mt"], 0), compare_numeric("unpriced_qty_mt", lower_is_better=True, suffix=" MT")),
-            ("PRICE", "CIF USD/MT", fmt(a["cif_usd_mt"]), fmt(b["cif_usd_mt"]), compare_numeric("cif_usd_mt", lower_is_better=True, suffix=" USD/MT")),
-            ("PRICE", "Basis / Premium", fmt(a["premium"]), fmt(b["premium"]), compare_numeric("premium", lower_is_better=True)),
-            ("PRICE", "Contract FX", fmt(a["contract_fx"], 4), fmt(b["contract_fx"], 4), compare_numeric("contract_fx", lower_is_better=True)),
-            ("PRICE", "Freight EGP/MT", fmt(a["freight_egp_mt"]), fmt(b["freight_egp_mt"]), compare_numeric("freight_egp_mt", lower_is_better=True, suffix=" EGP/MT")),
-            ("PRICE", "Contract Goods EGP/MT", fmt(a["contract_goods_egp_mt"]), fmt(b["contract_goods_egp_mt"]), compare_numeric("contract_goods_egp_mt", lower_is_better=True, suffix=" EGP/MT")),
-            ("PRICE", "Own-After EGP/MT", fmt(a["own_after_egp_mt"]), fmt(b["own_after_egp_mt"]), compare_numeric("own_after_egp_mt", lower_is_better=True, suffix=" EGP/MT")),
-            ("MARKET", "Matched Local EGP/MT", fmt(a["local_egp_mt"]), fmt(b["local_egp_mt"]), "Context only"),
-            ("OUTCOME", "Saving / Position EGP/MT", fmt(a["saving_egp_mt"]), fmt(b["saving_egp_mt"]), compare_numeric("saving_egp_mt", suffix=" EGP/MT")),
-            ("OUTCOME", "Total Saving / Position EGP", fmt(a["total_saving_egp"], 0), fmt(b["total_saving_egp"], 0), compare_numeric("total_saving_egp", suffix=" EGP")),
-            ("QUALITY", "Data Quality", a["data_quality"], b["data_quality"], ""),
-        ]
-        return a, b, rows
-
-    def _build_contract_comparison_workbook(self, cid_a, cid_b):
-        from openpyxl import Workbook
-        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-        from openpyxl.utils import get_column_letter
-        a, b, rows = self._contract_comparison_rows(cid_a, cid_b)
-        wb = Workbook(); ws = wb.active; ws.title = "Contract Comparison"
-        navy = "0B1F3A"; blue = "2563EB"; pale = "EAF2FF"
-        thin = Side(style="thin", color="D8E1EC"); border = Border(left=thin, right=thin, top=thin, bottom=thin)
-        ws["A1"] = "PROMETHEUS PROCUREMENT — CONTRACT COMPARISON"; ws["A1"].font = Font(bold=True, size=15, color=navy)
-        ws["A2"] = f"Generated: {now_ts()}"
-        headers = ["Section", "Metric", f"A · {cid_a}", f"B · {cid_b}", "Comparison"]
-        for col, label in enumerate(headers, 1):
-            c = ws.cell(4, col, label); c.fill = PatternFill("solid", fgColor=navy); c.font = Font(bold=True, color="FFFFFF"); c.border = border; c.alignment = Alignment(horizontal="center")
-        for ridx, row in enumerate(rows, 5):
-            for cidx, value in enumerate(row, 1):
-                c = ws.cell(ridx, cidx, value); c.border = border; c.alignment = Alignment(vertical="center", wrap_text=True)
-            if ridx == 5 or rows[ridx-5][0] != rows[ridx-6][0]:
-                for cidx in range(1, 6): ws.cell(ridx, cidx).fill = PatternFill("solid", fgColor=pale)
-                ws.cell(ridx, 1).font = Font(bold=True, color=blue)
-        for col, width in enumerate([14, 27, 28, 28, 30], 1): ws.column_dimensions[get_column_letter(col)].width = width
-        ws.freeze_panes = "A5"
-        return wb, (a, b, rows)
-
-    def _export_contract_comparison_excel(self, cid_a, cid_b, parent=None):
-        if not _need_openpyxl():
-            return
-        try:
-            fp = filedialog.asksaveasfilename(
-                parent=parent, initialdir=get_default_export_dir(),
-                initialfile=f"Contract_Comparison_{cid_a}_vs_{cid_b}_{dt.date.today().isoformat()}.xlsx",
-                defaultextension=".xlsx", filetypes=[("Excel", "*.xlsx")],
-                title="Export Contract Comparison")
-            if not fp:
-                return
-            wb, _payload = self._build_contract_comparison_workbook(cid_a, cid_b)
-            wb.save(fp)
-            messagebox.showinfo(APP_NAME, f"Comparison saved:\n{fp}", parent=parent)
-        except Exception as exc:
-            self._surface_error("_export_contract_comparison_excel", exc, show=True)
-
-    def _open_contract_comparison(self):
-        contracts = self.state_obj.get("contracts", {}) or {}
-        if len(contracts) < 2:
-            messagebox.showinfo(APP_NAME, "At least two contracts are required.")
-            return
-        try:
-            existing = getattr(self, "_contract_compare_window", None)
-            if existing is not None and existing.winfo_exists():
-                existing.lift(); existing.focus_force(); return
-        except Exception:
-            pass
-
-        win = tk.Toplevel(self)
-        self._contract_compare_window = win
-        win.title("Compare Two Contracts")
-        win.geometry("1120x760")
-        win.minsize(900, 620)
-        win.configure(bg="#07111f")
-        win.transient(self)
-        win.columnconfigure(0, weight=1); win.rowconfigure(2, weight=1)
-
-        hero = tk.Frame(win, bg="#0b1f3a", highlightthickness=1, highlightbackground="#183b66")
-        hero.grid(row=0, column=0, sticky="ew")
-        tk.Label(hero, text="Contract Comparison", bg="#0b1f3a", fg="white", font=(FONT_FAMILY, 18, "bold")).pack(anchor="w", padx=18, pady=(14, 2))
-        tk.Label(hero, text="Compare two contracts side by side using the same saved pricing, cost and local-market logic.", bg="#0b1f3a", fg="#a9c2de", font=(FONT_FAMILY, FS_BODY)).pack(anchor="w", padx=18, pady=(0, 14))
-
-        picker = ttk.Frame(win, padding=12)
-        picker.grid(row=1, column=0, sticky="ew")
-        picker.columnconfigure(1, weight=1); picker.columnconfigure(3, weight=1)
-        labels = self._contract_picker_values()
-        sel = list(self.contract_tree.selection()) if hasattr(self, "contract_tree") else []
-        a_var = tk.StringVar(value=self._contract_display_label(sel[0], contracts[sel[0]]) if len(sel) >= 1 and sel[0] in contracts else labels[0])
-        b_default = self._contract_display_label(sel[1], contracts[sel[1]]) if len(sel) >= 2 and sel[1] in contracts else (labels[1] if len(labels) > 1 else labels[0])
-        b_var = tk.StringVar(value=b_default)
-        ttk.Label(picker, text="Contract A").grid(row=0, column=0, sticky="w", padx=(0, 6))
-        a_combo = ttk.Combobox(picker, textvariable=a_var, values=labels, state="readonly")
-        a_combo.grid(row=0, column=1, sticky="ew", padx=(0, 14))
-        ttk.Label(picker, text="Contract B").grid(row=0, column=2, sticky="w", padx=(0, 6))
-        b_combo = ttk.Combobox(picker, textvariable=b_var, values=labels, state="readonly")
-        b_combo.grid(row=0, column=3, sticky="ew", padx=(0, 10))
-
-        table_wrap = ttk.Frame(win, padding=(12, 0, 12, 8))
-        table_wrap.grid(row=2, column=0, sticky="nsew")
-        table_wrap.columnconfigure(0, weight=1); table_wrap.rowconfigure(0, weight=1)
-        tv = ttk.Treeview(table_wrap, columns=["Metric", "A", "B", "Comparison"], show="headings", style="Contracts.Treeview")
-        for col, width, anchor in [("Metric", 220, "w"), ("A", 260, "w"), ("B", 260, "w"), ("Comparison", 270, "w")]:
-            tv.heading(col, text=col); tv.column(col, width=width, anchor=anchor)
-        tv.grid(row=0, column=0, sticky="nsew")
-        sb = ttk.Scrollbar(table_wrap, orient="vertical", command=tv.yview); sb.grid(row=0, column=1, sticky="ns"); tv.configure(yscrollcommand=sb.set)
-        tv.tag_configure("section", background="#dbeafe", foreground="#0b1f3a", font=(FONT_FAMILY, FS_BODY, "bold"))
-        tv.tag_configure("warn", background="#fff7ed")
-
-        current = {"a": "", "b": ""}
-        def render(*_args):
-            for iid in tv.get_children(""): tv.delete(iid)
-            cid_a = self._resolve_contract_id_from_label(a_var.get()); cid_b = self._resolve_contract_id_from_label(b_var.get())
-            current["a"], current["b"] = cid_a, cid_b
-            if not cid_a or not cid_b or cid_a == cid_b:
-                tv.insert("", "end", values=("Choose two different contracts", "", "", ""), tags=("warn",)); return
-            _a, _b, rows = self._contract_comparison_rows(cid_a, cid_b)
-            prior = None
-            for section, metric, av, bv, result in rows:
-                if section != prior:
-                    tv.insert("", "end", values=(section.title(), "", "", ""), tags=("section",))
-                    prior = section
-                tag = ("warn",) if ("Need data" in str(result) or "Different commodities" in str(result)) else ()
-                tv.insert("", "end", values=(metric, av, bv, result), tags=tag)
-        a_combo.bind("<<ComboboxSelected>>", render); b_combo.bind("<<ComboboxSelected>>", render)
-        render()
-
-        actions = ttk.Frame(win, padding=(12, 0, 12, 12))
-        actions.grid(row=3, column=0, sticky="ew")
-        ttk.Label(actions, text="Lower cost is favorable; higher saving is favorable. Open-contract values are indicative.", foreground="#64748b").pack(side="left")
-        ttk.Button(actions, text="Export Comparison Excel", command=lambda: self._export_contract_comparison_excel(current["a"], current["b"], win)).pack(side="right", padx=(8, 0))
-        ttk.Button(actions, text="Close", command=win.destroy).pack(side="right")
-
-
     def clear_contract_filters(self):
         if hasattr(self, "contract_search_var"):
             self.contract_search_var.set("")
@@ -27202,8 +25724,6 @@ class App(tk.Tk):
             self.contract_filter_origin_var.set("ALL")
         if hasattr(self, "contract_open_only_var"):
             self.contract_open_only_var.set(False)
-        if hasattr(self, "contract_sort_var"):
-            self.contract_sort_var.set("Delivery Date · Newest First")
         self.refresh_contracts_tree()
 
     def clear_history_filters(self):
@@ -27261,26 +25781,6 @@ class App(tk.Tk):
                      f"on landed cost)")
         return line + "\n"
 
-    def _fx_move_line_pricing(self, c):
-        """One-line insight: how much the EGP moved between the pricing-date
-        FX assumption (qty-weighted across pricing lots) and the bank
-        allocating the currency at Form 4 — the actual FX timing gain/loss
-        against the deal's original pricing-date plan."""
-        f4 = to_float(c.get("form4_fx"), None)
-        pfx, src = self._resolve_pricing_fx(c)
-        if f4 is None or not pfx:
-            return ""
-        delta = f4 - pfx
-        line = (f"FX move Pricing → Form 4: {'+' if delta >= 0 else ''}"
-                f"{fmt_num(delta, 4)}  ({src})")
-        cif = to_float(c.get("cif_usd_mt"), None)
-        if cif is not None:
-            impact = delta * cif
-            verdict = "cost overrun" if impact > 0 else "timing gain" if impact < 0 else "flat"
-            line += (f"  ({'+' if impact >= 0 else ''}{fmt_num(impact, 0)} EGP/MT "
-                     f"vs the pricing-date plan — {verdict})")
-        return line + "\n"
-
     def update_contract_detail_panel(self):
         if not hasattr(self, "contract_details_text"):
             return
@@ -27301,7 +25801,6 @@ class App(tk.Tk):
             f"Origin: {c.get('origin','-')}\n"
             f"Status: {c.get('status','-')}\n"
             f"Qty MT: {fmt_num(to_float(c.get('qty_mt'), None), 0)}\n"
-            f"Delivery Date: {c.get('delivery_date','-') or c.get('storage_start','-')}\n"
             f"Storage Start: {c.get('storage_start','-')}\n"
             f"Storage End: {c.get('storage_end','-')}\n"
             f"Basis/Premium Pricing Date: {c.get('pricing_date','-') or '-'}\n"
@@ -27313,7 +25812,6 @@ class App(tk.Tk):
             f"FX at Form 4: {fmt_num(to_float(c.get('form4_fx'), None), 4)}\n"
             f"FX at Delivery: {fmt_num(to_float(c.get('delivery_fx'), None), 4)}\n"
             f"{self._fx_move_line(c)}"
-            f"{self._fx_move_line_pricing(c)}"
             f"Estimated Remaining MT: {fmt_num(to_float(bal.get('RemainingMT'), None), 0)}\n"
             f"Estimated Finish Date: {bal.get('EstFinishDate','-')}\n"
             f"Balance Status: {bal.get('Status','-')}\n"
@@ -29156,8 +27654,6 @@ class App(tk.Tk):
             "premium_usd_mt": to_float(inp.get("premium_usd_mt"), None) if meta.get("type") == "CBOT" else None,
             "conversion_type":  meta.get("conversion_type", ""),
             "conversion_value": meta.get("conversion_value", ""),
-            "conversion_factor": cbot_conv_factor(comm, strict=True) if meta.get("type") == "CBOT" else to_float(meta.get("conversion_value"), 1.0),
-            "premium_mode": meta.get("premium_mode", "CBOT_UNIT" if meta.get("type") == "CBOT" else "USD_MT"),
         }
 
         self.state_obj["snapshots"].append(snap)

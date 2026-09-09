@@ -1,0 +1,44 @@
+Prometheus Procurement V10.9.2 — Validation
+Date: 2026-09-08
+
+Automated regression suite:
+- 123 tests passed
+- 0 failed
+
+New coverage (Aurora modern interface):
+- Palette contrast: every text/ground pair in both themes clears WCAG AA
+- Rounded-gradient scanline insets and rounded-rect corner geometry
+- CBOT feed: quote shapes, history windowing/dedupe, 30-day change,
+  12-month band, weighted premium, exposure priced/unpriced split,
+  FX-unsecured value, signal generation
+- Missing premium or quote is reported as missing, never assumed zero
+- Widget and chart smoke tests in Day and Night (skipped without a display)
+- Shell navigation, live top-bar chips and the Ctrl+K command palette
+- Source guarantees: identity-based navigation, classic chrome reachable,
+  stale widget references dropped before an in-place interface rebuild
+
+Existing coverage includes:
+- Inventory vs Market view presence and FIFO basis
+- Remaining-layer local edge calculation
+- Remaining-layer current CBOT replacement calculation
+- Missing premium never assumed to be zero
+- Existing FIFO depletion / physical baseline tests
+- Existing freight VAT / no-double-VAT tests
+- Existing Scenario Lab tests
+
+GUI smoke tests under virtual Windows-like Tk display:
+- Application startup: PASS
+- Aurora shell + CBOT Command Center build: PASS
+- Navigation to all seven rail destinations: PASS
+- In-place Day -> Night theme rebuild: PASS, 0 runtime errors
+- In-place switch back to the classic tab bar: PASS, 0 runtime errors
+- Analysis → Inventory vs Market tab creation: PASS
+- User-uploaded app_state.json load: PASS, 0 runtime errors
+- Synthetic delivered Open FIFO row: PASS
+- Open status filter: PASS
+- All status filter including delivered Closed inventory: PASS
+- Current local and CBOT replacement values populated: PASS
+- Home/Analysis navigation hooks: PASS
+
+Important real-data note:
+The uploaded state used for smoke testing currently resolves to 0 remaining CORN FIFO contract lots as of 2026-09-08 under the enabled daily estimate, because its latest physical/consumption baseline is old enough for the configured daily consumption model to deplete the identifiable stock. Entering a current physical stock count re-anchors the model; this is intentional audit behavior, not a hidden override.

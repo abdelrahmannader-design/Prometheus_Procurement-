@@ -3,9 +3,9 @@ setlocal
 cd /d "%~dp0"
 where py >nul 2>nul
 if %errorlevel%==0 (
-    py -3 Prometheus_V10_8_15.py
+    py -3 Prometheus_V10_9_2.py
 ) else (
-    python Prometheus_V10_8_15.py
+    python Prometheus_V10_9_2.py
 )
 if errorlevel 1 (
     echo.
