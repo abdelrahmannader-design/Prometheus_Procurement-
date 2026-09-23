@@ -1,0 +1,9 @@
+Prometheus Procurement V10.9.10 — Aurora Stress Reconciliation
+Main: Prometheus_V10_9_10.py
+Core: prometheus_core/
+UI: prometheus_ui/
+Tests: tests/
+Run: run_prometheus.bat
+Build EXE: build_exe_onedir.bat
+Legacy V10.9.9 source preserved under legacy/.
+No app_state.json included.

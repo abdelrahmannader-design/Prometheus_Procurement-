@@ -1,7 +1,8 @@
-# Migration Status — V10.8.15
+# V10.9.10 migration status
 
-- Architecture remains the modularized Tkinter desktop application.
-- No JSON schema migration is required.
-- V10.8.14 is preserved as a frozen legacy copy.
-- New functionality is isolated to the Contracts workspace and Excel reporting.
-- Contract economics, Basis logic, savings logic and Home calculations are unchanged.
+- Based on V10.9.9 Aurora FX Exposure.
+- Existing `app_state.json` remains compatible; no state migration is required.
+- No financial history, contracts, FIFO records, FX history, CBOT history, or local prices are rewritten.
+- Single Deal Calculator remains the economic source of truth for the zero-shock Stress Base.
+- Stress/Recommendation now includes the same finance carry inputs as Calculate.
+- V10.9.9 source is preserved under `legacy/`.

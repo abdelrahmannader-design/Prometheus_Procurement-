@@ -1,9 +1,12 @@
 # -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import collect_submodules
 from PyInstaller.utils.hooks import collect_all
 
 datas = []
 binaries = []
 hiddenimports = []
+hiddenimports += collect_submodules('prometheus_core')
+hiddenimports += collect_submodules('prometheus_ui')
 tmp_ret = collect_all('matplotlib')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('openpyxl')
@@ -13,7 +16,7 @@ datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 
 a = Analysis(
-    ['Prometheus_V10_8_15.py'],
+    ['Prometheus_V10_9_10.py'],
     pathex=[],
     binaries=binaries,
     datas=datas,

@@ -1,0 +1,12 @@
+Scenario CBOT vs Local Premium Bridge validation — 2026-09-14
+
+- Python compile: PASS
+- Automated tests: 169 passed, 15 skipped
+- Scenario workbook sheet order preserved:
+  1. Cost Summary
+  2. Scenario Lab
+  3. Current FIFO Sources
+- Cost Summary now contains a CBOT vs LOCAL — PREMIUM EQUIVALENT block.
+- Detailed Scenario Lab now exposes Scenario Import Premium, Local-Equivalent CIF, Implied Local Premium and Premium Gap as formulas.
+- Formula matches Basis Tracker non-SBM algebra when Expenses and FX/CBOT references are aligned.
+- Existing FX source selector, contract freight sourcing, intake/clearance separation and FIFO audit trail are preserved.
