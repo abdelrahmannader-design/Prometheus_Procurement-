@@ -21018,7 +21018,7 @@ class App(tk.Tk):
 
     def _stress_named_scenarios(self, res):
         """Saving under each CBOT-history scenario at base FX and premium."""
-        if not res or res.get("error") or res.get("cbot_locked"):
+        if not res or res.get("error") or res.get("cbot_locked") or res.get("flat_price"):
             return None, []
         inp = res["inputs"]
         hist = self._stress_history(inp["commodity"], inp["cbot"])
@@ -21036,6 +21036,11 @@ class App(tk.Tk):
         try:
             if not res or res.get("error"):
                 self._stress_hist_var.set("")
+                return
+            if res.get("flat_price"):
+                self._stress_hist_var.set("Flat-price deal — the CBOT shock % list is applied "
+                                          "to the flat CIF price" + (" (fixed on this contract: "
+                                          "only FX is stressed)." if res.get("cbot_locked") else "."))
                 return
             if res.get("cbot_locked"):
                 self._stress_hist_var.set("CBOT is fixed on this contract — CBOT history "
@@ -21330,9 +21335,15 @@ class App(tk.Tk):
         """Export the formula-based stress test (Calculate tab)."""
         res = self._last_stress
         try:
-            if not res or res.get("error"):
-                messagebox.showinfo(APP_NAME, "Run Calculate first — no "
-                                              "stress result to export.")
+            if not res:
+                messagebox.showinfo(APP_NAME, "Run Calculate first (Calculate → Deal "
+                                              "Evaluator) — no stress result to export yet.")
+                return
+            if res.get("error"):
+                why = res["error"]
+                if res.get("missing"):
+                    why += " — missing: " + ", ".join(res["missing"])
+                messagebox.showinfo(APP_NAME, f"Stress test not available for this deal:\n\n{why}")
                 return
             if not _need_openpyxl():
                 return
@@ -21383,7 +21394,8 @@ class App(tk.Tk):
         for ci in range(2, 16):
             wsA.column_dimensions[L(ci)].width = 11
         base_rows = [
-            ("Base CBOT (¢/bu, SBM $/st)", inp["cbot"], "#,##0.00"),
+            (("Base flat CIF price (USD/MT)" if res.get("flat_price")
+              else "Base CBOT (¢/bu, SBM $/st)"), inp["cbot"], "#,##0.00"),
             ("Base FX (EGP/USD)", inp["fx"], "#,##0.0000"),
             ("Base premium (same unit as CBOT)", inp["premium_cents"], "#,##0.00"),
             ("Quantity (MT)", inp["qty_mt"], "#,##0"),
@@ -21514,7 +21526,10 @@ class App(tk.Tk):
         wsH.column_dimensions["A"].width = 40
         for col, w in zip("BCDEFGH", (12, 12, 44, 16, 16, 18, 18)):
             wsH.column_dimensions[col].width = w
-        if res.get("cbot_locked"):
+        if res.get("flat_price"):
+            kit.notes(wsH, 3, ["Flat-price deal (no CBOT board): on the Stress Test sheet the "
+                               "'CBOT' axis is the flat CIF price in USD/MT (factor 1, no premium)."], 8)
+        elif res.get("cbot_locked"):
             kit.notes(wsH, 3, ["CBOT is fixed on this contract, so CBOT scenarios do not apply. "
                                "Only FX is stressed on the Stress Test sheet."], 8)
         elif not hist:
@@ -33547,6 +33562,9 @@ class App(tk.Tk):
         - If a contract is selected: use its supplier/qty defaults.
         - If no contract: use manual inputs on the form and treat as a "future snapshot".
         """
+        # A new calculation invalidates the previous stress result, so an
+        # aborted calculation can never export yesterday's numbers.
+        self._last_stress = None
         clabel = (self.sd_contract_var.get() or "").strip()
         cid = None
         c = {}
@@ -33742,11 +33760,30 @@ class App(tk.Tk):
                 }
                 self._last_stress = run_stress_test(stress_inputs)
             else:
-                self._last_stress = {"error": "Flat-price contract — CBOT "
-                                     "stress shocks do not apply",
-                                     "missing": [],
-                                     "resilience": "Unavailable",
-                                     "version": STRESS_ENGINE_VERSION}
+                # Flat-price deal (SFM, DDGS, fixed $/MT): stress the flat CIF
+                # price with the CBOT/price shock list and FX with the FX list.
+                # A saved contract price is fixed, so only FX moves then.
+                _cbot_sh, _fx_sh, _hz = self._stress_settings()
+                _flat_cif = to_float(out.get("import_usd_mt"), None)
+                _price_fixed = bool(cid) and self._contract_cif_usd(c, cid) is not None
+                self._last_stress = run_stress_test({
+                    "commodity": comm,
+                    "flat_price_usd_mt": _flat_cif,
+                    "cbot_shocks_custom": _cbot_sh,
+                    "fx_shocks_custom": _fx_sh,
+                    "cbot_locked": _price_fixed,
+                    "fx": to_float(inp.get("fx"), None),
+                    "qty_mt": to_float(inp.get("qty_mt"), None),
+                    "local_egp_mt": to_float(inp.get("local_egp_mt"), None),
+                    "fees_egp_mt": (to_float(inp.get("canonical_landed_fees_egp_mt"), None)
+                                    if inp.get("canonical_landed_fees_egp_mt") is not None
+                                    else to_float(inp.get("supplier_direct_egp_mt"), None)),
+                    "finance_days": to_float(inp.get("finance_days"), 0.0) or 0.0,
+                    "interest_rate": to_float(inp.get("interest_rate"), 0.0) or 0.0,
+                    "marginal_egp_mt": to_float(
+                        (self.state_obj.get("ui", {}) or {})
+                        .get("marginal_threshold_egp_mt"), 200.0),
+                })
             self._refresh_stress_section()
             st = self._last_stress
             if st and not st.get("error") and st.get("high_risk"):

@@ -223,7 +223,16 @@ def run_stress_test(inputs: Mapping[str, Any]) -> dict[str, Any]:
     if not commodity:
         missing.append("commodity")
 
-    factor = cbot_conv_factor(commodity, strict=True) if commodity else None
+    # Flat-price deals (SFM, DDGS, fixed $/MT contracts): the "CBOT" axis
+    # becomes the flat CIF price itself (factor 1, no premium), so the same
+    # grid stresses price and FX.
+    flat_price = to_float(inputs.get("flat_price_usd_mt"), None)
+    is_flat = flat_price is not None
+    if is_flat:
+        inputs = {**inputs, "cbot": flat_price, "premium_cents": 0.0,
+                  "premium_locked": True}
+
+    factor = 1.0 if is_flat else (cbot_conv_factor(commodity, strict=True) if commodity else None)
     if commodity and factor is None:
         return {
             "error": f"Unsupported commodity conversion: {commodity}",
@@ -242,7 +251,7 @@ def run_stress_test(inputs: Mapping[str, Any]) -> dict[str, Any]:
     interest_rate = to_float(inputs.get("interest_rate"), 0.0) or 0.0
 
     if cbot is None or cbot <= 0:
-        missing.append("CBOT (must be > 0)")
+        missing.append("flat price CIF USD/MT (must be > 0)" if is_flat else "CBOT (must be > 0)")
     if fx is None or fx <= 0:
         missing.append("FX (must be > 0)")
     if premium is None:
@@ -396,6 +405,7 @@ def run_stress_test(inputs: Mapping[str, Any]) -> dict[str, Any]:
         },
         "premium_locked": premium_locked,
         "cbot_locked": cbot_locked,
+        "flat_price": is_flat,
         "prem_shocks_used": premium_shocks,
         "cbot_shocks_used": cbot_shocks,
         "fx_shocks_used": fx_shocks,

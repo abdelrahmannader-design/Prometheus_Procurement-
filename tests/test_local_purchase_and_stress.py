@@ -81,6 +81,22 @@ class StressShockSettingsTests(unittest.TestCase):
         self.assertEqual(res["cbot_shocks_used"], (-0.05, 0.0, 0.05, 0.10))
         self.assertEqual(res["fx_shocks_used"], (-0.03, 0.0, 0.03, 0.05, 0.10))
 
+    def test_flat_price_deal_is_stressed_on_price_and_fx(self):
+        res = run_stress_test({"commodity": "SFM", "flat_price_usd_mt": 290.0, "fx": 50.0,
+                               "qty_mt": 1000.0, "local_egp_mt": 16000.0, "fees_egp_mt": 650.0,
+                               "cbot_shocks_custom": (-0.1, 0.1), "fx_shocks_custom": (0.05,)})
+        self.assertIsNone(res["error"])
+        self.assertTrue(res["flat_price"])
+        self.assertAlmostEqual(res["base"]["saving_egp_mt"], 16000 - (290 * 50 + 650))
+        worst = min(res["rows"], key=lambda r: r["saving_egp_mt"])
+        self.assertAlmostEqual(worst["saving_egp_mt"], round(16000 - (290 * 1.1 * 52.5 + 650), 2))
+
+    def test_fixed_flat_price_only_stresses_fx(self):
+        res = run_stress_test({"commodity": "SFM", "flat_price_usd_mt": 290.0, "fx": 50.0,
+                               "qty_mt": 1000.0, "local_egp_mt": 16000.0, "fees_egp_mt": 650.0,
+                               "cbot_locked": True})
+        self.assertEqual(res["cbot_shocks_used"], (0.0,))
+
     def test_locked_cbot_ignores_custom_cbot_shocks(self):
         res = run_stress_test({**self.inputs, "cbot_locked": True, "cbot_shocks_custom": (-0.3, 0.3)})
         self.assertEqual(res["cbot_shocks_used"], (0.0,))

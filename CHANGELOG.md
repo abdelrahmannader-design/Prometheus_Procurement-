@@ -1,3 +1,8 @@
+# 2026-09-23 (b) — Stress test for flat-price deals
+
+- Stress test and its Excel now work for flat-price deals (SFM, DDGS, fixed $/MT contracts): the flat CIF price is shocked with the CBOT/price % list and FX with the FX list. A contract with a saved price is fixed, so only FX is stressed. Previously these deals had no stress result and the export said "Run Calculate first".
+- The export now states the real reason when a stress test is unavailable, and an aborted calculation no longer leaves the previous deal's stress result exportable.
+
 # 2026-09-23 — Formula-based Portfolio, Local Purchase judgment, configurable stress test
 
 **Contracts → CPG Portfolio Excel (rebuilt, formula-based)**
