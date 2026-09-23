@@ -1,5 +1,7 @@
 # Prometheus Procurement V10.9.10 — Aurora Stress Reconciliation
 
+> How every analysis tab calculates its results: see [ANALYSIS_GUIDE.md](ANALYSIS_GUIDE.md).
+
 ## V10.9.10 focus — Deal Calculator / Stress Test reconciliation
 
 - Fixed a material inconsistency where the Single Deal Calculator included finance carry but the Stress Test base case did not.
