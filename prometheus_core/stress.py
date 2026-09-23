@@ -61,6 +61,161 @@ def stress_classify(
     return "Advantage"
 
 
+def normalize_shocks(values: Any) -> tuple[float, ...] | None:
+    """Clean a user shock list (fractions, e.g. -0.05 = -5%).
+
+    Accepts any iterable of numbers or numeric strings; drops blanks and
+    duplicates, always includes the zero-shock base, and sorts ascending.
+    Returns None when nothing usable was given (caller uses defaults).
+    """
+    if values is None:
+        return None
+    if isinstance(values, (str, bytes)):
+        values = [v for v in str(values).replace(";", ",").split(",")]
+    out = set()
+    for v in values:
+        f = to_float(v, None)
+        if f is None or math.isnan(f) or f <= -1.0:
+            continue
+        out.add(round(f, 6))
+    if not out:
+        return None
+    out.add(0.0)
+    return tuple(sorted(out))
+
+
+def parse_shock_percent_text(text: Any) -> tuple[float, ...] | None:
+    """'-10, -5, 5, 10' (percent) → (-0.10, -0.05, 0.0, 0.05, 0.10)."""
+    if text is None:
+        return None
+    parts = [p.strip().rstrip("%") for p in str(text).replace(";", ",").split(",")]
+    vals = [to_float(p, None) for p in parts if p.strip()]
+    vals = [v / 100.0 for v in vals if v is not None]
+    return normalize_shocks(vals)
+
+
+def cbot_history_scenarios(
+    series: Any,
+    spot: Any,
+    horizon_days: Any = 30,
+    today: dt.date | None = None,
+) -> dict[str, Any]:
+    """Turn a CBOT close history into realistic stress levels.
+
+    ``series`` is ``[(iso_date, close)]``.  Returns 12-month and full-history
+    highs/lows (with dates), the worst/best move seen over any
+    ``horizon_days`` window (as %), the 5th/95th percentile of those moves,
+    and a list of named scenarios expressed both as a CBOT level and as a %
+    shock off ``spot``.  Empty dict when there is no usable data.
+    """
+    spot = to_float(spot, None)
+    horizon = max(1, int(to_float(horizon_days, 30) or 30))
+    pts = []
+    for d, v in series or []:
+        fv = to_float(v, None)
+        if not d or fv is None or fv <= 0:
+            continue
+        try:
+            pts.append((dt.date.fromisoformat(str(d)[:10]), fv))
+        except ValueError:
+            continue
+    if not pts or spot is None or spot <= 0:
+        return {}
+    pts.sort()
+    today = today or pts[-1][0]
+    last12 = [(d, v) for d, v in pts if d >= today - dt.timedelta(days=365)] or pts
+    lo12 = min(last12, key=lambda t: t[1])
+    hi12 = max(last12, key=lambda t: t[1])
+    lo_all = min(pts, key=lambda t: t[1])
+    hi_all = max(pts, key=lambda t: t[1])
+
+    # Moves over the horizon: compare each close with the last close at
+    # least ``horizon`` days later (calendar days, gaps tolerated).
+    moves = []
+    j = 0
+    for i, (d0, v0) in enumerate(pts):
+        target = d0 + dt.timedelta(days=horizon)
+        j = max(j, i + 1)
+        while j < len(pts) and pts[j][0] < target:
+            j += 1
+        if j >= len(pts):
+            break
+        if (pts[j][0] - target).days <= max(7, horizon // 4):
+            moves.append(pts[j][1] / v0 - 1.0)
+
+    def pct(q: float) -> float | None:
+        if not moves:
+            return None
+        s = sorted(moves)
+        k = (len(s) - 1) * q
+        f = math.floor(k)
+        c = min(f + 1, len(s) - 1)
+        return s[f] + (s[c] - s[f]) * (k - f)
+
+    worst_fall = min(moves) if moves else None
+    worst_rise = max(moves) if moves else None
+    p05, p95 = pct(0.05), pct(0.95)
+
+    scenarios = []
+
+    def add(name: str, level: float | None, note: str) -> None:
+        if level is None or level <= 0:
+            return
+        scenarios.append({"name": name, "cbot": round(level, 4),
+                          "shock": round(level / spot - 1.0, 6), "note": note})
+
+    add("CBOT at 12-month low", lo12[1], f"low {lo12[1]:,.2f} on {lo12[0].isoformat()}")
+    add("CBOT at 12-month high", hi12[1], f"high {hi12[1]:,.2f} on {hi12[0].isoformat()}")
+    if (lo_all[0], hi_all[0]) != (lo12[0], hi12[0]):
+        add("CBOT at all-history low", lo_all[1], f"low {lo_all[1]:,.2f} on {lo_all[0].isoformat()}")
+        add("CBOT at all-history high", hi_all[1], f"high {hi_all[1]:,.2f} on {hi_all[0].isoformat()}")
+    if worst_fall is not None:
+        add(f"Worst {horizon}-day fall repeats", spot * (1 + worst_fall),
+            f"{worst_fall:+.1%} over {horizon} days (worst seen)")
+        add(f"Worst {horizon}-day rise repeats", spot * (1 + worst_rise),
+            f"{worst_rise:+.1%} over {horizon} days (worst seen)")
+    if p05 is not None:
+        add(f"Typical bad {horizon}-day rise (95th pct)", spot * (1 + p95),
+            f"{p95:+.1%} — exceeded in only 5% of {horizon}-day windows")
+        add(f"Typical good {horizon}-day fall (5th pct)", spot * (1 + p05),
+            f"{p05:+.1%} — only 5% of {horizon}-day windows fell further")
+
+    return {
+        "spot": spot,
+        "horizon_days": horizon,
+        "points": len(pts),
+        "first_date": pts[0][0].isoformat(),
+        "last_date": pts[-1][0].isoformat(),
+        "low_12m": lo12[1], "low_12m_date": lo12[0].isoformat(),
+        "high_12m": hi12[1], "high_12m_date": hi12[0].isoformat(),
+        "low_all": lo_all[1], "low_all_date": lo_all[0].isoformat(),
+        "high_all": hi_all[1], "high_all_date": hi_all[0].isoformat(),
+        "worst_fall_pct": worst_fall, "worst_rise_pct": worst_rise,
+        "p05_pct": p05, "p95_pct": p95,
+        "moves_count": len(moves),
+        "scenarios": scenarios,
+    }
+
+
+def suggested_cbot_shocks(hist: Mapping[str, Any]) -> tuple[float, ...] | None:
+    """A CBOT shock set built from history: 12-month low/high plus the
+    worst horizon fall/rise, rounded to 0.5%."""
+    if not hist:
+        return None
+    spot = hist.get("spot")
+    vals = []
+    for key in ("low_12m", "high_12m"):
+        v = hist.get(key)
+        if v and spot:
+            vals.append(v / spot - 1.0)
+    for key in ("worst_fall_pct", "worst_rise_pct"):
+        v = hist.get(key)
+        if v is not None:
+            vals.append(v)
+    vals = [round(v * 200) / 200 for v in vals]
+    return normalize_shocks(vals)
+
+
 def run_stress_test(inputs: Mapping[str, Any]) -> dict[str, Any]:
     """Run the V10.4 shock grid with explicit missing-input handling."""
     missing: list[str] = []
@@ -132,12 +287,15 @@ def run_stress_test(inputs: Mapping[str, Any]) -> dict[str, Any]:
         if custom_premium_shocks
         else STRESS_PREM_SHOCKS
     )
-    cbot_shocks = (0.0,) if cbot_locked else STRESS_CBOT_SHOCKS
+    custom_cbot = normalize_shocks(inputs.get("cbot_shocks_custom"))
+    custom_fx = normalize_shocks(inputs.get("fx_shocks_custom"))
+    cbot_shocks = (0.0,) if cbot_locked else (custom_cbot or STRESS_CBOT_SHOCKS)
+    fx_shocks = custom_fx or STRESS_FX_SHOCKS
 
     rows: list[dict[str, Any]] = []
     base_row: dict[str, Any] | None = None
     for cbot_shock in cbot_shocks:
-        for fx_shock in STRESS_FX_SHOCKS:
+        for fx_shock in fx_shocks:
             for premium_shock in premium_shocks:
                 shocked_cbot = cbot * (1 + cbot_shock)
                 shocked_fx = fx * (1 + fx_shock)
@@ -240,6 +398,7 @@ def run_stress_test(inputs: Mapping[str, Any]) -> dict[str, Any]:
         "cbot_locked": cbot_locked,
         "prem_shocks_used": premium_shocks,
         "cbot_shocks_used": cbot_shocks,
+        "fx_shocks_used": fx_shocks,
         "version": STRESS_ENGINE_VERSION,
         "ts": _now_ts(),
         "error": None,

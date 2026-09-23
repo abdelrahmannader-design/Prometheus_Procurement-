@@ -25,6 +25,10 @@ from .stress import (
     stress_landed_cost_egp_mt,
     stress_classify,
     run_stress_test,
+    normalize_shocks,
+    parse_shock_percent_text,
+    cbot_history_scenarios,
+    suggested_cbot_shocks,
 )
 from .decision import (
     DECISION_ENGINE_VERSION,
@@ -40,4 +44,8 @@ from .inventory import (
     base_commodity, effective_freight_egp_mt,
     build_daily_fifo_inventory, summarize_inventory_market,
     calculate_inventory_scenario, inventory_market_layer_metrics,
+)
+
+from .local_purchase import (
+    LOCAL_EVAL_VERSION, import_parity_egp_mt, evaluate_local_purchase,
 )

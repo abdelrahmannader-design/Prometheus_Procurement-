@@ -1,3 +1,21 @@
+# 2026-09-23 — Formula-based Portfolio, Local Purchase judgment, configurable stress test
+
+**Contracts → CPG Portfolio Excel (rebuilt, formula-based)**
+- Closed contracts reproduce the Savings tab exactly (same fees resolver, same local price on/before delivery). Previously the sheet used the nearest local price within ±15 days (could be after delivery), raw freight without VAT and the discharge field only.
+- Open contracts now show the **CIF of the moment** = (live CBOT + premium) × factor, plus CIF used (priced part at contract/lot CIF, unpriced part live), FX used (Form 4 FX when secured, switchable), expected saving and pricing MTM.
+- Assumptions sheet (FX, live CBOT per board, factors, latest local price per key, thresholds) drives every formula. New "How Savings Work" sheet.
+
+**Local Purchases**
+- CBOT Ref / FX Ref fill automatically from history on or before the purchase date (typed values are never overwritten; ⟳ refills). Saving without them resolves them from history.
+- New judgment: import parity on the purchase date = (CBOT on date + premium reference) × factor × FX on date + import fees, and local market price on/before the date. Verdicts: source (local vs import), price (vs market) and overall. Replaces the comparison with contracts delivered ±45 days (priced at other dates) and the ±14-day market window that could look into the future.
+- Table gains a Verdict column; KPI "Saving vs Import Parity". New local-purchases-only Excel (Local Purchases, Summary, Assumptions, How It Is Judged), all formula-based.
+
+**Calculate → Stress test**
+- CBOT and FX shock percentages are now user inputs (saved), replacing the fixed ±5%. Base (0%) always included. Home signals use the same settings.
+- "Use CBOT history" builds CBOT shocks from the 12-month low/high and the worst move over a chosen horizon. Named history scenarios (12-month low/high, all-history low/high, worst/typical horizon moves) are shown with their saving.
+- Stress Excel rebuilt: shock % cells on Assumptions drive every grid cell; best/adverse are MAX/MIN of the grids; break-even CBOT/FX are formulas; new "CBOT History Scenarios" sheet.
+- Validation: 188 tests passed; generated workbooks recalculated in LibreOffice match the app's own figures.
+
 # 2026-09-14 — Scenario CBOT vs local premium bridge
 
 - Scenario Excel now calculates the current import premium implied by Scenario CIF, the local-equivalent CIF, the local-implied/break-even premium, and the premium gap versus local.

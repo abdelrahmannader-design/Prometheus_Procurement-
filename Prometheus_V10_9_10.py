@@ -43,6 +43,9 @@ from prometheus_core import (
     stress_landed_cost_egp_mt as _core_stress_landed_cost_egp_mt,
     stress_classify as _core_stress_classify,
     run_stress_test as _core_run_stress_test,
+    parse_shock_percent_text as _core_parse_shock_percent_text,
+    cbot_history_scenarios as _core_cbot_history_scenarios,
+    suggested_cbot_shocks as _core_suggested_cbot_shocks,
     run_decision_engine as _core_run_decision_engine,
     compute_decision as _core_compute_decision,
     validate_single_inputs as _core_validate_single_inputs,
@@ -55,6 +58,11 @@ from prometheus_core import (
     summarize_inventory_market as _core_summarize_inventory_market,
     calculate_inventory_scenario as _core_calculate_inventory_scenario,
     inventory_market_layer_metrics as _core_inventory_market_layer_metrics,
+)
+
+from prometheus_core import (
+    import_parity_egp_mt as _core_import_parity_egp_mt,
+    evaluate_local_purchase as _core_evaluate_local_purchase,
 )
 
 # ══════════════════════════════════════════════════════════════════════
@@ -2291,6 +2299,122 @@ def _need_reportlab():
     return True
 
 
+class _XlKit:
+    """Shared look for the formula-based management workbooks.
+
+    Colour convention (same in every workbook built with this kit):
+    yellow fill + blue font = input you may edit; white = formula;
+    grey italic = source/audit text.
+    """
+
+    NAVY = "1A2D40"
+
+    def __init__(self):
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        thin = Side(style="thin", color="CCCCCC")
+        self.Font, self.PatternFill, self.Alignment = Font, PatternFill, Alignment
+        self.border = Border(left=thin, right=thin, top=thin, bottom=thin)
+        self.hdr_fill = PatternFill("solid", fgColor=self.NAVY)
+        self.inp_fill = PatternFill("solid", fgColor="FFF9E6")
+        self.grp_fill = PatternFill("solid", fgColor="E8F0FE")
+        self.tot_fill = PatternFill("solid", fgColor="D0DCF5")
+        self.grn_fill = PatternFill("solid", fgColor="E6F4EA")
+        self.red_fill = PatternFill("solid", fgColor="FDECEA")
+        self.amb_fill = PatternFill("solid", fgColor="FFF8E1")
+        self.hdr_font = Font(name="Calibri", bold=True, color="FFFFFF", size=9)
+        self.dat_font = Font(name="Calibri", size=9, color=self.NAVY)
+        self.bold_font = Font(name="Calibri", size=9, color=self.NAVY, bold=True)
+        self.inp_font = Font(name="Calibri", size=9, color="0000FF")
+        self.note_font = Font(name="Calibri", size=8, color="666666", italic=True)
+        self.title_font = Font(name="Calibri", bold=True, size=13, color=self.NAVY)
+        self.center = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        self.left = Alignment(horizontal="left", vertical="center")
+        self.wrap = Alignment(horizontal="left", vertical="top", wrap_text=True)
+        self.right = Alignment(horizontal="right", vertical="center")
+
+    def title(self, ws, text, sub=None, width_cols=12):
+        from openpyxl.utils import get_column_letter
+        ws.merge_cells(f"A1:{get_column_letter(width_cols)}1")
+        ws["A1"].value = text
+        ws["A1"].font, ws["A1"].alignment = self.title_font, self.left
+        ws.row_dimensions[1].height = 22
+        if sub:
+            ws.merge_cells(f"A2:{get_column_letter(width_cols)}2")
+            ws["A2"].value = sub
+            ws["A2"].font, ws["A2"].alignment = self.note_font, self.left
+
+    def header(self, ws, row, headers):
+        """headers: [(text, width)]"""
+        from openpyxl.utils import get_column_letter
+        for ci, (text, width) in enumerate(headers, 1):
+            c = ws.cell(row=row, column=ci, value=text)
+            c.font, c.fill, c.alignment, c.border = (
+                self.hdr_font, self.hdr_fill, self.center, self.border)
+            if width:
+                ws.column_dimensions[get_column_letter(ci)].width = width
+        ws.row_dimensions[row].height = 30
+
+    def put(self, ws, row, col, value, fmt=None, kind="formula", bold=False):
+        """kind: 'input' (editable), 'formula', 'text', 'note'."""
+        c = ws.cell(row=row, column=col, value=value)
+        c.border = self.border
+        if kind == "input":
+            c.fill, c.font = self.inp_fill, self.inp_font
+        elif kind == "note":
+            c.font = self.note_font
+        else:
+            c.font = self.bold_font if bold else self.dat_font
+        if isinstance(value, (int, float)) or (isinstance(value, str) and value.startswith("=")):
+            c.alignment = self.right
+        else:
+            c.alignment = self.left
+        if fmt:
+            c.number_format = fmt
+        return c
+
+    def verdict_colours(self, ws, rng):
+        """Green/red/amber for text verdicts starting with ✔ / ✘ / ⚠."""
+        from openpyxl.formatting.rule import FormulaRule
+        first = rng.split(":")[0]
+        col = "".join(ch for ch in first if ch.isalpha())
+        row = "".join(ch for ch in first if ch.isdigit())
+        ref = f"{col}{row}"
+        ws.conditional_formatting.add(rng, FormulaRule(
+            formula=[f'LEFT({ref},1)="✔"'], fill=self.grn_fill,
+            font=self.Font(color="1A7A1A", bold=True)))
+        ws.conditional_formatting.add(rng, FormulaRule(
+            formula=[f'LEFT({ref},1)="✘"'], fill=self.red_fill,
+            font=self.Font(color="C0392B", bold=True)))
+        ws.conditional_formatting.add(rng, FormulaRule(
+            formula=[f'LEFT({ref},1)="⚠"'], fill=self.amb_fill,
+            font=self.Font(color="B36000", bold=True)))
+
+    def sign_colours(self, ws, rng):
+        """Green when > 0, red when < 0 (numeric cells only)."""
+        from openpyxl.formatting.rule import FormulaRule
+        first = rng.split(":")[0]
+        ws.conditional_formatting.add(rng, FormulaRule(
+            formula=[f"AND(ISNUMBER({first}),{first}>0)"],
+            font=self.Font(color="1A7A1A", bold=True)))
+        ws.conditional_formatting.add(rng, FormulaRule(
+            formula=[f"AND(ISNUMBER({first}),{first}<0)"],
+            font=self.Font(color="C0392B", bold=True)))
+
+    def notes(self, ws, start_row, lines, width_cols=12):
+        """Write explanatory lines, one per row, merged across the sheet."""
+        from openpyxl.utils import get_column_letter
+        r = start_row
+        for line in lines:
+            ws.merge_cells(f"A{r}:{get_column_letter(width_cols)}{r}")
+            c = ws.cell(row=r, column=1, value=line)
+            is_head = bool(line) and line.isupper()
+            c.font = self.bold_font if is_head else self.dat_font
+            c.alignment = self.wrap
+            ws.row_dimensions[r].height = 15 if len(line) < 150 else 30
+            r += 1
+        return r
+
+
 def _num(x):
     try:
         if x is None:
@@ -4377,16 +4501,17 @@ class App(tk.Tk):
         _ent(1, 3, self.lp_price_lp_var, w=14)
         _lbl(1, 4, "Transport (EGP/MT)")
         _ent(1, 5, self.lp_transport_lp_var, w=12)
-        _lbl(1, 6, "CBOT Ref (¢/bu)")
+        _lbl(1, 6, "CBOT Ref (auto)")
         _ent(1, 7, self.lp_cbot_ref_lp_var, w=10)
-        _lbl(1, 8, "FX Ref")
+        _lbl(1, 8, "FX Ref (auto)")
         _ent(1, 9, self.lp_fx_ref_lp_var, w=10)
         _lp_fill_btn = ttk.Button(form, text="⟳", width=2,
                                   command=self._lp_fill_cbot_fx_from_history)
         _lp_fill_btn.grid(row=1, column=10, sticky="w", padx=(0, 4), pady=(0, 4))
         attach_tooltip(_lp_fill_btn,
-                       "Fill CBOT/FX from the nearest logged history on or "
-                       "before the purchase date, for this commodity.")
+                       "CBOT/FX fill automatically from the last logged history "
+                       "on or before the purchase date. Type a value to override; "
+                       "press ⟳ to refill from history.")
 
         # Freight / transport quick-pick row
         _lbl(2, 0, "Transport / Freight:")
@@ -4453,9 +4578,15 @@ class App(tk.Tk):
                   wraplength=700, justify="left").grid(
                       row=4, column=0, columnspan=10, sticky="w", pady=(4,0))
 
+        # CBOT/FX refs fill themselves from history as soon as the purchase
+        # date (or commodity) is entered — typing them is optional.
+        self._lp_auto_vals = {}
+        for v in (self.lp_date_lp_var, self.lp_commodity_lp_var):
+            v.trace_add("write", self._lp_autofill_refs)
         for v in (self.lp_price_lp_var, self.lp_transport_lp_var,
                   self.lp_commodity_lp_var, self.lp_cbot_ref_lp_var,
-                  self.lp_fx_ref_lp_var):
+                  self.lp_fx_ref_lp_var, self.lp_date_lp_var,
+                  self.lp_qty_lp_var):
             v.trace_add("write", self._lp_update_decision)
 
         btn_row = ttk.Frame(form)
@@ -4482,7 +4613,7 @@ class App(tk.Tk):
             ("lp_imp_qty",      "Total Import Qty (MT)",    "#444"),
             ("lp_imp_paid",     "Total Import Paid (EGP)",  "#1a6ebd"),
             ("lp_imp_avg",      "Avg Import Cost (EGP/MT)", "#1a6ebd"),
-            ("lp_total_saving", "Net Saving vs Local (EGP)","#1a7a1a"),
+            ("lp_total_saving", "Saving vs Import Parity (EGP)","#1a7a1a"),
             ("lp_blended_avg",  "Blended Avg (EGP/MT)",     "#b36000"),
         ]
         for col, (key, label, color) in enumerate(kpis):
@@ -4517,15 +4648,17 @@ class App(tk.Tk):
             ("FXRef",      70,  "e"),
             ("Basis",      90,  "e"),
             ("VsImport",  115,  "e"),
+            ("Verdict",   150,  "w"),
             ("Notes",     160,  "w"),
         ]
         lp_hdrs = {
             "ID":"#","Date":"Date","Supplier":"Supplier / Mill",
             "Commodity":"Commodity","Origin":"Origin","QtyMT":"Qty (MT)",
             "PriceEGP":"Price (EGP/MT)","Transport":"Transport (EGP/MT)",
-            "TotalCost":"Total Cost (EGP)","CBOTRef":"CBOT Ref (¢)",
-            "FXRef":"FX Ref","Basis":"Implied Basis",
-            "VsImport":"vs Import (EGP/MT)","Notes":"Notes",
+            "TotalCost":"Total Cost (EGP)","CBOTRef":"CBOT Ref (* = auto)",
+            "FXRef":"FX Ref (* = auto)","Basis":"Implied Basis",
+            "VsImport":"Local − Import parity (EGP/MT)",
+            "Verdict":"Verdict","Notes":"Notes",
         }
         self.lp_purchases_tree = ttk.Treeview(
             tf, columns=[c for c,_,_ in lp_cols],
@@ -4693,100 +4826,10 @@ class App(tk.Tk):
             self._lp_cmp_result_lbl.configure(foreground="#c0392b")
 
     def _lp_export_excel(self):
-        """Export Local Purchases — Sheet 1: data, Sheet 2: CBOT parity calculator."""
+        """Export the Local Purchases workbook (local purchases only)."""
         if not _need_openpyxl():
             return
         try:
-            from openpyxl import Workbook
-            from openpyxl.styles import (Font, Alignment, PatternFill,
-                                         Border, Side)
-            from openpyxl.utils import get_column_letter
-            from openpyxl.formatting.rule import CellIsRule
-
-            # ── Ask for comparison windows ────────────────────────────
-            win_dlg = tk.Toplevel(self)
-            win_dlg.title("Comparison Windows")
-            win_dlg.resizable(False, False)
-            win_dlg.grab_set()
-            win_dlg.focus_force()
-
-            tk.Label(win_dlg,
-                     text="Set the comparison windows for the export.\n"
-                          "Both are measured from each local purchase date.",
-                     font=("Segoe UI", 9, "bold"), justify="left",
-                     wraplength=360).pack(padx=16, pady=(14, 8))
-
-            # Import contracts window
-            f1 = tk.LabelFrame(win_dlg,
-                               text="  vs Import Contracts  ",
-                               font=("Segoe UI", 9, "bold"),
-                               padx=10, pady=8)
-            f1.pack(padx=16, fill="x", pady=(0, 8))
-            tk.Label(f1,
-                     text="Include contracts whose delivery date falls within\n"
-                          "± this many days of the local purchase date:",
-                     font=("Segoe UI", 9), justify="left").pack(anchor="w")
-            f1b = tk.Frame(f1)
-            f1b.pack(anchor="w", pady=(4, 0))
-            tk.Label(f1b, text="± days:", font=("Segoe UI", 9)).pack(side="left")
-            imp_win_var = tk.StringVar(value="45")
-            tk.Entry(f1b, textvariable=imp_win_var, width=6,
-                     font=("Segoe UI", 10)).pack(side="left", padx=(6, 0))
-            tk.Label(f1b, text="  (default: 45)",
-                     font=("Segoe UI", 9), foreground="#888").pack(side="left")
-            tk.Label(f1,
-                     text="If no contracts fall in the window → falls back to\n"
-                          "full portfolio average, clearly labeled.",
-                     font=("Segoe UI", 9), foreground="#666",
-                     justify="left").pack(anchor="w", pady=(4, 0))
-
-            # Local market window
-            f2 = tk.LabelFrame(win_dlg,
-                               text="  vs Local Market Price  ",
-                               font=("Segoe UI", 9, "bold"),
-                               padx=10, pady=8)
-            f2.pack(padx=16, fill="x", pady=(0, 10))
-            tk.Label(f2,
-                     text="Use local market price (Setup tab) logged within\n"
-                          "± this many days of the local purchase date:",
-                     font=("Segoe UI", 9), justify="left").pack(anchor="w")
-            f2b = tk.Frame(f2)
-            f2b.pack(anchor="w", pady=(4, 0))
-            tk.Label(f2b, text="± days:", font=("Segoe UI", 9)).pack(side="left")
-            mkt_win_var = tk.StringVar(value="14")
-            tk.Entry(f2b, textvariable=mkt_win_var, width=6,
-                     font=("Segoe UI", 10)).pack(side="left", padx=(6, 0))
-            tk.Label(f2b, text="  (default: 14)",
-                     font=("Segoe UI", 9), foreground="#888").pack(side="left")
-            tk.Label(f2,
-                     text="If no price found in window → shows '—' for that row.",
-                     font=("Segoe UI", 9), foreground="#666",
-                     justify="left").pack(anchor="w", pady=(4, 0))
-
-            confirmed = tk.BooleanVar(value=False)
-            def _confirm():
-                confirmed.set(True)
-                win_dlg.destroy()
-            def _cancel():
-                win_dlg.destroy()
-            btn_f = tk.Frame(win_dlg)
-            btn_f.pack(pady=(0, 12))
-            tk.Button(btn_f, text="OK", width=10,
-                      command=_confirm).pack(side="left", padx=4)
-            tk.Button(btn_f, text="Cancel", width=10,
-                      command=_cancel).pack(side="left", padx=4)
-            self.wait_window(win_dlg)
-            if not confirmed.get():
-                return
-            try:
-                window_days = max(1, int(imp_win_var.get()))
-            except ValueError:
-                window_days = 45
-            try:
-                MKT_WINDOW = max(1, int(mkt_win_var.get()))
-            except ValueError:
-                MKT_WINDOW = 14
-
             fp = filedialog.asksaveasfilename(
                 initialdir=get_default_export_dir(),
                 initialfile=f"LocalPurchases_{now_ts()[:10]}.xlsx",
@@ -4795,906 +4838,360 @@ class App(tk.Tk):
                 title="Export Local Purchases")
             if not fp:
                 return
-
-            wb = Workbook()
-            wb.calculation.calcOnSave     = True
-            wb.calculation.fullCalcOnLoad = True
-
-            thin  = Side(style="thin",   color="CCCCCC")
-            med   = Side(style="medium", color="1A6EBD")
-            brd   = Border(left=thin, right=thin, top=thin, bottom=thin)
-            brd_h = Border(left=med,  right=med,  top=med,  bottom=med)
-
-            hdr_fill = PatternFill("solid", fgColor="1A2D40")
-            tot_fill = PatternFill("solid", fgColor="D0DCF5")
-            grn_fill = PatternFill("solid", fgColor="E6F4EA")
-            red_fill = PatternFill("solid", fgColor="FDECEA")
-            inp_fill = PatternFill("solid", fgColor="FFF9E6")
-            blue_fill= PatternFill("solid", fgColor="E8F0FE")
-            white    = PatternFill("solid", fgColor="FFFFFF")
-
-            hdr_f  = Font(name="Calibri", bold=True, color="FFFFFF", size=10)
-            tot_f  = Font(name="Calibri", bold=True, size=10)
-            inp_f  = Font(name="Calibri", size=10, color="0000FF")
-            cal_f  = Font(name="Calibri", size=10, color="000000")
-            title_f= Font(name="Calibri", bold=True, size=13, color="1A2D40")
-            ctr    = Alignment(horizontal="center", vertical="center")
-            right  = Alignment(horizontal="right",  vertical="center")
-            left_a = Alignment(horizontal="left",   vertical="center")
-
-            def hdr(ws, row, col, text, w=None):
-                c = ws.cell(row=row, column=col, value=text)
-                c.font, c.fill, c.alignment, c.border = hdr_f, hdr_fill, ctr, brd_h
-                if w: ws.column_dimensions[get_column_letter(col)].width = w
-                return c
-
-            def cell(ws, row, col, value, fmt=None, bold=False,
-                     fill=None, align=None, fc="000000"):
-                c = ws.cell(row=row, column=col, value=value)
-                c.font   = Font(name="Calibri", size=10, bold=bold, color=fc)
-                c.border = brd
-                c.alignment = align or right
-                if fmt:  c.number_format = fmt
-                if fill: c.fill = fill
-                return c
-
-            # ── Sheet 1: Local Purchases ──────────────────────────────
-            ws1 = wb.active
-            ws1.title = "Local Purchases"
-            ws1.freeze_panes = "A3"
-            ws1.row_dimensions[1].height = 26
-
-            ws1.merge_cells("A1:R1")
-            t = ws1["A1"]
-            t.value = f"Local Purchases — {now_ts()[:10]}"
-            t.font, t.alignment = title_f, left_a
-
-            cols = [
-                ("#",          5,  5),
-                ("Date",       12, 12),
-                ("Supplier",   20, 20),
-                ("Commodity",  12, 12),
-                ("Origin",     10, 10),
-                ("Qty MT",     10, 10),
-                ("Price EGP/MT\n(excl. transport)", 14, 16),
-                ("Transport\nEGP/MT",               13, 13),
-                ("All-in EGP/MT\n(incl. transport)", 14, 17),
-                ("Total Cost EGP\n(all-in × qty)",   15, 16),
-                (f"Mkt Closest\n±{MKT_WINDOW}d (EGP/MT)", 14, 16),
-                (f"vs Closest\n− below  + above",   13, 15),
-                (f"Mkt Avg\n±{MKT_WINDOW}d (EGP/MT)", 14, 16),
-                (f"vs Avg\n− below  + above",        13, 15),
-                ("CBOT Ref ¢",  11, 11),
-                ("FX Ref",      10, 10),
-                ("Local vs Import\n− cheaper  + costlier", 14, 22),
-                ("Notes",       30, 30),
-            ]
-            for ci, (label, _, w) in enumerate(cols, 1):
-                hdr(ws1, 2, ci, label, w)
-            ws1.row_dimensions[2].height = 30
-
-            # Legend row explaining transport
-            leg0 = 3
-            ws1.merge_cells(f"A{leg0}:P{leg0}")
-            l0 = ws1.cell(row=leg0, column=1,
-                value=("ℹ  Price (excl. transport) = bare purchase price as quoted by supplier.   "
-                       "Transport EGP/MT = inland freight to plant.   "
-                       "All-in = Price + Transport — this is the true landed cost used in all comparisons.   "
-                       "0.00 transport = included in supplier price or not applicable."))
-            l0.font = Font(name="Calibri", size=8, italic=True, color="555555")
-            l0.fill = PatternFill("solid", fgColor="FFFDE7")
-            l0.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
-            ws1.row_dimensions[leg0].height = 20   # taller header to fit two lines
-
-            lps = sorted(self.state_obj.get("local_purchases", []),
-                         key=lambda r: r.get("date", ""))
-            imp_cost    = {}   # cm -> [own_after, ...]
-            imp_details = {}   # cm -> [{ref, cif, fx, disc, clr, frt, own}, ...]
-            for c2 in self.state_obj.get("contracts", {}).values():
-                cm  = (c2.get("commodity") or "").upper()
-                ci2 = self._contract_cif_usd(c2)
-                fx2 = to_float(c2.get("delivery_fx"), None) or to_float(
-                    (self.state_obj.get("market_data",{}).get("fx",{}) or {}).get("price"), None)
-                d2  = to_float(c2.get("discharge_egp_mt"), 0) or 0
-                cl2 = to_float(c2.get("clearance_egp_mt"), 0) or 0
-                fr2 = to_float(c2.get("freight_egp_mt"),   0) or 0
-                if ci2 and fx2:
-                    own = ci2 * fx2 + d2 + cl2 + fr2
-                    imp_cost.setdefault(cm, []).append(own)
-                    imp_details.setdefault(cm, []).append({
-                        "ref":  (c2.get("name") or c2.get("ref") or
-                                 c2.get("contract_ref") or cid or "—"),
-                        "cif":  ci2, "fx": fx2,
-                        "disc": d2,  "clr": cl2, "frt": fr2, "own": own,
-                        "status": (c2.get("status") or "Open"),
-                        "delivery_date": (c2.get("storage_start") or
-                                          c2.get("delivery_date") or ""),
-                    })
-            imp_avg = {k: sum(v)/len(v) for k, v in imp_cost.items() if v}
-
-            tot_qty = tot_cost = 0.0
-            for ri, rec in enumerate(lps, 4):
-                qty   = to_float(rec.get("qty_mt"),       0) or 0
-                price = to_float(rec.get("price_egp_mt"), 0) or 0
-                trans = to_float(rec.get("transport_egp_mt"), None)
-                if trans is None:
-                    trans = get_default_local_transport_egp_mt(self.state_obj)
-                cm    = (rec.get("commodity") or "").upper()
-                base  = cm.split("-")[0] if "-" in cm else cm
-                allin = price + trans
-                total = allin * qty
-                ia    = imp_avg.get(cm) or imp_avg.get(base+"-BRZ") or imp_avg.get(base)
-                vs    = (allin - ia) if ia else None
-
-                # Local market price on/before purchase date
-                # Local market: closest entry AND avg of all within ±window
-                mkt_closest = None
-                mkt_avg_s   = None
-                mkt_date_s  = ""
-                # MKT_WINDOW set by dialog above
-                try:
-                    import datetime as _dt3
-                    pur_ds = _dt3.date.fromisoformat(rec.get("date",""))
-                    lo_s = pur_ds - _dt3.timedelta(days=MKT_WINDOW)
-                    hi_s = pur_ds + _dt3.timedelta(days=MKT_WINDOW)
-                    for ck in ([cm] if cm == base else [cm, base]):
-                        pairs_s = self._local_price_map(ck)
-                        in_win  = [(pd_s, pp_s) for pd_s, pp_s in pairs_s
-                                   if lo_s <= pd_s <= hi_s]
-                        if in_win:
-                            # closest
-                            best = min(in_win,
-                                       key=lambda x: abs((x[0]-pur_ds).days))
-                            mkt_closest = best[1]
-                            mkt_date_s  = best[0].isoformat()
-                            # average
-                            mkt_avg_s = sum(p for _, p in in_win) / len(in_win)
-                            break
-                except Exception as _e_3884:
-                    log_exception(_e_3884, "_lp_export_excel")
-                vs_closest = (allin - mkt_closest) if mkt_closest is not None else None
-                vs_avg_s   = (allin - mkt_avg_s)   if mkt_avg_s   is not None else None
-
-                cell(ws1, ri, 1,  rec.get("id",""),       align=left_a)
-                cell(ws1, ri, 2,  rec.get("date",""),     align=ctr)
-                cell(ws1, ri, 3,  rec.get("supplier",""), align=left_a)
-                cell(ws1, ri, 4,  cm,                     align=ctr)
-                cell(ws1, ri, 5,  rec.get("origin",""),   align=ctr)
-                cell(ws1, ri, 6,  qty,   "#,##0")
-                cell(ws1, ri, 7,  price, "#,##0")
-                trans_c = cell(ws1, ri, 8, trans, "#,##0.00")
-                if trans == 0:
-                    trans_c.fill = PatternFill("solid", fgColor="FFF9E6")
-                    trans_c.font = Font(name="Calibri", size=10,
-                                        color="B36000", italic=True)
-                cell(ws1, ri, 9,  allin,     "#,##0", bold=True)
-                cell(ws1, ri, 10, allin*qty, "#,##0")
-
-                # Col 11 — Closest market price
-                if mkt_closest is not None:
-                    cell(ws1, ri, 11, mkt_closest, "#,##0", fc="B36000")
-                else:
-                    cell(ws1, ri, 11, f"—±{MKT_WINDOW}d", align=ctr, fc="AAAAAA")
-
-                # Col 12 — vs Closest
-                if vs_closest is not None:
-                    cell(ws1, ri, 12, vs_closest, "+#,##0;-#,##0;-",
-                         bold=True,
-                         fill=grn_fill if vs_closest < 0 else red_fill,
-                         fc="1A7A1A" if vs_closest < 0 else "C0392B")
-                else:
-                    cell(ws1, ri, 12, "—", align=ctr)
-
-                # Col 13 — Avg market price
-                if mkt_avg_s is not None:
-                    cell(ws1, ri, 13, mkt_avg_s, "#,##0", fc="B36000")
-                else:
-                    cell(ws1, ri, 13, f"—±{MKT_WINDOW}d", align=ctr, fc="AAAAAA")
-
-                # Col 14 — vs Avg
-                if vs_avg_s is not None:
-                    cell(ws1, ri, 14, vs_avg_s, "+#,##0;-#,##0;-",
-                         bold=True,
-                         fill=grn_fill if vs_avg_s < 0 else red_fill,
-                         fc="1A7A1A" if vs_avg_s < 0 else "C0392B")
-                else:
-                    cell(ws1, ri, 14, "—", align=ctr)
-
-                cb = rec.get("cbot_ref"); fxr = rec.get("fx_ref")
-                cell(ws1, ri, 15, cb  if cb  else None, "0.00")
-                cell(ws1, ri, 16, fxr if fxr else None, "0.0000")
-                if vs is not None:
-                    cell(ws1, ri, 17, vs, "+#,##0;-#,##0;-",
-                         bold=True,
-                         fill=grn_fill if vs < 0 else red_fill,
-                         fc="1A7A1A" if vs < 0 else "C0392B")
-                else:
-                    cell(ws1, ri, 17, "—", align=ctr)
-                cell(ws1, ri, 18, rec.get("note",""), align=left_a)
-                tot_qty  += qty
-                tot_cost += total
-
-            tr = len(lps) + 4
-            for ci in range(1, 19):
-                c3 = ws1.cell(row=tr, column=ci)
-                c3.fill, c3.font, c3.border, c3.alignment = (
-                    tot_fill, tot_f, brd_h, right)
-            ws1.cell(row=tr, column=2,  value="TOTAL").alignment = left_a
-            ws1.cell(row=tr, column=6,  value=tot_qty).number_format  = "#,##0"
-            ws1.cell(row=tr, column=10, value=tot_cost).number_format = "#,##0"
-
-            # ── Reference section: how the import benchmark was built ──
-            note_fill  = PatternFill("solid", fgColor="FFFDE7")
-            note_font  = Font(name="Calibri", size=9, italic=True, color="555555")
-            ref_hdr_f  = Font(name="Calibri", size=9, bold=True, color="FFFFFF")
-            ref_hdr_bg = PatternFill("solid", fgColor="4A4A4A")
-            ref_val_f  = Font(name="Calibri", size=9, color="000000")
-            ref_sub_f  = Font(name="Calibri", size=9, bold=True, color="1A2D40")
-            ref_sub_bg = PatternFill("solid", fgColor="E8F0FE")
-
-            # Sign legend
-            leg_row = tr + 2
-            ws1.merge_cells(f"A{leg_row}:R{leg_row}")
-            leg = ws1.cell(row=leg_row, column=1,
-                value="📌  'Local vs Import' sign:   "
-                      "NEGATIVE (green) = local all-in BELOW import avg → local was cheaper.   "
-                      "POSITIVE (red) = local ABOVE import avg → import was the better deal.")
-            leg.font = note_font
-            leg.fill = note_fill
-            leg.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
-            ws1.row_dimensions[leg_row].height = 18
-
-            # Per-commodity detail table
-            detail_row = leg_row + 2
-            ws1.merge_cells(f"A{detail_row}:R{detail_row}")
-            sec = ws1.cell(row=detail_row, column=1,
-                value="📊  Import Benchmark Detail — contracts used to build the avg vs which local purchases are compared")
-            sec.font = Font(name="Calibri", size=10, bold=True, color="1A2D40")
-            sec.fill = PatternFill("solid", fgColor="D0DCF5")
-            ws1.row_dimensions[detail_row].height = 18
-            detail_row += 1
-
-            # Table headers
-            det_cols = ["Commodity","Contract Ref","Status",
-                        "CIF ($/MT)","FX (EGP/$)","Discharge","Clearance",
-                        "Freight","Own-after (EGP/MT)","Formula"]
-            for ci, h in enumerate(det_cols, 1):
-                c4 = ws1.cell(row=detail_row, column=ci, value=h)
-                c4.font, c4.fill, c4.border = ref_hdr_f, ref_hdr_bg, brd
-                c4.alignment = ctr
-            ws1.row_dimensions[detail_row].height = 16
-            detail_row += 1
-
-            if imp_details:
-                for cm_key in sorted(imp_details.keys()):
-                    contracts_list = imp_details[cm_key]
-                    avg_val = imp_avg.get(cm_key, 0)
-                    for det in contracts_list:
-                        formula_str = (
-                            f"${det['cif']:.2f} × {det['fx']:.4f} + "
-                            f"{det['disc']:.0f} + {det['clr']:.0f} + "
-                            f"{det['frt']:.0f} = EGP {det['own']:,.0f}")
-                        row_vals = [
-                            cm_key, det["ref"], det["status"],
-                            det["cif"], det["fx"],
-                            det["disc"], det["clr"], det["frt"],
-                            det["own"], formula_str,
-                        ]
-                        for ci, v in enumerate(row_vals, 1):
-                            c5 = ws1.cell(row=detail_row, column=ci, value=v)
-                            c5.font, c5.border = ref_val_f, brd
-                            c5.alignment = (
-                                left_a if ci in (1, 2, 3, 10) else right)
-                            if ci in (4,):   c5.number_format = "0.00"
-                            if ci in (5,):   c5.number_format = "0.0000"
-                            if ci in (6,7,8): c5.number_format = "#,##0"
-                            if ci == 9:
-                                c5.number_format = "#,##0"
-                                c5.font = Font(name="Calibri", size=9,
-                                               bold=True, color="1A2D40")
-                        ws1.row_dimensions[detail_row].height = 15
-                        detail_row += 1
-
-                    # Commodity avg summary row
-                    ws1.merge_cells(f"A{detail_row}:H{detail_row}")
-                    ca = ws1.cell(row=detail_row, column=1,
-                        value=f"  ▶  {cm_key} blended avg  "
-                              f"({len(contracts_list)} contract{'s' if len(contracts_list)>1 else ''})  "
-                              f"— this is the benchmark the '{cm_key}' local purchases are compared against")
-                    ca.font, ca.fill, ca.border = ref_sub_f, ref_sub_bg, brd_h
-                    ca.alignment = left_a
-                    cv2 = ws1.cell(row=detail_row, column=9, value=avg_val)
-                    cv2.font, cv2.fill, cv2.border = ref_sub_f, ref_sub_bg, brd_h
-                    cv2.number_format = "#,##0"
-                    cv2.alignment = right
-                    for ci in (1,2,3,4,5,6,7,8,10):
-                        ws1.cell(row=detail_row, column=ci).fill = ref_sub_bg
-                        ws1.cell(row=detail_row, column=ci).border = brd_h
-                    ws1.row_dimensions[detail_row].height = 16
-                    detail_row += 1
-            else:
-                ws1.merge_cells(f"A{detail_row}:R{detail_row}")
-                ws1.cell(row=detail_row, column=1,
-                         value="No import contracts found — no benchmark available").font = note_font
-
-            # ── Sheet 2: CBOT Parity Calculator ──────────────────────
-            ws2 = wb.create_sheet("CBOT Parity Calculator")
-            ws2.freeze_panes = "A4"
-
-            ws2.merge_cells("A1:G1")
-            t2 = ws2["A1"]
-            t2.value = "CBOT Import Parity Calculator — edit blue cells to run scenarios"
-            t2.font, t2.alignment = title_f, left_a
-
-            ws2.merge_cells("A2:G2")
-            ws2["A2"].value = (
-                "Formula: (CBOT + Premium) × 0.3937 × FX  +  "
-                "Discharge + Clearance + Freight  =  Import Parity EGP/MT")
-            ws2["A2"].font      = Font(name="Calibri", size=9, italic=True, color="666666")
-            ws2["A2"].alignment = left_a
-
-            for col, w in zip("ABCDEFG", [22, 14, 10, 28, 16, 16, 16]):
-                ws2.column_dimensions[col].width = w
-
-            for ci, h in enumerate(["Parameter","Value","Unit","Note",
-                                     "Import Parity","vs Local",""], 1):
-                hdr(ws2, 3, ci, h)
-
-            inputs = [
-                ("CBOT Futures",       415.50, "¢/bu",   "Live CBOT quote"),
-                ("Premium",              0.00, "¢/bu",   "Basis / supplier premium"),
-                ("FX Rate",             50.00, "EGP/$",  "EGP per USD at delivery"),
-                ("Discharge",          348.00, "EGP/MT", "Port discharge"),
-                ("Clearance",          717.00, "EGP/MT", "Customs clearance"),
-                ("Freight",            301.74, "EGP/MT", "Dekheila → Nubaria (SFM default)"),
-                ("Local All-in Price",   0.00, "EGP/MT", "Local market all-in — leave 0 to skip comparison"),
-            ]
-            inp_row = {}
-            for ri, (lbl, val, unit, note) in enumerate(inputs, 4):
-                ws2.row_dimensions[ri].height = 18
-                c4 = ws2.cell(row=ri, column=1, value=lbl)
-                c4.font, c4.border = Font(name="Calibri", bold=True, size=10), brd
-                c4.alignment = left_a
-                cv = ws2.cell(row=ri, column=2, value=val)
-                cv.font, cv.fill, cv.border, cv.number_format, cv.alignment = (
-                    inp_f, inp_fill, brd_h, "0.00", right)
-                for ci, v in enumerate([unit, note], 3):
-                    cx = ws2.cell(row=ri, column=ci, value=v)
-                    cx.font   = Font(name="Calibri", size=9, color="666666")
-                    cx.border = brd
-                    cx.alignment = left_a
-                inp_row[lbl] = ri
-
-            par = len(inputs) + 5
-            ws2.row_dimensions[par].height = 24
-            lbl_c = ws2.cell(row=par, column=1, value="▶  Import Parity")
-            lbl_c.font, lbl_c.border = Font(name="Calibri", bold=True, size=12, color="1A2D40"), brd_h
-
-            rb = inp_row["CBOT Futures"];  rp = inp_row["Premium"]
-            rf = inp_row["FX Rate"];       rd = inp_row["Discharge"]
-            rc = inp_row["Clearance"];     rr = inp_row["Freight"]
-            rl = inp_row["Local All-in Price"]
-
-            par_f = f"=(B{rb}+B{rp})*0.3937*B{rf}+B{rd}+B{rc}+B{rr}"
-            pc = ws2.cell(row=par, column=5, value=par_f)
-            pc.font = Font(name="Calibri", bold=True, size=13, color="1A2D40")
-            pc.fill = PatternFill("solid", fgColor="D0DCF5")
-            pc.border, pc.number_format, pc.alignment = brd_h, "#,##0", right
-
-            vs_f = f"=IF(B{rl}=0,\"-\",B{rl}-E{par})"
-            vc = ws2.cell(row=par, column=6, value=vs_f)
-            vc.font   = Font(name="Calibri", bold=True, size=13)
-            vc.border = brd_h
-            vc.number_format = '+#,##0;-#,##0;"-"'
-            vc.alignment = right
-            ws2.conditional_formatting.add(
-                f"F{par}",
-                CellIsRule(operator="greaterThan", formula=["0"],
-                           font=Font(color="1A7A1A", bold=True),
-                           fill=grn_fill))
-            ws2.conditional_formatting.add(
-                f"F{par}",
-                CellIsRule(operator="lessThan", formula=["0"],
-                           font=Font(color="C0392B", bold=True),
-                           fill=red_fill))
-
-            # Scenario matrix
-            sc = par + 3
-            ws2.cell(row=sc-1, column=1,
-                     value="📋 Scenario Matrix — parity at different CBOT & FX combinations").font = Font(
-                name="Calibri", bold=True, size=10, color="1A2D40")
-            fx_s   = [47.0, 48.5, 50.0, 51.5, 53.0]
-            cbot_s = [380, 400, 415, 430, 450]
-            hdr(ws2, sc, 1, "CBOT ¢ \\ FX →", 22)
-            for ci, fx in enumerate(fx_s, 2):
-                hdr(ws2, sc, ci, f"FX {fx:.1f}", 14)
-            for ri2, cbt in enumerate(cbot_s, sc+1):
-                ws2.row_dimensions[ri2].height = 16
-                c0 = ws2.cell(row=ri2, column=1, value=f"CBOT {cbt}¢")
-                c0.font   = Font(name="Calibri", bold=True, size=10)
-                c0.fill   = blue_fill
-                c0.border = brd
-                c0.alignment = left_a
-                for ci2, fx in enumerate(fx_s, 2):
-                    sf = f"=({cbt}+B{rp})*0.3937*{fx}+B{rd}+B{rc}+B{rr}"
-                    sc2 = ws2.cell(row=ri2, column=ci2, value=sf)
-                    sc2.font, sc2.border = cal_f, brd
-                    sc2.number_format = "#,##0"
-                    sc2.alignment = right
-
-            # ════════════════════════════════════════════════════════
-            # SHEET 3 — Purchase Detail (one block per purchase)
-            # ════════════════════════════════════════════════════════
-            ws3 = wb.create_sheet("Purchase Detail")
-
-            ws3.column_dimensions["A"].width = 26
-            ws3.column_dimensions["B"].width = 14
-            ws3.column_dimensions["C"].width = 14
-            ws3.column_dimensions["D"].width = 13
-            ws3.column_dimensions["E"].width = 14  # FX — editable
-            ws3.column_dimensions["F"].width = 18  # Own-after — formula
-            ws3.column_dimensions["G"].width = 36
-
-            ws3.merge_cells("A1:G1")
-            t3 = ws3["A1"]
-            t3.value = (f"Local Purchase — Case by Case Detail   |   "
-                        f"{now_ts()[:10]}   |   "
-                        f"Import window: ±{window_days} days   |   "
-                        f"Market window: ±{MKT_WINDOW} days   |   "
-                        f"Edit blue FX cells → own-after, avg & verdict update automatically")
-            t3.font = Font(name="Calibri", bold=True, size=12, color="1A2D40")
-            t3.alignment = left_a
-            ws3.row_dimensions[1].height = 26
-
-            ws3.merge_cells("A2:G2")
-            leg2 = ws3["A2"]
-            leg2.value = ("🔵 Blue cells = FX (EGP/$) — change any of them and press Enter.   "
-                          "⚫ Black = formula (auto-recalculates).   "
-                          "Column F (Own-after) = CIF × FX + Discharge + Clearance + Freight")
-            leg2.font      = Font(name="Calibri", size=9, italic=True, color="555555")
-            leg2.alignment = left_a
-            ws3.row_dimensions[2].height = 16
-
-            # Styles
-            pur_hdr_bg  = PatternFill("solid", fgColor="1A2D40")
-            pur_hdr_f   = Font(name="Calibri", bold=True, color="FFFFFF", size=11)
-            field_lbl_f = Font(name="Calibri", bold=True, size=9, color="444444")
-            field_val_f = Font(name="Calibri", size=10, color="1A2D40")
-            imp_sub_f   = Font(name="Calibri", bold=True, size=8, color="2C5F8A")
-            imp_row_bg  = PatternFill("solid", fgColor="EBF3FB")
-            imp_avg_bg  = PatternFill("solid", fgColor="D0DCF5")
-            imp_avg_f2  = Font(name="Calibri", bold=True, size=10, color="1A2D40")
-            inp_fill2   = PatternFill("solid", fgColor="FFF9E6")
-            inp_f2      = Font(name="Calibri", size=10, color="0000FF", bold=True)
-            cal_f2      = Font(name="Calibri", size=10, color="000000")
-            verdict_grn = PatternFill("solid", fgColor="E6F4EA")
-            verdict_red = PatternFill("solid", fgColor="FDECEA")
-            sep_bg      = PatternFill("solid", fgColor="F5F5F5")
-
-            cur_row = 4
-
-            for p_idx, rec in enumerate(lps, 1):
-                qty   = to_float(rec.get("qty_mt"),       0) or 0
-                price = to_float(rec.get("price_egp_mt"), 0) or 0
-                trans = to_float(rec.get("transport_egp_mt"), None)
-                if trans is None:
-                    trans = get_default_local_transport_egp_mt(self.state_obj)
-                cm    = (rec.get("commodity") or "").upper()
-                base  = cm.split("-")[0] if "-" in cm else cm
-                allin = price + trans
-
-                # ── Window filtering ──────────────────────────────────
-                ia = None
-                det_list = []
-                window_label = ""
-                fallback_used = False
-                try:
-                    import datetime as _dt
-                    pur_d = _dt.date.fromisoformat(rec.get("date",""))
-                    lo = pur_d - _dt.timedelta(days=window_days)
-                    hi = pur_d + _dt.timedelta(days=window_days)
-                    def _in_win(det):
-                        ds = det.get("delivery_date","")
-                        if not ds: return False
-                        try: return lo <= _dt.date.fromisoformat(ds) <= hi
-                        except: return False
-                    all_det = (imp_details.get(cm) or
-                               imp_details.get(base+"-BRZ") or
-                               imp_details.get(base) or [])
-                    det_list = [d for d in all_det if _in_win(d)]
-                    if det_list:
-                        ia = sum(d["own"] for d in det_list) / len(det_list)
-                        window_label = (f"±{window_days}-day window  "
-                                        f"({lo} → {hi})  —  "
-                                        f"{len(det_list)} contract(s) matched")
-                    else:
-                        det_list = all_det
-                        ia = (imp_avg.get(cm) or imp_avg.get(base+"-BRZ") or imp_avg.get(base))
-                        fallback_used = True
-                        window_label = (f"No contracts within ±{window_days} days  "
-                                        f"→  FALLBACK: full portfolio avg  "
-                                        f"({len(det_list)} contracts)")
-                except Exception:
-                    det_list = (imp_details.get(cm) or imp_details.get(base+"-BRZ") or imp_details.get(base) or [])
-                    ia = (imp_avg.get(cm) or imp_avg.get(base+"-BRZ") or imp_avg.get(base))
-                    fallback_used = True
-                    window_label = "Could not parse purchase date — using full portfolio avg"
-
-                vs = (allin - ia) if ia is not None else None
-
-                # ── Purchase header ───────────────────────────────────
-                ws3.merge_cells(f"A{cur_row}:G{cur_row}")
-                ph = ws3.cell(row=cur_row, column=1,
-                    value=f"  #{p_idx}  |  {rec.get('date','')}  |  "
-                          f"{rec.get('supplier','')}  |  {cm}  |  "
-                          f"Qty: {qty:,.0f} MT")
-                ph.font, ph.fill, ph.alignment = pur_hdr_f, pur_hdr_bg, left_a
-                ws3.row_dimensions[cur_row].height = 20
-                cur_row += 1
-
-                # ── Static purchase info rows ─────────────────────────
-                def _info(label, value, hint=""):
-                    lc = ws3.cell(row=cur_row, column=1, value=label)
-                    lc.font, lc.border, lc.alignment = field_lbl_f, brd, left_a
-                    vc2 = ws3.cell(row=cur_row, column=2, value=value)
-                    vc2.font, vc2.border, vc2.alignment = field_val_f, brd, left_a
-                    if hint:
-                        hc = ws3.cell(row=cur_row, column=3, value=hint)
-                        hc.font   = Font(name="Calibri", size=8, italic=True, color="888888")
-                        hc.border = brd
-                        hc.alignment = left_a
-                    ws3.row_dimensions[cur_row].height = 15
-
-                _info("Date",              rec.get("date",""))
-                cur_row += 1
-                _info("Supplier / Mill",   rec.get("supplier",""))
-                cur_row += 1
-                _info("Commodity",         cm)
-                cur_row += 1
-                _info("Qty",               f"{qty:,.0f} MT")
-                cur_row += 1
-                _info("Price (excl. transport)", price,
-                      "bare price as quoted by supplier")
-                ws3.cell(row=cur_row-1, column=2).number_format = "#,##0"
-                cur_row += 1
-                _info("Transport (EGP/MT)", trans,
-                      ("Dekheila→Nubaria" if cm=="SFM" else
-                       "0.00 = included in supplier price" if trans == 0 else ""))
-                ws3.cell(row=cur_row-1, column=2).number_format = "#,##0.00"
-                cur_row += 1
-
-                # ── Local market price on purchase date (Setup tab) ───
-                import datetime as _dt2
-                mkt_price     = None
-                mkt_avg_p     = None
-                mkt_date_used = ""
-                MKT_WIN = MKT_WINDOW  # set by dialog above
-                try:
-                    pur_d2 = _dt2.date.fromisoformat(rec.get("date",""))
-                    lo2 = pur_d2 - _dt2.timedelta(days=MKT_WIN)
-                    hi2 = pur_d2 + _dt2.timedelta(days=MKT_WIN)
-                    for ck in ([cm] if cm == base else [cm, base]):
-                        pairs = self._local_price_map(ck)
-                        if not pairs:
-                            continue
-                        in_win2 = [(pd2, pp2) for pd2, pp2 in pairs
-                                   if lo2 <= pd2 <= hi2]
-                        if in_win2:
-                            best2 = min(in_win2,
-                                        key=lambda x: abs((x[0]-pur_d2).days))
-                            mkt_price     = best2[1]
-                            mkt_date_used = best2[0].isoformat()
-                            mkt_avg_p = sum(p for _, p in in_win2) / len(in_win2)
-                            break
-                except Exception as _e_4320:
-                    log_exception(_e_4320, "_lp_export_excel")
-
-                vs_mkt   = (allin - mkt_price) if mkt_price is not None else None
-                vs_mkt_a = (allin - mkt_avg_p) if mkt_avg_p is not None else None
-
-                # All-in row — store its cell address for formula refs later
-                allin_row = cur_row
-                _info("All-in (EGP/MT)",  allin,
-                      f"EGP {price:,.0f} (price)  +  EGP {trans:,.2f} (transport)  =  EGP {allin:,.0f}  ← used in all comparisons")
-                ws3.cell(row=allin_row, column=2).number_format = "#,##0"
-                ws3.cell(row=allin_row, column=2).font = Font(
-                    name="Calibri", bold=True, size=10, color="1A2D40")
-                cur_row += 1
-
-                # Local market price on date row
-                mkt_row = cur_row
-                if mkt_price is not None:
-                    mkt_hint = (f"closest entry within ±{MKT_WIN} days  "
-                                f"(matched: {mkt_date_used})")
-                    _info(f"Mkt Closest ±{MKT_WIN}d", mkt_price, mkt_hint)
-                    ws3.cell(row=cur_row-1, column=2).number_format = "#,##0"
-                    ws3.cell(row=cur_row-1, column=2).font = Font(
-                        name="Calibri", size=10, color="B36000")
-                    cur_row += 1
-
-                    if mkt_avg_p is not None:
-                        _info(f"Mkt Avg ±{MKT_WIN}d", round(mkt_avg_p),
-                              f"average of all entries within window")
-                        ws3.cell(row=cur_row-1, column=2).number_format = "#,##0"
-                        ws3.cell(row=cur_row-1, column=2).font = Font(
-                            name="Calibri", size=10, color="B36000")
-                        cur_row += 1
-
-                    # vs Closest
-                    vs_mkt_row = cur_row
-                    vs_mkt_lbl = ws3.cell(row=cur_row, column=1,
-                                          value=f"vs Closest (±{MKT_WIN}d)")
-                    vs_mkt_lbl.font   = Font(name="Calibri", bold=True,
-                                             size=9, color="444444")
-                    vs_mkt_lbl.border = brd
-                    vs_mkt_lbl.alignment = left_a
-                    vs_mkt_val = ws3.cell(row=cur_row, column=2, value=vs_mkt)
-                    vs_mkt_val.number_format = "+#,##0;-#,##0;0"
-                    vs_mkt_val.border = brd
-                    vs_mkt_val.alignment = right
-                    if vs_mkt < 0:
-                        vs_mkt_val.font = Font(name="Calibri", bold=True,
-                                               size=10, color="1A7A1A")
-                        timing_txt = (
-                            f"✔  GOOD TIMING  —  bought EGP {abs(vs_mkt):,.0f}/MT "
-                            f"BELOW closest market ({abs(vs_mkt)/mkt_price*100:.1f}% discount)")
-                        t_fill = PatternFill("solid", fgColor="E6F4EA")
-                        t_font = Font(name="Calibri", bold=True, size=9, color="1A7A1A")
-                    elif vs_mkt == 0:
-                        vs_mkt_val.font = Font(name="Calibri", size=10, color="B36000")
-                        timing_txt = "⚖  AT MARKET  —  bought exactly at the going local rate"
-                        t_fill = PatternFill("solid", fgColor="FFF8E1")
-                        t_font = Font(name="Calibri", bold=True, size=9, color="B36000")
-                    else:
-                        vs_mkt_val.font = Font(name="Calibri", bold=True,
-                                               size=10, color="C0392B")
-                        timing_txt = (
-                            f"✘  ABOVE MARKET  —  paid EGP {abs(vs_mkt):,.0f}/MT "
-                            f"MORE than closest market ({abs(vs_mkt)/mkt_price*100:.1f}% premium)")
-                        t_fill = PatternFill("solid", fgColor="FDECEA")
-                        t_font = Font(name="Calibri", bold=True, size=9, color="C0392B")
-                    hint_c = ws3.cell(row=cur_row, column=3, value=timing_txt)
-                    hint_c.font, hint_c.fill, hint_c.border = t_font, t_fill, brd
-                    hint_c.alignment = left_a
-                    ws3.merge_cells(f"C{cur_row}:G{cur_row}")
-                    ws3.row_dimensions[cur_row].height = 15
-                    cur_row += 1
-
-                    # vs Avg
-                    if vs_mkt_a is not None:
-                        va_lbl = ws3.cell(row=cur_row, column=1,
-                                          value=f"vs Avg (±{MKT_WIN}d)")
-                        va_lbl.font   = Font(name="Calibri", bold=True,
-                                             size=9, color="444444")
-                        va_lbl.border = brd
-                        va_lbl.alignment = left_a
-                        va_val = ws3.cell(row=cur_row, column=2, value=vs_mkt_a)
-                        va_val.number_format = "+#,##0;-#,##0;0"
-                        va_val.border = brd
-                        va_val.alignment = right
-                        va_col = "1A7A1A" if vs_mkt_a < 0 else "C0392B"
-                        va_val.font = Font(name="Calibri", bold=True,
-                                           size=10, color=va_col)
-                        va_fill = PatternFill("solid",
-                                              fgColor="E6F4EA" if vs_mkt_a < 0
-                                              else "FDECEA")
-                        va_hint = ws3.cell(row=cur_row, column=3,
-                            value=(f"{'✔' if vs_mkt_a<0 else '✘'}  "
-                                   f"vs window average EGP {mkt_avg_p:,.0f}/MT"))
-                        va_hint.font = Font(name="Calibri", bold=True,
-                                            size=9, color=va_col)
-                        va_hint.fill = va_fill
-                        va_hint.border = brd
-                        va_hint.alignment = left_a
-                        ws3.merge_cells(f"C{cur_row}:G{cur_row}")
-                        ws3.row_dimensions[cur_row].height = 15
-                        cur_row += 1
-                _info("Total Cost (EGP)",  allin * qty,
-                      f"all-in × {qty:,.0f} MT")
-                ws3.cell(row=cur_row-1, column=2).number_format = "#,##0"
-                cur_row += 1
-
-                if rec.get("cbot_ref"):
-                    _info("CBOT Ref (¢/bu)", rec["cbot_ref"], "at time of purchase")
-                    ws3.cell(row=cur_row-1, column=2).number_format = "0.00"
-                    cur_row += 1
-                if rec.get("fx_ref"):
-                    _info("FX Ref (EGP/$)", rec["fx_ref"], "at time of purchase")
-                    ws3.cell(row=cur_row-1, column=2).number_format = "0.0000"
-                    cur_row += 1
-                if rec.get("note"):
-                    _info("Notes", rec["note"])
-                    cur_row += 1
-
-                cur_row += 1  # spacer
-
-                # ── Import benchmark — formula-based ──────────────────
-                bh_bg = "FFF3E0" if fallback_used else "2C5F8A"
-                bh_fc = "8B4513" if fallback_used else "FFFFFF"
-                ws3.merge_cells(f"A{cur_row}:G{cur_row}")
-                bh = ws3.cell(row=cur_row, column=1,
-                    value=f"  Import Benchmark  |  {window_label}")
-                bh.font = Font(name="Calibri", bold=True, color=bh_fc, size=9)
-                bh.fill = PatternFill("solid", fgColor=bh_bg)
-                bh.alignment = left_a
-                ws3.row_dimensions[cur_row].height = 16
-                cur_row += 1
-
-                own_after_rows = []   # track F-column rows for avg formula
-
-                if det_list:
-                    # Column headers
-                    sub_hdrs = [
-                        ("Contract Ref", "A"), ("Status", "B"),
-                        ("Delivery Date","C"), ("CIF ($/MT)","D"),
-                        ("FX (EGP/$)\n🔵 editable","E"),
-                        ("Own-after (EGP/MT)\n⚫ formula = D×E+fees","F"),
-                        ("Fees breakdown","G"),
-                    ]
-                    for ci, (sh, _) in enumerate(sub_hdrs, 1):
-                        sc3 = ws3.cell(row=cur_row, column=ci, value=sh)
-                        sc3.font      = imp_sub_f
-                        sc3.border    = brd
-                        sc3.alignment = Alignment(horizontal="center",
-                                                   vertical="center",
-                                                   wrap_text=True)
-                    ws3.row_dimensions[cur_row].height = 28
-                    cur_row += 1
-
-                    for det in det_list:
-                        fees = det["disc"] + det["clr"] + det["frt"]
-                        fees_note = (f"Disc {det['disc']:,.0f} + "
-                                     f"Clr {det['clr']:,.0f} + "
-                                     f"Frt {det['frt']:,.0f} = {fees:,.0f}")
-
-                        # Col A — contract ref
-                        ca = ws3.cell(row=cur_row, column=1, value=det["ref"])
-                        ca.font, ca.fill, ca.border, ca.alignment = (
-                            Font(name="Calibri", size=9), imp_row_bg, brd, left_a)
-
-                        # Col B — status
-                        cb = ws3.cell(row=cur_row, column=2, value=det["status"])
-                        cb.font, cb.fill, cb.border, cb.alignment = (
-                            Font(name="Calibri", size=9), imp_row_bg, brd, ctr)
-
-                        # Col C — delivery date
-                        cc = ws3.cell(row=cur_row, column=3,
-                                      value=det.get("delivery_date","—"))
-                        cc.font, cc.fill, cc.border, cc.alignment = (
-                            Font(name="Calibri", size=9), imp_row_bg, brd, ctr)
-
-                        # Col D — CIF (static number, black)
-                        cd = ws3.cell(row=cur_row, column=4, value=det["cif"])
-                        cd.font, cd.fill, cd.border = cal_f2, imp_row_bg, brd_h
-                        cd.number_format, cd.alignment = "0.00", right
-
-                        # Col E — FX (BLUE INPUT — editable)
-                        ce = ws3.cell(row=cur_row, column=5, value=det["fx"])
-                        ce.font, ce.fill, ce.border = inp_f2, inp_fill2, brd_h
-                        ce.number_format, ce.alignment = "0.0000", right
-
-                        # Col F — Own-after FORMULA: =D{r}*E{r}+fees
-                        cf_formula = f"=D{cur_row}*E{cur_row}+{fees}"
-                        cf = ws3.cell(row=cur_row, column=6, value=cf_formula)
-                        cf.font, cf.fill, cf.border = (
-                            Font(name="Calibri", size=10, bold=True, color="1A2D40"),
-                            imp_row_bg, brd_h)
-                        cf.number_format, cf.alignment = "#,##0", right
-                        own_after_rows.append(cur_row)
-
-                        # Col G — fees note (static)
-                        cg = ws3.cell(row=cur_row, column=7, value=fees_note)
-                        cg.font = Font(name="Calibri", size=8, italic=True, color="666666")
-                        cg.fill, cg.border, cg.alignment = imp_row_bg, brd, left_a
-
-                        ws3.row_dimensions[cur_row].height = 16
-                        cur_row += 1
-
-                    # Avg row — formula =AVERAGE(F_first:F_last)
-                    avg_row = cur_row
-                    f_first = own_after_rows[0]
-                    f_last  = own_after_rows[-1]
-                    ws3.merge_cells(f"A{avg_row}:E{avg_row}")
-                    ac = ws3.cell(row=avg_row, column=1,
-                        value=(f"  Blended avg "
-                               f"({len(det_list)} contract"
-                               f"{'s' if len(det_list)>1 else ''})  "
-                               f"— changes when you edit FX above"))
-                    ac.font, ac.fill, ac.border, ac.alignment = (
-                        imp_avg_f2, imp_avg_bg, brd_h, left_a)
-                    for ci in range(2, 6):
-                        ws3.cell(row=avg_row, column=ci).fill = imp_avg_bg
-                        ws3.cell(row=avg_row, column=ci).border = brd_h
-
-                    avg_formula = f"=AVERAGE(F{f_first}:F{f_last})"
-                    avc = ws3.cell(row=avg_row, column=6, value=avg_formula)
-                    avc.font, avc.fill, avc.border = (
-                        Font(name="Calibri", bold=True, size=11, color="1A2D40"),
-                        imp_avg_bg, brd_h)
-                    avc.number_format, avc.alignment = "#,##0", right
-
-                    ws3.cell(row=avg_row, column=7).fill = imp_avg_bg
-                    ws3.row_dimensions[avg_row].height = 18
-                    cur_row += 1
-
-                else:
-                    # No contracts
-                    ws3.merge_cells(f"A{cur_row}:G{cur_row}")
-                    nc = ws3.cell(row=cur_row, column=1,
-                        value="  No import contracts found for this commodity")
-                    nc.font = Font(name="Calibri", size=9,
-                                   italic=True, color="888888")
-                    nc.border = brd
-                    avg_row = None
-                    ws3.row_dimensions[cur_row].height = 14
-                    cur_row += 1
-
-                cur_row += 1  # spacer
-
-                # ── Verdict row — formula-based ───────────────────────
-                ws3.merge_cells(f"A{cur_row}:G{cur_row}")
-                verdict_cell = ws3.cell(row=cur_row, column=1)
-
-                if avg_row is not None:
-                    # Formula: IF(allin < avg, "✔ LOCAL CHEAPER ...", "✘ LOCAL COSTLIER ...")
-                    allin_ref  = f"B{allin_row}"   # all-in value
-                    avg_ref    = f"F{avg_row}"      # blended avg formula cell
-                    vf = (
-                        f'=IF({allin_ref}<{avg_ref},'
-                        f'"✔  LOCAL CHEAPER  |  All-in EGP "&TEXT({allin_ref},"#,##0")&'
-                        f'"  <  Import avg EGP "&TEXT({avg_ref},"#,##0")&'
-                        f'"  →  Saving EGP "&TEXT({avg_ref}-{allin_ref},"#,##0")&"/MT",'
-                        f'"✘  LOCAL MORE EXPENSIVE  |  All-in EGP "&TEXT({allin_ref},"#,##0")&'
-                        f'"  >  Import avg EGP "&TEXT({avg_ref},"#,##0")&'
-                        f'"  →  Extra cost EGP "&TEXT({allin_ref}-{avg_ref},"#,##0")&"/MT")'
-                    )
-                    verdict_cell.value = vf
-                    verdict_cell.font  = Font(name="Calibri", bold=True, size=11,
-                                              color="1A2D40")
-                    verdict_cell.fill  = PatternFill("solid", fgColor="F0F4FF")
-
-                    # Conditional formatting: green if allin < avg, red if not
-                    from openpyxl.formatting.rule import FormulaRule
-                    vrange = f"A{cur_row}:G{cur_row}"
-                    ws3.conditional_formatting.add(vrange, FormulaRule(
-                        formula=[f"B{allin_row}<F{avg_row}"],
-                        font=Font(name="Calibri", bold=True,
-                                  size=11, color="1A7A1A"),
-                        fill=verdict_grn))
-                    ws3.conditional_formatting.add(vrange, FormulaRule(
-                        formula=[f"B{allin_row}>=F{avg_row}"],
-                        font=Font(name="Calibri", bold=True,
-                                  size=11, color="C0392B"),
-                        fill=verdict_red))
-                else:
-                    verdict_cell.value = "—  No import benchmark available"
-                    verdict_cell.font  = Font(name="Calibri", size=10,
-                                              color="888888", italic=True)
-                    verdict_cell.fill  = sep_bg
-
-                verdict_cell.alignment = left_a
-                verdict_cell.border    = brd_h
-                ws3.row_dimensions[cur_row].height = 22
-                cur_row += 1
-
-                # Separator
-                ws3.merge_cells(f"A{cur_row}:G{cur_row}")
-                ws3.cell(row=cur_row, column=1).fill = sep_bg
-                ws3.row_dimensions[cur_row].height = 8
-                cur_row += 2
-
+            wb, n = self._build_local_purchases_workbook()
             wb.save(fp)
             messagebox.showinfo(
                 APP_NAME,
-                f"Exported successfully.\n\n"
-                f"• Sheet 1 — Local Purchases summary ({len(lps)} rows)\n"
-                f"• Sheet 2 — CBOT Parity Calculator\n"
-                f"• Sheet 3 — Purchase Detail (case by case, {len(lps)} blocks)\n\n"
+                "Local Purchases exported (formula-based).\n\n"
+                f"• Local Purchases — {n} purchases, each judged on its own date\n"
+                "• Summary — totals and decision count by commodity\n"
+                "• Assumptions — threshold, finance carry, factors and import fees\n"
+                "• How It Is Judged — the method in plain words\n\n"
                 f"{fp}")
-
         except Exception as e:
             log_exception(e, "_lp_export_excel")
             messagebox.showerror(APP_NAME, f"Export failed: {e}")
+
+    def _build_local_purchases_workbook(self, today=None):
+        """Local-purchases-only workbook.  Returns (workbook, row count)."""
+        from openpyxl import Workbook
+        from openpyxl.utils import get_column_letter as L
+
+        today = today or dt.date.today()
+        kit = _XlKit()
+        wb = Workbook()
+        wb.calculation.calcOnSave = True
+        wb.calculation.fullCalcOnLoad = True
+        ws = wb.active
+        ws.title = "Local Purchases"
+        ws_s = wb.create_sheet("Summary")
+        ws_a = wb.create_sheet("Assumptions")
+        ws_h = wb.create_sheet("How It Is Judged")
+        A = "Assumptions!"
+
+        lps = sorted(self.state_obj.get("local_purchases", []) or [],
+                     key=lambda r: r.get("date", ""))
+        fees_map = self._lp_import_fees_by_commodity()
+        evals = [(rec, self._lp_evaluate(rec, fees_map)) for rec in lps]
+
+        # ── Assumptions ───────────────────────────────────────────────
+        kit.title(ws_a, "Assumptions — edit the yellow cells", None, 4)
+        for col, w in zip("ABCD", (44, 16, 20, 60)):
+            ws_a.column_dimensions[col].width = w
+        kit.put(ws_a, 3, 1, "Decision threshold (EGP/MT)", kind="text", bold=True)
+        kit.put(ws_a, 3, 2, self._lp_threshold(), "#,##0", kind="input")
+        kit.put(ws_a, 4, 1, "Import finance days (0 = ignore carry)", kind="text", bold=True)
+        kit.put(ws_a, 4, 2, 0, "#,##0", kind="input")
+        kit.put(ws_a, 5, 1, "Import finance rate (% per year)", kind="text", bold=True)
+        kit.put(ws_a, 5, 2, 0, "0.00", kind="input")
+        TH, DAYS, RATE = f"{A}$B$3", f"{A}$B$4", f"{A}$B$5"
+        kit.header(ws_a, 7, [("Commodity", None), ("CBOT factor → USD/MT", None),
+                             ("Import fees EGP/MT", None), ("Where the fees come from", None)])
+        factor_cell, fees_cell = {}, {}
+        bases = ["CORN", "SOYBEAN", "WHEAT", "SBM"]
+        for _rec, ev in evals:
+            if ev["factor"] and ev["base"] not in bases:
+                bases.append(ev["base"])
+        r = 8
+        for b in bases:
+            fees, n = fees_map.get(b, (None, 0))
+            kit.put(ws_a, r, 1, b, kind="text", bold=True)
+            kit.put(ws_a, r, 2, cbot_conv_factor(b, strict=True), "0.00000", kind="input")
+            kit.put(ws_a, r, 3, fees, "#,##0.00", kind="input")
+            kit.put(ws_a, r, 4, (f"qty-weighted intake + clearance + freight of {n} contract(s)"
+                                 if n else "no contracts on file — enter your import fees"), kind="note")
+            factor_cell[b], fees_cell[b] = f"{A}$B${r}", f"{A}$C${r}"
+            r += 1
+
+        # ── Local Purchases ───────────────────────────────────────────
+        cols = [
+            ("#", 5), ("Date", 11), ("Supplier / Mill", 18), ("Commodity", 11), ("Origin", 10),
+            ("Qty MT", 9), ("Price\nEGP/MT", 10), ("Transport\nEGP/MT", 10),
+            ("All-in\nEGP/MT", 10), ("Total paid\nEGP", 14),
+            ("Local market\n(on/before date)", 13), ("Market\ndate", 11), ("Market age\ndays", 9),
+            ("Local − Market\nEGP/MT", 12), ("Price verdict", 20),
+            ("CBOT on\ndate", 9), ("CBOT source", 20), ("FX on\ndate", 9), ("FX source", 20),
+            ("Premium\nreference", 10), ("Premium source", 30), ("Factor", 8),
+            ("Import fees\nEGP/MT", 10), ("Import parity\nEGP/MT", 12),
+            ("Local − Import\nEGP/MT", 12), ("Saving vs import\nEGP (total)", 15),
+            ("Source verdict", 18), ("Overall verdict", 18), ("Notes", 30),
+        ]
+        kit.title(ws, f"Local Purchases — judged on the purchase date  ·  {today.isoformat()}",
+                  "Import parity = (CBOT on date + premium reference) × factor × FX on date + import fees.   "
+                  "Local − Import: negative = local was cheaper.   Local − Market: negative = bought below market.   "
+                  "Yellow cells are inputs: change them and every verdict recalculates.", len(cols))
+        kit.header(ws, 4, cols)
+        ws.freeze_panes = "D5"
+        first = 5
+        x = first
+        for rec, ev in evals:
+            d = parse_date_flex(rec.get("date"))
+            md = parse_date_flex(ev["market_date"])
+            b = ev["base"]
+            has_parity_inputs = bool(ev["factor"]) and b in factor_cell
+            vals = [
+                (1, rec.get("id", ""), None, "text"),
+                (2, d if d else rec.get("date", ""), "yyyy-mm-dd", "text"),
+                (3, rec.get("supplier", ""), None, "text"),
+                (4, ev["commodity"], None, "text"),
+                (5, rec.get("origin", ""), None, "text"),
+                (6, ev["qty"], "#,##0", "input"),
+                (7, ev["price"], "#,##0", "input"),
+                (8, ev["transport"], "#,##0.00", "input"),
+                (9, f'=IF(G{x}="","",G{x}+H{x})', "#,##0", "formula"),
+                (10, f'=IF(I{x}="","",I{x}*F{x})', "#,##0", "formula"),
+                (11, ev["market_price"], "#,##0", "input"),
+                (12, md, "yyyy-mm-dd", "note"),
+                (13, f'=IF(OR(L{x}="",B{x}=""),"",B{x}-L{x})', "0", "formula"),
+                (14, f'=IF(OR(K{x}="",I{x}=""),"",I{x}-K{x})', "+#,##0;-#,##0;0", "formula"),
+                (15, f'=IF(N{x}="","—",IF(N{x}<=0,"✔ AT/BELOW MARKET",IF(N{x}<{TH},'
+                     f'"⚠ SLIGHTLY ABOVE MARKET","✘ ABOVE MARKET")))', None, "formula"),
+                (16, ev["cbot"] if has_parity_inputs else None, "#,##0.00", "input"),
+                (17, (f"{ev['cbot_date']} · {ev['cbot_src']}" if ev["cbot"] is not None
+                      else ("n/a" if not has_parity_inputs else "missing — enter CBOT")), None, "note"),
+                (18, ev["fx"], "#,##0.0000", "input"),
+                (19, (f"{ev['fx_date']} · {ev['fx_src']}" if ev["fx"] is not None
+                      else "missing — enter FX"), None, "note"),
+                (20, ev["premium"] if has_parity_inputs else None, "#,##0.00", "input"),
+                (21, ev["premium_src"] if has_parity_inputs else "n/a (not a CBOT commodity)", None, "note"),
+                (22, f"={factor_cell[b]}" if has_parity_inputs else None, "0.00000", "formula"),
+                (23, f"={fees_cell[b]}" if has_parity_inputs else None, "#,##0.00", "formula"),
+                (24, f'=IF(COUNT(P{x},R{x},T{x},V{x},W{x})<5,"",(P{x}+T{x})*V{x}*'
+                     f'(1+{RATE}/100*{DAYS}/360)*R{x}+W{x})', "#,##0", "formula"),
+                (25, f'=IF(OR(X{x}="",I{x}=""),"",I{x}-X{x})', "+#,##0;-#,##0;0", "formula"),
+                (26, f'=IF(Y{x}="","",-Y{x}*F{x})', "+#,##0;-#,##0;0", "formula"),
+                (27, f'=IF(Y{x}="","— no import parity",IF(Y{x}<=-{TH},"✔ LOCAL CHEAPER",'
+                     f'IF(Y{x}<{TH},"⚠ ABOUT EQUAL","✘ IMPORT CHEAPER")))', None, "formula"),
+                (28, f'=IF(Y{x}="",IF(N{x}="","—",IF(LEFT(O{x},1)="✔","✔ GOOD PRICE","⚠ CHECK PRICE")),'
+                     f'IF(LEFT(AA{x},1)="✘","✘ POOR DECISION",IF(AND(LEFT(AA{x},1)="✔",LEFT(O{x},1)<>"✘"),'
+                     f'"✔ GOOD DECISION","⚠ ACCEPTABLE")))', None, "formula"),
+                (29, rec.get("note", ""), None, "text"),
+            ]
+            for col, v, fmt, kind in vals:
+                kit.put(ws, x, col, v, fmt, kind=kind, bold=(col == 28))
+            x += 1
+        last = x - 1
+        n = len(evals)
+        if n:
+            tot = x
+            kit.put(ws, tot, 2, "TOTAL", kind="text", bold=True)
+            kit.put(ws, tot, 6, f"=SUM(F{first}:F{last})", "#,##0", bold=True)
+            kit.put(ws, tot, 10, f"=SUM(J{first}:J{last})", "#,##0", bold=True)
+            kit.put(ws, tot, 9, f'=IF(F{tot}=0,"",J{tot}/F{tot})', "#,##0", bold=True)
+            kit.put(ws, tot, 26, f"=SUM(Z{first}:Z{last})", "+#,##0;-#,##0;0", bold=True)
+            for col in range(1, len(cols) + 1):
+                ws.cell(row=tot, column=col).fill = kit.tot_fill
+            for cl in ("O", "AA", "AB"):
+                kit.verdict_colours(ws, f"{cl}{first}:{cl}{last}")
+            kit.sign_colours(ws, f"Z{first}:Z{last}")
+            ws.auto_filter.ref = f"A4:{L(len(cols))}{last}"
+
+        # ── Summary ───────────────────────────────────────────────────
+        kit.title(ws_s, "Local purchases — summary by commodity",
+                  "All figures are formulas on the 'Local Purchases' sheet.", 7)
+        for col, w in zip("ABCDEFG", (16, 11, 12, 16, 18, 14, 14)):
+            ws_s.column_dimensions[col].width = w
+        kit.header(ws_s, 4, [("Commodity", None), ("Purchases", None), ("Qty MT", None),
+                             ("Avg all-in EGP/MT", None), ("Saving vs import EGP", None),
+                             ("Good decisions", None), ("Poor decisions", None)])
+        lp = "'Local Purchases'!"
+        rs = 5
+        if n:
+            D = f"{lp}$D${first}:$D${last}"
+            for comm in sorted({ev["commodity"] for _r, ev in evals}):
+                kit.put(ws_s, rs, 1, comm, kind="text", bold=True)
+                kit.put(ws_s, rs, 2, f"=COUNTIF({D},A{rs})", "0")
+                kit.put(ws_s, rs, 3, f"=SUMIFS({lp}$F${first}:$F${last},{D},A{rs})", "#,##0")
+                kit.put(ws_s, rs, 4, f'=IF(C{rs}=0,"",SUMIFS({lp}$J${first}:$J${last},{D},A{rs})/C{rs})', "#,##0")
+                kit.put(ws_s, rs, 5, f"=SUMIFS({lp}$Z${first}:$Z${last},{D},A{rs})", "+#,##0;-#,##0;0")
+                kit.put(ws_s, rs, 6, f'=SUMPRODUCT(({D}=A{rs})*(LEFT({lp}$AB${first}:$AB${last},1)="✔"))', "0")
+                kit.put(ws_s, rs, 7, f'=SUMPRODUCT(({D}=A{rs})*(LEFT({lp}$AB${first}:$AB${last},1)="✘"))', "0")
+                rs += 1
+            kit.put(ws_s, rs, 1, "TOTAL", kind="text", bold=True)
+            for col in (2, 3, 5, 6, 7):
+                cl = L(col)
+                kit.put(ws_s, rs, col, f"=SUM({cl}5:{cl}{rs - 1})",
+                        "+#,##0;-#,##0;0" if col == 5 else "#,##0", bold=True)
+            kit.put(ws_s, rs, 4, f'=IF(C{rs}=0,"",{lp}J{last + 1}/C{rs})', "#,##0", bold=True)
+            for col in range(1, 8):
+                ws_s.cell(row=rs, column=col).fill = kit.tot_fill
+            kit.sign_colours(ws_s, f"E5:E{rs}")
+
+        # ── How It Is Judged ──────────────────────────────────────────
+        ws_h.column_dimensions["A"].width = 140
+        kit.title(ws_h, "How a local purchase is judged", None, 1)
+        kit.notes(ws_h, 3, [
+            "THE QUESTION",
+            "On the day you bought locally, was that cheaper than importing — and did you pay a fair local price? "
+            "Only information available on that day is used (no later prices).",
+            "",
+            "1) SOURCE DECISION — local vs import parity on the purchase date",
+            "Import parity = (CBOT on the date + premium reference) × factor × FX on the date + import fees.",
+            "CBOT and FX = the last values logged on or before the purchase date (filled automatically; the app no longer "
+            "asks you to type them).",
+            "Premium reference = the latest import premium agreed on or before that date for the same commodity "
+            "(from contract pricing dates and pricing lots).",
+            "Import fees = quantity-weighted intake + clearance + effective freight of your contracts (Assumptions sheet).",
+            "Local − Import ≤ −threshold → ✔ LOCAL CHEAPER.  Within ±threshold → ⚠ ABOUT EQUAL.  ≥ +threshold → ✘ IMPORT CHEAPER.",
+            "",
+            "2) PRICE QUALITY — local vs the local market",
+            "Market = the last local market price logged on or before the purchase date. 'Market age' shows how old it was.",
+            "Local − Market ≤ 0 → ✔ AT/BELOW MARKET.  Below +threshold → ⚠ SLIGHTLY ABOVE.  Otherwise ✘ ABOVE MARKET.",
+            "",
+            "OVERALL",
+            "✘ POOR DECISION if importing was cheaper by more than the threshold.",
+            "✔ GOOD DECISION if local was cheaper and the price was not above market.",
+            "⚠ ACCEPTABLE otherwise.  For commodities without a CBOT board (e.g. SFM, DDGS) only the price test applies.",
+            "",
+            "WHY THE OLD METHOD WAS REPLACED",
+            "The old sheet compared each purchase with the average cost of import contracts delivered ±45 days around the "
+            "purchase (falling back to ALL contracts). Those contracts were priced weeks or months earlier at a different "
+            "CBOT and FX, so the comparison measured old pricing decisions, not the alternative you actually had on the day.",
+            "It used a simple average (a 500 MT and a 30,000 MT contract counted the same), raw freight without VAT, "
+            "and a ±14-day market window that could use prices logged AFTER the purchase.",
+            "The new method prices the import alternative on the same day with the same market data — the fair "
+            "like-for-like test — and never looks into the future.",
+        ], 1)
+        return wb, n
+
+    # ── Local purchase evaluation (parity on the purchase date) ──────
+    # One set of helpers feeds the form, the table, the KPIs and the Excel
+    # so every screen judges a local purchase the same way.
+
+    def _lp_resolve_refs(self, rec):
+        """CBOT/FX for a purchase: the saved reference, else the last
+        logged history on or before the purchase date."""
+        d = parse_date_flex(rec.get("date"))
+        base = (rec.get("commodity") or "").strip().upper().split("-")[0]
+        out = {"cbot": None, "cbot_date": "", "cbot_src": "missing",
+               "fx": None, "fx_date": "", "fx_src": "missing"}
+        ch, fxh = self._basis_history_lists(base)
+        cbot = to_float(rec.get("cbot_ref"), None)
+        if cbot is not None:
+            out.update(cbot=cbot, cbot_date=d.isoformat() if d else "",
+                       cbot_src="auto (history)" if rec.get("refs_source") == "auto" else "entered")
+        elif d is not None and cbot_conv_factor(base, strict=True):
+            v, vd = self._basis_nearest_le(ch, d.isoformat())
+            if v is not None:
+                out.update(cbot=v, cbot_date=vd, cbot_src="history on/before date")
+        fx = to_float(rec.get("fx_ref"), None)
+        if fx is not None:
+            out.update(fx=fx, fx_date=d.isoformat() if d else "",
+                       fx_src="auto (history)" if rec.get("refs_source") == "auto" else "entered")
+        elif d is not None:
+            v, vd = self._basis_nearest_le(fxh, d.isoformat())
+            if v is not None:
+                out.update(fx=v, fx_date=vd, fx_src="history on/before date")
+        return out
+
+    def _lp_premium_ref(self, base, date_iso):
+        """Import premium you could have contracted on the purchase date:
+        the latest premium agreed on or before that date for the same
+        commodity (pricing lots first, then the contract pricing date)."""
+        points, undated = [], []
+        for cid, c in (self.state_obj.get("contracts", {}) or {}).items():
+            if (c.get("commodity") or "").strip().upper().split("-")[0] != base:
+                continue
+            ref = self._hd_ref(cid, c)
+            c_prem = to_float(c.get("premium_cents"), None)
+            lots = self._contract_pricing_lots(c) or []
+            for lot in lots:
+                lp = to_float(lot.get("premium_cents"), c_prem)
+                if lp is not None and lot.get("date"):
+                    points.append((lot["date"], lp, ref))
+            if c_prem is not None:
+                ds, _key = self._basis_reference_date_for_contract(c, mode="PRICING")
+                if ds:
+                    points.append((ds, c_prem, ref))
+                else:
+                    dd = parse_date_flex(c.get("delivery_date") or c.get("storage_start"))
+                    undated.append((dd.isoformat() if dd else "", c_prem, ref))
+        if not points and undated:
+            # No pricing dates saved anywhere: use the contract delivered
+            # closest before the purchase (else the earliest one), flagged.
+            undated.sort(key=lambda p: p[0])
+            before = [p for p in undated if p[0] and date_iso and p[0] <= date_iso]
+            dd, prem, ref = before[-1] if before else undated[0]
+            return prem, "", f"{ref} (no pricing date saved — premium used as an estimate)"
+        if not points:
+            return None, "", "no premium on any contract — enter one"
+        points.sort(key=lambda p: p[0])
+        before = [p for p in points if date_iso and p[0] <= date_iso]
+        if before:
+            ds, prem, ref = before[-1]
+            return prem, ds, f"{ref} (agreed {ds})"
+        ds, prem, ref = points[0]
+        return prem, ds, f"{ref} (agreed {ds}, after purchase — nearest available)"
+
+    def _lp_import_fees_by_commodity(self):
+        """{base: (fees EGP/MT, contract count)} — quantity-weighted
+        intake + clearance + effective freight of the contracts on file."""
+        acc = {}
+        for cid, c in (self.state_obj.get("contracts", {}) or {}).items():
+            base = (c.get("commodity") or "").strip().upper().split("-")[0]
+            if not base:
+                continue
+            disc, clr, frt = self._hd_resolve_fees(c, cid)
+            fees = (disc or 0.0) + (clr or 0.0) + (frt or 0.0)
+            if fees <= 0:
+                continue
+            q = to_float(c.get("qty_mt"), 0.0) or 1.0
+            a = acc.setdefault(base, [0.0, 0.0, 0])
+            a[0] += fees * q
+            a[1] += q
+            a[2] += 1
+        return {b: (v[0] / v[1], v[2]) for b, v in acc.items() if v[1] > 0}
+
+    def _lp_market_ref(self, rec):
+        """Last local market price logged on or before the purchase date."""
+        d = parse_date_flex(rec.get("date"))
+        comm = (rec.get("commodity") or "").strip().upper()
+        base = comm.split("-")[0]
+        if d is None:
+            return None, "", None
+        for key in ([comm] if comm == base else [comm, base]):
+            pairs = self._local_price_map(key)
+            hit = next(((pd_, pp) for pd_, pp in reversed(pairs) if pd_ <= d), None)
+            if hit:
+                return hit[1], hit[0].isoformat(), (d - hit[0]).days
+        return None, "", None
+
+    def _lp_threshold(self):
+        return to_float((self.state_obj.get("ui", {}) or {})
+                        .get("marginal_threshold_egp_mt"), 200.0) or 200.0
+
+    def _lp_evaluate(self, rec, fees_map=None):
+        """Full evaluation of one local purchase (dict)."""
+        comm = (rec.get("commodity") or "").strip().upper()
+        base = comm.split("-")[0]
+        qty = to_float(rec.get("qty_mt"), 0.0) or 0.0
+        price = to_float(rec.get("price_egp_mt"), None)
+        trans = to_float(rec.get("transport_egp_mt"), None)
+        if trans is None:
+            trans = get_default_local_transport_egp_mt(self.state_obj)
+        allin = (price + trans) if price is not None else None
+        refs = self._lp_resolve_refs(rec)
+        factor = cbot_conv_factor(base, strict=True)
+        d = parse_date_flex(rec.get("date"))
+        prem, prem_date, prem_src = (None, "", "not a CBOT commodity")
+        if factor:
+            prem, prem_date, prem_src = self._lp_premium_ref(base, d.isoformat() if d else "")
+        if fees_map is None:
+            fees_map = self._lp_import_fees_by_commodity()
+        fees, fee_n = fees_map.get(base, (None, 0))
+        parity = (_core_import_parity_egp_mt(refs["cbot"], prem, factor, refs["fx"], fees)
+                  if factor else None)
+        market, market_date, market_age = self._lp_market_ref(rec)
+        ev = _core_evaluate_local_purchase(allin, qty, parity, market, self._lp_threshold())
+        ev.update({
+            "commodity": comm, "base": base, "qty": qty, "price": price,
+            "transport": trans, "factor": factor, "premium": prem,
+            "premium_date": prem_date, "premium_src": prem_src,
+            "import_fees": fees, "import_fees_n": fee_n,
+            "market_date": market_date, "market_age_days": market_age,
+            **refs,
+        })
+        return ev
 
     def _lp_clear_filters(self):
         if hasattr(self, "lp_filter_comm_var"):
@@ -5717,6 +5214,7 @@ class App(tk.Tk):
             if hasattr(self, "lp_commodity_lp_var") else "")))
         if hasattr(self, "_lp_freight_pick_var"):
             self._lp_freight_pick_var.set(LOCAL_PURCHASE_ZERO_TRANSPORT_PICK)
+        self._lp_auto_vals = {}
         self._lp_decision_var.set("")
 
     def _lp_current_transport_value(self):
@@ -5725,33 +5223,77 @@ class App(tk.Tk):
             trans = get_default_local_transport_egp_mt(self.state_obj)
         return trans
 
+    def _lp_history_refs_for_form(self):
+        """(cbot, fx) from history on/before the form's purchase date."""
+        d = parse_date_flex(self.lp_date_lp_var.get())
+        if d is None:
+            return None, None
+        refs = self._lp_resolve_refs({"date": d.isoformat(),
+                                      "commodity": self.lp_commodity_lp_var.get()})
+        return refs["cbot"], refs["fx"]
+
+    def _lp_autofill_refs(self, *_):
+        """Fill CBOT/FX automatically when the date or commodity changes.
+
+        A value the user typed is never overwritten; only an empty field, or
+        a value this routine filled itself, is refreshed.
+        """
+        try:
+            if getattr(self, "_lp_loading_record", False):
+                return
+            raw = (self.lp_date_lp_var.get() or "").strip()
+            if len(raw) < 8:
+                return
+            cbot, fx = self._lp_history_refs_for_form()
+            auto = getattr(self, "_lp_auto_vals", {}) or {}
+            new_auto = {}
+            for key, var, val, fmt in (("cbot", self.lp_cbot_ref_lp_var, cbot, "{:.2f}"),
+                                       ("fx", self.lp_fx_ref_lp_var, fx, "{:.4f}")):
+                cur = (var.get() or "").strip()
+                if cur == "" or cur == auto.get(key):
+                    txt = fmt.format(val) if val is not None else ""
+                    var.set(txt)
+                    new_auto[key] = txt
+                else:
+                    new_auto[key] = auto.get(key, "")
+            self._lp_auto_vals = new_auto
+        except Exception as e:
+            log_exception(e, "_lp_autofill_refs")
+
     def _lp_fill_cbot_fx_from_history(self):
-        """Fill CBOT Ref / FX Ref from the nearest logged history on or
-        before the purchase date, for the selected commodity."""
+        """⟳ button: refill CBOT Ref / FX Ref from history on or before the
+        purchase date, replacing whatever is in the fields."""
         try:
             d = parse_date_flex(self.lp_date_lp_var.get())
             if d is None:
                 messagebox.showerror(APP_NAME, "Enter a valid purchase date first.")
                 return
-            base = (self.lp_commodity_lp_var.get() or "").strip().upper().split("-")[0]
-            if not base:
-                messagebox.showerror(APP_NAME, "Choose a commodity first.")
-                return
-            ch, fxh = self._basis_history_lists(base)
-            cbot, _cbot_date = self._basis_nearest_le(ch, d.isoformat())
-            fx, _fx_date = self._basis_nearest_le(fxh, d.isoformat())
+            cbot, fx = self._lp_history_refs_for_form()
             if cbot is None and fx is None:
                 messagebox.showinfo(APP_NAME,
                                     "No CBOT/FX history on or before that date yet.")
                 return
-            if cbot is not None:
-                self.lp_cbot_ref_lp_var.set(f"{cbot:.2f}")
-            if fx is not None:
-                self.lp_fx_ref_lp_var.set(f"{fx:.4f}")
+            self.lp_cbot_ref_lp_var.set(f"{cbot:.2f}" if cbot is not None else "")
+            self.lp_fx_ref_lp_var.set(f"{fx:.4f}" if fx is not None else "")
+            self._lp_auto_vals = {"cbot": self.lp_cbot_ref_lp_var.get(),
+                                  "fx": self.lp_fx_ref_lp_var.get()}
         except Exception as e:
             self._surface_error("_lp_fill_cbot_fx_from_history", e, show=True)
 
     def _lp_form_to_dict(self):
+        """Form → record.  Empty CBOT/FX refs are filled from history on or
+        before the purchase date, so they never have to be typed."""
+        cbot_txt = (self.lp_cbot_ref_lp_var.get() or "").strip()
+        fx_txt = (self.lp_fx_ref_lp_var.get() or "").strip()
+        if not cbot_txt or not fx_txt:
+            h_cbot, h_fx = self._lp_history_refs_for_form()
+            if not cbot_txt and h_cbot is not None:
+                cbot_txt = f"{h_cbot:.2f}"
+            if not fx_txt and h_fx is not None:
+                fx_txt = f"{h_fx:.4f}"
+            self._lp_auto_vals = {"cbot": cbot_txt, "fx": fx_txt}
+        auto = getattr(self, "_lp_auto_vals", {}) or {}
+        is_auto = (cbot_txt == auto.get("cbot", None) and fx_txt == auto.get("fx", None))
         return {
             "date":              self.lp_date_lp_var.get().strip(),
             "supplier":          self.lp_supplier_lp_var.get().strip(),
@@ -5760,8 +5302,9 @@ class App(tk.Tk):
             "qty_mt":            to_float(self.lp_qty_lp_var.get(), None),
             "price_egp_mt":      to_float(self.lp_price_lp_var.get(), None),
             "transport_egp_mt":  self._lp_current_transport_value(),
-            "cbot_ref":          to_float(self.lp_cbot_ref_lp_var.get(), None),
-            "fx_ref":            to_float(self.lp_fx_ref_lp_var.get(), None),
+            "cbot_ref":          to_float(cbot_txt, None),
+            "fx_ref":            to_float(fx_txt, None),
+            "refs_source":       "auto" if is_auto else "entered",
             "note":              self.lp_note_lp_var.get().strip(),
         }
 
@@ -5834,78 +5377,73 @@ class App(tk.Tk):
         rec = next((r for r in lps if r.get("id") == pid), None)
         if not rec:
             return
-        self.lp_id_var.set(str(pid))
-        self.lp_date_lp_var.set(rec.get("date", ""))
-        self.lp_supplier_lp_var.set(rec.get("supplier", ""))
-        self.lp_commodity_lp_var.set(rec.get("commodity", "CORN"))
-        self.lp_origin_lp_var.set(rec.get("origin", ""))
-        self.lp_qty_lp_var.set(str(rec.get("qty_mt", "") or ""))
-        self.lp_price_lp_var.set(str(rec.get("price_egp_mt", "") or ""))
-        _selected_transport = rec.get("transport_egp_mt") if rec.get("transport_egp_mt") not in (None, "") else get_default_local_transport_egp_mt(self.state_obj)
-        self.lp_transport_lp_var.set(str(_selected_transport))
-        if hasattr(self, "_lp_freight_pick_var") and to_float(_selected_transport, None) == 0:
-            self._lp_freight_pick_var.set(LOCAL_PURCHASE_ZERO_TRANSPORT_PICK)
-        self.lp_cbot_ref_lp_var.set(
-            str(rec.get("cbot_ref", "") or ""))
-        self.lp_fx_ref_lp_var.set(
-            str(rec.get("fx_ref", "") or ""))
-        self.lp_note_lp_var.set(rec.get("note", ""))
+        self._lp_loading_record = True
+        try:
+            self.lp_id_var.set(str(pid))
+            self.lp_date_lp_var.set(rec.get("date", ""))
+            self.lp_supplier_lp_var.set(rec.get("supplier", ""))
+            self.lp_commodity_lp_var.set(rec.get("commodity", "CORN"))
+            self.lp_origin_lp_var.set(rec.get("origin", ""))
+            self.lp_qty_lp_var.set(str(rec.get("qty_mt", "") or ""))
+            self.lp_price_lp_var.set(str(rec.get("price_egp_mt", "") or ""))
+            _selected_transport = rec.get("transport_egp_mt") if rec.get("transport_egp_mt") not in (None, "") else get_default_local_transport_egp_mt(self.state_obj)
+            self.lp_transport_lp_var.set(str(_selected_transport))
+            if hasattr(self, "_lp_freight_pick_var") and to_float(_selected_transport, None) == 0:
+                self._lp_freight_pick_var.set(LOCAL_PURCHASE_ZERO_TRANSPORT_PICK)
+            self.lp_cbot_ref_lp_var.set(
+                str(rec.get("cbot_ref", "") or ""))
+            self.lp_fx_ref_lp_var.set(
+                str(rec.get("fx_ref", "") or ""))
+            self.lp_note_lp_var.set(rec.get("note", ""))
+            self._lp_auto_vals = ({"cbot": self.lp_cbot_ref_lp_var.get(),
+                                   "fx": self.lp_fx_ref_lp_var.get()}
+                                  if rec.get("refs_source") == "auto" else {})
+        finally:
+            self._lp_loading_record = False
+        # Older records saved without CBOT/FX: fill the empty fields now.
+        self._lp_autofill_refs()
+        self._lp_update_decision()
 
     def _lp_update_decision(self, *_):
+        """Live verdict under the form: import parity on the purchase date
+        and the local market price on/before that date."""
         try:
             price = to_float(self.lp_price_lp_var.get(), None)
-            trans = to_float(self.lp_transport_lp_var.get(), None)
-            if trans is None:
-                trans = get_default_local_transport_egp_mt(self.state_obj)
-            comm  = self.lp_commodity_lp_var.get().strip().upper()
-            cbot  = to_float(self.lp_cbot_ref_lp_var.get(), None)
-            fx    = to_float(self.lp_fx_ref_lp_var.get(), None)
             if price is None:
                 self._lp_decision_var.set("")
                 return
-            total_local = price + trans
-            transport_note = "transport included in supplier price" if trans == 0 else f"+ transport {trans:,.0f}"
-            lines = [f"Local all-in: {total_local:,.0f} EGP/MT ({transport_note})"]
-            # find best open import contract same commodity
-            best_imp = None
-            for c in self.state_obj.get("contracts", {}).values():
-                c_comm = (c.get("commodity") or "").upper()
-                if (c.get("status","Open") or "Open") != "Open":
-                    continue
-                if not c_comm.startswith(comm.split("-")[0]):
-                    continue
-                cif  = self._contract_cif_usd(c)
-                c_fx = to_float(c.get("delivery_fx"), None) or to_float(
-                    (self.state_obj.get("market_data",{})
-                     .get("fx",{}) or {}).get("price"), None)
-                disc = to_float(c.get("discharge_egp_mt"), None) or 0
-                clr  = to_float(c.get("clearance_egp_mt"), None) or 0
-                frt  = to_float(c.get("freight_egp_mt"), None) or 0
-                if cif and c_fx:
-                    imp_cost = cif * c_fx + disc + clr + frt
-                    if best_imp is None or imp_cost < best_imp[1]:
-                        best_imp = (c.get("name",""), imp_cost)
-            if best_imp:
-                delta   = total_local - best_imp[1]
-                verdict = ("✅ BUY IMPORT" if delta > 0
-                           else "🛒 BUY LOCAL" if delta < 0 else "⚖ EQUAL")
+            rec = {
+                "date": self.lp_date_lp_var.get().strip(),
+                "commodity": self.lp_commodity_lp_var.get().strip().upper(),
+                "qty_mt": to_float(self.lp_qty_lp_var.get(), 0.0) or 0.0,
+                "price_egp_mt": price,
+                "transport_egp_mt": self._lp_current_transport_value(),
+                "cbot_ref": to_float(self.lp_cbot_ref_lp_var.get(), None),
+                "fx_ref": to_float(self.lp_fx_ref_lp_var.get(), None),
+            }
+            ev = self._lp_evaluate(rec)
+            trans = ev["transport"] or 0.0
+            transport_note = ("transport included in supplier price" if trans == 0
+                              else f"+ transport {trans:,.0f}")
+            lines = [f"Local all-in: {ev['local_all_in']:,.0f} EGP/MT ({transport_note})"]
+            if ev["import_parity"] is not None:
                 lines.append(
-                    f"Best open import ({best_imp[0]}): "
-                    f"{best_imp[1]:,.0f} EGP/MT")
-                lines.append(
-                    f"Δ = {abs(delta):,.0f} EGP/MT → {verdict}")
-            elif cbot and fx and comm.startswith("CORN"):
-                imp_est = cbot * 0.3937 * fx
-                delta   = total_local - imp_est
-                lines.append(f"CBOT-implied: ~{imp_est:,.0f} EGP/MT")
-                lines.append(
-                    f"Δ = {abs(delta):,.0f} → "
-                    f"{'✅ BUY IMPORT' if delta>0 else '🛒 BUY LOCAL'}")
-            else:
-                lines.append(
-                    "Enter CBOT ref + FX to see import comparison")
+                    f"Import parity on {rec['date'] or 'date'}: {ev['import_parity']:,.0f} "
+                    f"[(CBOT {ev['cbot']:,.2f} + prem {ev['premium']:,.2f}) × {ev['factor']:g} "
+                    f"× FX {ev['fx']:,.4f} + fees {ev['import_fees']:,.0f}]")
+                lines.append(f"Local − Import {ev['vs_import_egp_mt']:+,.0f}/MT → {ev['source_verdict']}")
+            elif ev["factor"]:
+                missing = [n for n, v in (("CBOT", ev["cbot"]), ("FX", ev["fx"]),
+                                          ("premium", ev["premium"]),
+                                          ("import fees", ev["import_fees"])) if v is None]
+                lines.append("Import parity needs: " + ", ".join(missing))
+            if ev["market_price"] is not None:
+                lines.append(f"Market {ev['market_price']:,.0f} ({ev['market_date']}) → "
+                             f"{ev['vs_market_egp_mt']:+,.0f}/MT {ev['price_verdict']}")
+            lines.append(f"VERDICT: {ev['overall_verdict']}")
             self._lp_decision_var.set("   |   ".join(lines))
-        except Exception:
+        except Exception as e:
+            log_exception(e, "_lp_update_decision")
             self._lp_decision_var.set("")
 
     def refresh_local_purchases(self):
@@ -5941,63 +5479,44 @@ class App(tk.Tk):
             if f_sup not in ["All"] + all_sups:
                 self.lp_filter_sup_var.set("All")
 
-        # import cost by commodity for comparison
-        imp_cost_by_comm = {}
-        for c in self.state_obj.get("contracts", {}).values():
-            comm = (c.get("commodity") or "").upper()
-            cif  = self._contract_cif_usd(c)
-            fx   = to_float(c.get("delivery_fx"), None) or to_float(
-                (self.state_obj.get("market_data",{})
-                 .get("fx",{}) or {}).get("price"), None)
-            disc = to_float(c.get("discharge_egp_mt"), None) or 0
-            clr  = to_float(c.get("clearance_egp_mt"), None) or 0
-            frt  = to_float(c.get("freight_egp_mt"), None) or 0
-            if cif and fx:
-                own = cif * fx + disc + clr + frt
-                imp_cost_by_comm.setdefault(comm, []).append(own)
-        imp_avg_by_comm = {k: sum(v)/len(v)
-                           for k, v in imp_cost_by_comm.items() if v}
-
         total_lp_qty   = 0.0
         total_lp_paid  = 0.0
         total_imp_qty  = 0.0
         total_imp_paid = 0.0
+        total_saving_vs_import = 0.0
+        saving_rows = 0
 
+        # Each purchase is judged against import parity ON ITS OWN DATE
+        # (see _lp_evaluate) — the same numbers the Excel export shows.
+        fees_map = self._lp_import_fees_by_commodity()
         exp = self._basis_expenses_egp_mt()
         for rec in lps:
-            qty   = to_float(rec.get("qty_mt"), None) or 0
-            price = to_float(rec.get("price_egp_mt"), None) or 0
-            trans = to_float(rec.get("transport_egp_mt"), None)
-            if trans is None:
-                trans = get_default_local_transport_egp_mt(self.state_obj)
-            comm  = (rec.get("commodity") or "").upper()
+            ev = self._lp_evaluate(rec, fees_map)
+            qty = ev["qty"]
+            price = ev["price"] or 0.0
+            trans = ev["transport"] or 0.0
+            comm = ev["commodity"]
+            base = ev["base"]
             allin = price + trans
             total = allin * qty
-            base  = comm.split("-")[0] if "-" in comm else comm
-            imp_avg = (imp_avg_by_comm.get(comm) or
-                       imp_avg_by_comm.get(base+"-BRZ") or
-                       imp_avg_by_comm.get(base))
-            vs_imp = None
-            tag    = "neutral"
-            if imp_avg:
-                vs_imp = allin - imp_avg
-                tag    = "cheaper" if vs_imp < 0 else "costlier"
+            vs_imp = ev["vs_import_egp_mt"]
+            tag = ("neutral" if vs_imp is None or abs(vs_imp) < ev["threshold_egp_mt"]
+                   else "cheaper" if vs_imp < 0 else "costlier")
+            if ev["saving_vs_import_total_egp"] is not None:
+                total_saving_vs_import += ev["saving_vs_import_total_egp"]
+                saving_rows += 1
 
-            # Implied basis on the purchase date: use the stored CBOT/FX
-            # reference if the user entered one, else fall back to nearest
-            # logged history on/before that date — same formula Basis
-            # Tracker uses, so the two screens always agree.
-            cbot_val = to_float(rec.get("cbot_ref"), None)
-            fx_val = to_float(rec.get("fx_ref"), None)
-            if cbot_val is None or fx_val is None:
-                ch, fxh = self._basis_history_lists(base)
-                if cbot_val is None:
-                    cbot_val, _cd = self._basis_nearest_le(ch, rec.get("date", ""))
-                if fx_val is None:
-                    fx_val, _fd = self._basis_nearest_le(fxh, rec.get("date", ""))
-            factor = cbot_conv_factor(base, strict=False)
+            # Implied basis on the purchase date — same formula Basis
+            # Tracker uses, with the same CBOT/FX resolution.
+            cbot_val, fx_val = ev["cbot"], ev["fx"]
+            factor = ev["factor"]  # None for non-CBOT commodities (no basis)
             basis = (((allin - exp) / fx_val) / factor - cbot_val
                       if (fx_val and factor and cbot_val is not None) else None)
+
+            def _ref_txt(v, src, dec):
+                if v is None:
+                    return ""
+                return fmt_num(v, dec) + ("" if src == "entered" else "*")
 
             tv.insert("", "end", iid=str(rec.get("id","")),
                       tags=(tag,), values=(
@@ -6005,12 +5524,11 @@ class App(tk.Tk):
                 rec.get("supplier",""), comm, rec.get("origin",""),
                 fmt_num(qty,   0), fmt_num(price, 0),
                 fmt_num(trans, 0), fmt_num(total, 0),
-                fmt_num(rec.get("cbot_ref"), 2)
-                    if rec.get("cbot_ref") else "",
-                fmt_num(rec.get("fx_ref"), 4)
-                    if rec.get("fx_ref") else "",
+                _ref_txt(cbot_val, ev["cbot_src"], 2),
+                _ref_txt(fx_val, ev["fx_src"], 4),
                 fmt_num(basis, 2) if basis is not None else "—",
                 fmt_num(vs_imp, 0) if vs_imp is not None else "—",
+                ev["overall_verdict"],
                 rec.get("note",""),
             ))
             total_lp_qty  += qty
@@ -6020,7 +5538,8 @@ class App(tk.Tk):
             tv.insert("", "end", iid="__LP_TOTAL__", tags=("total",),
                       values=("","TOTAL","","","",
                               fmt_num(total_lp_qty,0),"","",
-                              fmt_num(total_lp_paid,0),"","","","",""))
+                              fmt_num(total_lp_paid,0),"","","",
+                              "","",""))
 
         # import totals
         for c in self.state_obj.get("contracts", {}).values():
@@ -6038,8 +5557,8 @@ class App(tk.Tk):
 
         lp_avg  = (total_lp_paid / total_lp_qty)  if total_lp_qty  else None
         imp_avg = (total_imp_paid / total_imp_qty) if total_imp_qty else None
-        net_sav = ((lp_avg - imp_avg) * total_imp_qty
-                   if lp_avg and imp_avg and total_imp_qty else None)
+        # Saving of the local purchases versus importing on the same dates.
+        net_sav = total_saving_vs_import if saving_rows else None
         blended_qty  = total_lp_qty + total_imp_qty
         blended_paid = total_lp_paid + total_imp_paid
         blended_avg  = blended_paid / blended_qty if blended_qty else None
@@ -18031,481 +17550,424 @@ class App(tk.Tk):
             messagebox.showerror(APP_NAME, f"Export failed: {e}")
 
     def _export_portfolio_excel(self):
-        """Export all contracts with performance, CBOT 15-day-before reference,
-        and local 15-day-before reference — all anchored to delivery date."""
+        """Export the formula-based CPG Portfolio workbook (Contracts tab)."""
         if not _need_openpyxl():
             return
         try:
-            from openpyxl import Workbook
-            from openpyxl.styles import (Font, PatternFill, Alignment,
-                                          Border, Side, numbers)
-            from openpyxl.utils import get_column_letter
-            from openpyxl.formatting.rule import FormulaRule
-
             fp = filedialog.asksaveasfilename(
                 initialdir=get_default_export_dir(),
                 initialfile=f"CPG_Portfolio_{now_ts()[:10]}.xlsx",
                 defaultextension=".xlsx",
-                filetypes=[("Excel","*.xlsx")],
+                filetypes=[("Excel", "*.xlsx")],
                 title="Export Portfolio Performance")
             if not fp:
                 return
-
-            import datetime as _dt
-
-            contracts = self.state_obj.get("contracts", {}) or {}
-            today     = _dt.date.today()
-
-            # ── Styles ────────────────────────────────────────────────
-            thin  = Side(style="thin",   color="CCCCCC")
-            med   = Side(style="medium", color="1A2D40")
-            brd   = Border(left=thin, right=thin, top=thin, bottom=thin)
-            brd_h = Border(left=med,  right=med,  top=med,  bottom=med)
-
-            hdr_bg   = PatternFill("solid", fgColor="1A2D40")
-            grp_bg   = PatternFill("solid", fgColor="E8F0FE")
-            inp_bg   = PatternFill("solid", fgColor="FFF9E6")
-            grn_bg   = PatternFill("solid", fgColor="E6F4EA")
-            red_bg   = PatternFill("solid", fgColor="FDECEA")
-            amb_bg   = PatternFill("solid", fgColor="FFF8E1")
-            open_bg  = PatternFill("solid", fgColor="EAF0FF")
-            tot_bg   = PatternFill("solid", fgColor="D0DCF5")
-
-            hdr_f  = Font(name="Calibri", bold=True, color="FFFFFF", size=9)
-            grp_f  = Font(name="Calibri", bold=True, color="1A2D40", size=9)
-            dat_f  = Font(name="Calibri", size=9,    color="1A2D40")
-            dat_fb = Font(name="Calibri", size=9,    color="1A2D40", bold=True)
-            sml_f  = Font(name="Calibri", size=8,    color="666666", italic=True)
-            ttl_f  = Font(name="Calibri", bold=True, size=13, color="1A2D40")
-            ctr    = Alignment(horizontal="center", vertical="center", wrap_text=True)
-            right  = Alignment(horizontal="right",  vertical="center")
-            left_a = Alignment(horizontal="left",   vertical="center")
-
-            def _hdr(ws, row, col, text, w=None):
-                c = ws.cell(row=row, column=col, value=text)
-                c.font, c.fill, c.alignment, c.border = hdr_f, hdr_bg, ctr, brd_h
-                if w: ws.column_dimensions[get_column_letter(col)].width = w
-                return c
-
-            def _dat(ws, row, col, val, fmt=None, bold=False, bg=None):
-                c = ws.cell(row=row, column=col, value=val)
-                c.font      = dat_fb if bold else dat_f
-                c.border    = brd
-                c.alignment = right if isinstance(val, (int, float)) else left_a
-                if fmt:  c.number_format = fmt
-                if bg:   c.fill = bg
-                return c
-
-            # ── CBOT / Local helpers ───────────────────────────────────
-            CBOT_KEY  = {"CORN":"CORN","SOYBEAN":"SOYBEAN","SBM":"SBM"}
-
-            cbot_hist = self.state_obj.get("cbot_history",[]) or []
-            cbot_by_comm = {}
-            for e in cbot_hist:
-                comm_k = e.get("commodity","").upper()
-                if comm_k not in cbot_by_comm:
-                    cbot_by_comm[comm_k] = {}
-                cbot_by_comm[comm_k][e.get("date","")] = to_float(e.get("price"))
-
-            def _get_cbot_near(comm_key, target_date, window=15):
-                """Closest CBOT to target_date within window days."""
-                if not comm_key or comm_key not in cbot_by_comm:
-                    return None, None
-                best = None; best_diff = 999; best_d = None
-                for ds, price in cbot_by_comm[comm_key].items():
-                    if price is None: continue
-                    try:
-                        diff = abs((target_date -
-                                    _dt.date.fromisoformat(ds)).days)
-                        if diff <= window and diff < best_diff:
-                            best_diff = diff; best = price; best_d = ds
-                    except Exception as _e_12156:
-                        log_exception(_e_12156, "_export_portfolio_excel")
-                return best, best_d
-
-            def _get_local_near(commodity, target_date, window=15):
-                comm  = commodity.upper()
-                base  = comm.split("-")[0] if "-" in comm else comm
-                for ck in ([comm] if comm == base else [comm, base]):
-                    pairs = self._local_price_map(ck)
-                    if not pairs: continue
-                    best = None; best_diff = 999; best_d = None
-                    for pd_, pp in pairs:
-                        diff = abs((target_date - pd_).days)
-                        if diff <= window and diff < best_diff:
-                            best_diff = diff; best = pp; best_d = pd_.isoformat()
-                    if best is not None:
-                        return best, best_d
-                return None, None
-
-            # ── Build workbook ─────────────────────────────────────────
-            wb = Workbook()
-            wb.calculation.calcOnSave = True
-
-            # ── Sheet 1: Portfolio Summary ────────────────────────────
-            ws = wb.active
-            ws.title = "Portfolio Summary"
-            ws.freeze_panes = "A4"
-
-            ws.merge_cells("A1:S1")
-            t = ws["A1"]
-            t.value = (f"CPG Procurement Portfolio  ·  Contract Performance vs CBOT & Local  "
-                       f"·  Generated {today.isoformat()}")
-            t.font, t.alignment = ttl_f, left_a
-            ws.row_dimensions[1].height = 22
-
-            ws.merge_cells("A2:S2")
-            n = ws["A2"]
-            n.value = ("CBOT reference = closest close within 15 days BEFORE delivery date  |  "
-                       "Local reference = closest logged price within 15 days of delivery date  |  "
-                       "Open contracts use today's CBOT and local price as reference")
-            n.font, n.alignment = sml_f, left_a
-            ws.row_dimensions[2].height = 14
-
-            # Headers row 3
-            cols = [
-                # Contract data
-                ("Contract",         18), ("Supplier",        14),
-                ("Commodity",        11), ("Origin",          10),
-                ("Status",            9), ("Qty MT",           9),
-                ("CIF $/MT",          9), ("Premium ¢",        9),
-                ("FX",                8), ("Discharge",        9),
-                ("Clearance",         9), ("Freight",          9),
-                ("Own-after\nEGP/MT", 12), ("Delivery",       11),
-                # Local performance
-                ("Local\nEGP/MT",    11), ("Local Date",      11),
-                ("vs Local\nEGP/MT", 11), ("Total Saving\nEGP", 14),
-                ("Local\nVerdict",   11),
-                # CBOT market context
-                ("CBOT D-15\n¢",     10), ("CBOT Date",       11),
-                ("Spot CIF\n$/MT",   10), ("Spot Own-after\nEGP/MT", 13),
-                ("vs Spot\nEGP/MT",  12), ("CBOT\nVerdict",   11),
-                # Overall
-                ("Overall\nVerdict", 13),
-            ]
-            for ci, (hdr, w) in enumerate(cols, 1):
-                _hdr(ws, 3, ci, hdr, w)
-            ws.row_dimensions[3].height = 28
-
-            # Group separator rows tracker
-            data_row = 4
-            from collections import defaultdict
-            comm_groups = defaultdict(list)
-            for cid, c in contracts.items():
-                comm_raw  = (c.get("commodity") or "OTHER").upper()
-                base_comm = comm_raw.split("-")[0] if "-" in comm_raw else comm_raw
-                comm_groups[base_comm].append((cid, c))
-
-            COMM_ORDER = ["CORN","SOYBEAN","SBM","SFM","DDGS","OTHER"]
-            ordered    = [c for c in COMM_ORDER if c in comm_groups] + \
-                         sorted(c for c in comm_groups if c not in COMM_ORDER)
-
-            grand_qty = grand_saving = 0
-            grand_open = grand_closed = 0
-
-            for comm in ordered:
-                rows_in_group = comm_groups[comm]
-                rows_in_group.sort(key=lambda x: (
-                    x[1].get("delivery_date") or x[1].get("storage_start") or ""))
-
-                # Group header
-                ws.merge_cells(f"A{data_row}:Z{data_row}")
-                gh = ws.cell(row=data_row, column=1,
-                             value=f"  {comm}  —  {len(rows_in_group)} contracts")
-                gh.font, gh.fill, gh.alignment = grp_f, grp_bg, left_a
-                ws.row_dimensions[data_row].height = 16
-                data_row += 1
-
-                g_qty = g_sav = 0
-
-                for cid, c in rows_in_group:
-                    status    = (c.get("status") or "Open")
-                    comm_raw  = (c.get("commodity") or "").upper()
-                    base_comm2= comm_raw.split("-")[0] if "-" in comm_raw else comm_raw
-                    cif       = to_float(c.get("cif_usd_mt") or c.get("own_after_usd_mt"))
-                    prem      = to_float(c.get("premium_cents"))
-                    fx        = to_float(c.get("delivery_fx"))
-                    disc      = to_float(c.get("discharge_egp_mt"), 0) or 0
-                    clr       = to_float(c.get("clearance_egp_mt"),  0) or 0
-                    frt       = to_float(c.get("freight_egp_mt"),    0) or 0
-                    qty       = to_float(c.get("qty_mt"), 0) or 0
-                    del_str   = c.get("storage_start") or c.get("delivery_date") or ""
-                    own_after = (cif * fx + disc + clr + frt) if cif and fx else None
-
-                    # Delivery date
-                    try:
-                        del_date = _dt.date.fromisoformat(del_str) if del_str else None
-                    except Exception:
-                        del_date = None
-
-                    # For open contracts use today as reference
-                    ref_date = del_date if (status == "Closed" and del_date) else today
-
-                    # Local reference
-                    local_price, local_date = _get_local_near(comm_raw, ref_date)
-                    vs_local    = (local_price - own_after) if (local_price and own_after) else None
-                    total_sav   = vs_local * qty if (vs_local is not None and qty) else None
-
-                    if   vs_local is None:          local_verdict = "—"
-                    elif vs_local > 500:             local_verdict = "✔ STRONG WIN"
-                    elif vs_local > 0:               local_verdict = "✔ WIN"
-                    elif vs_local > -500:            local_verdict = "⚠ MARGINAL"
-                    else:                            local_verdict = "✘ LOSS"
-
-                    # CBOT reference (15 days before delivery)
-                    cbot_key      = CBOT_KEY.get(base_comm2)
-                    cbot_ref_date = (del_date - _dt.timedelta(days=15)
-                                     if (status=="Closed" and del_date)
-                                     else today - _dt.timedelta(days=15))
-                    cbot_price, cbot_date = _get_cbot_near(cbot_key, cbot_ref_date)
-                    conv     = cbot_conv_factor(base_comm2)
-                    spot_cif = ((cbot_price + (prem or 0)) * conv
-                                if cbot_price is not None else None)
-                    spot_own = (spot_cif * fx + disc + clr + frt
-                                if spot_cif and fx else None)
-                    vs_spot  = (spot_own - own_after
-                                if (spot_own and own_after) else None)
-
-                    if   vs_spot is None:        cbot_verdict = "—"
-                    elif vs_spot > 200:          cbot_verdict = "✔ PRICED CHEAP"
-                    elif vs_spot >= 0:           cbot_verdict = "✔ FAIR"
-                    elif vs_spot > -200:         cbot_verdict = "⚠ SLIGHT MISS"
-                    else:                        cbot_verdict = "✘ EXPENSIVE"
-
-                    # Overall
-                    if local_verdict.startswith("✔") and cbot_verdict.startswith("✔"):
-                        overall = "✔✔ OPTIMAL"
-                    elif local_verdict.startswith("✔"):
-                        overall = "✔ WIN"
-                    elif local_verdict.startswith("✘"):
-                        overall = "✘ LOSS"
-                    else:
-                        overall = "⚠ MIXED"
-
-                    row_bg = open_bg if status == "Open" else None
-
-                    vals = [
-                        c.get("name") or cid,
-                        c.get("supplier",""), comm_raw,
-                        c.get("origin",""), status,
-                        qty or None, cif, prem, fx,
-                        disc or None, clr or None, frt or None,
-                        own_after, del_str,
-                        local_price, local_date,
-                        vs_local, total_sav, local_verdict,
-                        cbot_price, cbot_date,
-                        spot_cif, spot_own, vs_spot, cbot_verdict,
-                        overall,
-                    ]
-                    fmts = [
-                        None, None, None, None, None,
-                        "#,##0", "0.00", "0.00", "0.0000",
-                        "#,##0", "#,##0", "#,##0",
-                        "#,##0", None,
-                        "#,##0", None,
-                        "+#,##0;-#,##0;-", "+#,##0;-#,##0;-", None,
-                        "0.00", None,
-                        "0.00", "#,##0", "+#,##0;-#,##0;-", None,
-                        None,
-                    ]
-                    for ci, (val, fmt) in enumerate(zip(vals, fmts), 1):
-                        c_obj = _dat(ws, data_row, ci, val, fmt,
-                                     bold=(ci==1), bg=row_bg)
-                        # Conditional color for verdict cells
-                        if ci in (19, 25, 26):
-                            if isinstance(val, str):
-                                if val.startswith("✔"):
-                                    c_obj.fill = grn_bg
-                                    c_obj.font = Font(name="Calibri", size=9,
-                                                      color="1A7A1A", bold=True)
-                                elif val.startswith("✘"):
-                                    c_obj.fill = red_bg
-                                    c_obj.font = Font(name="Calibri", size=9,
-                                                      color="C0392B", bold=True)
-                                elif val.startswith("⚠"):
-                                    c_obj.fill = amb_bg
-                                    c_obj.font = Font(name="Calibri", size=9,
-                                                      color="B36000", bold=True)
-                        # vs Local and vs Spot coloring
-                        if ci in (17, 24) and isinstance(val, (int, float)):
-                            c_obj.fill = grn_bg if val >= 0 else red_bg
-                            c_obj.font = Font(name="Calibri", size=9, bold=True,
-                                              color="1A7A1A" if val>=0 else "C0392B")
-
-                    ws.row_dimensions[data_row].height = 15
-                    data_row += 1
-
-                    if qty:        g_qty  += qty
-                    if total_sav:  g_sav  += total_sav
-                    if status == "Open":   grand_open   += 1
-                    else:                  grand_closed += 1
-
-                # Group subtotal
-                ws.cell(row=data_row, column=1,
-                        value=f"  Subtotal — {comm}").font = grp_f
-                ws.cell(row=data_row, column=1).fill = grp_bg
-                ws.cell(row=data_row, column=6,
-                        value=g_qty).number_format = "#,##0"
-                ws.cell(row=data_row, column=6).font = grp_f
-                ws.cell(row=data_row, column=6).fill = grp_bg
-                ws.cell(row=data_row, column=18,
-                        value=g_sav if g_sav else None
-                        ).number_format = "+#,##0;-#,##0;-"
-                ws.cell(row=data_row, column=18).font = grp_f
-                ws.cell(row=data_row, column=18).fill = (
-                    grn_bg if g_sav >= 0 else red_bg) if g_sav else grp_bg
-                ws.row_dimensions[data_row].height = 14
-                data_row += 1
-
-                grand_qty    += g_qty
-                grand_saving += g_sav
-
-            # Grand total
-            gt_row = data_row
-            ws.cell(row=gt_row, column=1,
-                    value=(f"GRAND TOTAL  —  {len(contracts)} contracts  "
-                           f"({grand_open} open · {grand_closed} closed)")
-                    ).font = Font(name="Calibri", bold=True, size=10,
-                                  color="FFFFFF")
-            ws.cell(row=gt_row, column=1).fill = PatternFill("solid",
-                                                              fgColor="1A2D40")
-            ws.merge_cells(f"A{gt_row}:E{gt_row}")
-            ws.cell(row=gt_row, column=6,
-                    value=grand_qty).number_format = "#,##0"
-            ws.cell(row=gt_row, column=6).font = Font(name="Calibri", bold=True,
-                                                       size=10, color="FFFFFF")
-            ws.cell(row=gt_row, column=6).fill = PatternFill("solid",
-                                                              fgColor="1A2D40")
-            sv_cell = ws.cell(row=gt_row, column=18, value=grand_saving)
-            sv_cell.number_format = "+#,##0;-#,##0;-"
-            sv_cell.font = Font(name="Calibri", bold=True, size=10,
-                                color="FFFFFF")
-            sv_cell.fill = PatternFill("solid", fgColor="1A2D40")
-            ws.row_dimensions[gt_row].height = 18
-
-            # ── Sheet 2: Open Contracts Only ──────────────────────────
-            ws2 = wb.create_sheet("Open Contracts — Live MTM")
-            ws2.freeze_panes = "A4"
-
-            ws2.merge_cells("A1:Z1")
-            ws2["A1"].value = (f"Open Contracts — Mark-to-Market  ·  "
-                               f"Reference: today {today.isoformat()}  ·  "
-                               f"CBOT and Local = latest available")
-            ws2["A1"].font, ws2["A1"].alignment = ttl_f, left_a
-
-            for ci, (hdr, w) in enumerate(cols, 1):
-                _hdr(ws2, 3, ci, hdr, w)
-            ws2.row_dimensions[3].height = 28
-
-            open_row = 4
-            for cid, c in sorted(contracts.items(),
-                    key=lambda x: x[1].get("delivery_date") or ""):
-                if (c.get("status") or "Open") != "Open":
-                    continue
-                comm_raw   = (c.get("commodity") or "").upper()
-                base_comm2 = comm_raw.split("-")[0] if "-" in comm_raw else comm_raw
-                cif   = to_float(c.get("cif_usd_mt") or c.get("own_after_usd_mt"))
-                prem  = to_float(c.get("premium_cents"))
-                fx    = to_float(c.get("delivery_fx"))
-                disc  = to_float(c.get("discharge_egp_mt"), 0) or 0
-                clr   = to_float(c.get("clearance_egp_mt"),  0) or 0
-                frt   = to_float(c.get("freight_egp_mt"),    0) or 0
-                qty   = to_float(c.get("qty_mt"), 0) or 0
-                del_str = c.get("storage_start") or c.get("delivery_date") or ""
-                own_after = (cif * fx + disc + clr + frt) if cif and fx else None
-
-                local_price, local_date = _get_local_near(comm_raw, today, 30)
-                vs_local  = (local_price - own_after) if (local_price and own_after) else None
-                total_sav = vs_local * qty if (vs_local is not None and qty) else None
-                if   vs_local is None:    local_verdict = "—"
-                elif vs_local > 500:      local_verdict = "✔ STRONG WIN"
-                elif vs_local > 0:        local_verdict = "✔ WIN"
-                elif vs_local > -500:     local_verdict = "⚠ MARGINAL"
-                else:                     local_verdict = "✘ LOSS"
-
-                cbot_key   = CBOT_KEY.get(base_comm2)
-                cbot_price, cbot_date = _get_cbot_near(cbot_key, today, 5)
-                conv    = cbot_conv_factor(base_comm2)
-                spot_cif= ((cbot_price + (prem or 0)) * conv
-                           if cbot_price is not None else None)
-                spot_own= (spot_cif * fx + disc + clr + frt
-                           if spot_cif and fx else None)
-                vs_spot = (spot_own - own_after if (spot_own and own_after) else None)
-
-                if   vs_spot is None:    cbot_verdict = "—"
-                elif vs_spot > 200:      cbot_verdict = "✔ PRICED CHEAP"
-                elif vs_spot >= 0:       cbot_verdict = "✔ FAIR"
-                elif vs_spot > -200:     cbot_verdict = "⚠ SLIGHT MISS"
-                else:                    cbot_verdict = "✘ EXPENSIVE"
-
-                if local_verdict.startswith("✔") and cbot_verdict.startswith("✔"):
-                    overall = "✔✔ OPTIMAL"
-                elif local_verdict.startswith("✔"):
-                    overall = "✔ WIN"
-                elif local_verdict.startswith("✘"):
-                    overall = "✘ LOSS"
-                else:
-                    overall = "⚠ MIXED"
-
-                vals = [
-                    c.get("name") or cid, c.get("supplier",""), comm_raw,
-                    c.get("origin",""), "Open",
-                    qty or None, cif, prem, fx,
-                    disc or None, clr or None, frt or None,
-                    own_after, del_str,
-                    local_price, local_date,
-                    vs_local, total_sav, local_verdict,
-                    cbot_price, cbot_date,
-                    spot_cif, spot_own, vs_spot, cbot_verdict,
-                    overall,
-                ]
-                fmts = [
-                    None,None,None,None,None,
-                    "#,##0","0.00","0.00","0.0000",
-                    "#,##0","#,##0","#,##0",
-                    "#,##0",None,
-                    "#,##0",None,
-                    "+#,##0;-#,##0;-","+#,##0;-#,##0;-",None,
-                    "0.00",None,"0.00","#,##0",
-                    "+#,##0;-#,##0;-",None,None,
-                ]
-                for ci, (val, fmt) in enumerate(zip(vals, fmts), 1):
-                    c_obj = _dat(ws2, open_row, ci, val, fmt,
-                                 bold=(ci==1), bg=open_bg)
-                    if ci in (19,25,26) and isinstance(val,str):
-                        if val.startswith("✔"):
-                            c_obj.fill = grn_bg
-                            c_obj.font = Font(name="Calibri",size=9,
-                                              color="1A7A1A",bold=True)
-                        elif val.startswith("✘"):
-                            c_obj.fill = red_bg
-                            c_obj.font = Font(name="Calibri",size=9,
-                                              color="C0392B",bold=True)
-                        elif val.startswith("⚠"):
-                            c_obj.fill = amb_bg
-                            c_obj.font = Font(name="Calibri",size=9,
-                                              color="B36000",bold=True)
-                    if ci in (17,24) and isinstance(val,(int,float)):
-                        c_obj.fill = grn_bg if val>=0 else red_bg
-                        c_obj.font = Font(name="Calibri",size=9,bold=True,
-                                          color="1A7A1A" if val>=0 else "C0392B")
-                ws2.row_dimensions[open_row].height = 15
-                open_row += 1
-
+            wb, info = self._build_portfolio_workbook()
             wb.save(fp)
-            messagebox.showinfo(APP_NAME,
-                f"Portfolio exported successfully.\n\n"
-                f"• Sheet 1 — All {len(contracts)} contracts grouped by commodity\n"
-                f"• Sheet 2 — Open contracts only (live MTM reference)\n\n"
-                f"Columns include:\n"
-                f"  Contract data · Own-after (all-in) · "
-                f"Local ±15d · vs Local · Total saving\n"
-                f"  CBOT D-15 · Spot CIF · vs Spot · "
-                f"Verdict per contract\n\n{fp}")
-
+            messagebox.showinfo(
+                APP_NAME,
+                "Portfolio exported (formula-based).\n\n"
+                f"• Summary — realized savings + open expected saving by commodity\n"
+                f"• Closed – Realized — {info['closed']} contracts (same numbers as the Savings tab)\n"
+                f"• Open – Live MTM — {info['open']} contracts with today's CIF\n"
+                f"• Assumptions — edit FX, CBOT, local prices and thresholds;\n"
+                f"  every saving recalculates in Excel\n"
+                f"• How Savings Work — the formulas in plain words\n\n{fp}")
         except Exception as e:
             log_exception(e, "_export_portfolio_excel")
             messagebox.showerror(APP_NAME, f"Export failed: {e}")
+
+    def _portfolio_priced_part(self, cid, c, factor):
+        """(priced fraction 0..1, priced CIF USD/MT) for one contract.
+
+        A fully priced contract uses its saved contract CIF.  A partly priced
+        contract uses the quantity-weighted CIF of the pricing lots that carry
+        a CBOT, so the unpriced balance can float with today's CBOT.
+        """
+        status = self._contract_pricing_status(c)
+        saved_cif = self._contract_cif_usd(c, cid)
+        if status == "PRICED" and saved_cif is not None:
+            return 1.0, saved_cif
+        qty = to_float(c.get("qty_mt"), 0.0) or 0.0
+        contract_prem = to_float(c.get("premium_cents"), None)
+        num = den = 0.0
+        if factor:
+            for lot in self._contract_pricing_lots(c) or []:
+                lq = to_float(lot.get("qty_mt"), 0.0) or 0.0
+                lc = to_float(lot.get("cbot"), None)
+                lp = to_float(lot.get("premium_cents"), contract_prem)
+                if lq > 0 and lc is not None and lp is not None:
+                    num += (lc + lp) * factor * lq
+                    den += lq
+        if den > 0 and qty > 0:
+            return min(den / qty, 1.0), num / den
+        if status == "PRICED":
+            return 1.0, saved_cif
+        return 0.0, None
+
+    def _build_portfolio_workbook(self, today=None):
+        """Build the CPG Portfolio workbook.  Returns (workbook, info).
+
+        Closed contracts reproduce the Savings tab row by row
+        (_sv_contract_saving_row).  Open contracts are marked to market with
+        today's CBOT / FX / local price, which live on the Assumptions sheet so
+        the whole book recalculates when they are edited.
+        """
+        from openpyxl import Workbook
+        from openpyxl.utils import get_column_letter as L
+
+        today = today or dt.date.today()
+        kit = _XlKit()
+        md = self.state_obj.get("market_data", {}) or {}
+        contracts = self.state_obj.get("contracts", {}) or {}
+        fx_today = to_float((md.get("fx", {}) or {}).get("price"), None)
+        quotes = md.get("cbot_quotes", {}) or {}
+
+        wb = Workbook()
+        wb.calculation.calcOnSave = True
+        wb.calculation.fullCalcOnLoad = True
+        ws_sum = wb.active
+        ws_sum.title = "Summary"
+        ws_a = wb.create_sheet("Assumptions")
+        ws_c = wb.create_sheet("Closed – Realized")
+        ws_o = wb.create_sheet("Open – Live MTM")
+        ws_h = wb.create_sheet("How Savings Work")
+        A = "Assumptions!"
+
+        # ── Assumptions ───────────────────────────────────────────────
+        kit.title(ws_a, "Assumptions — edit the yellow cells; every sheet recalculates",
+                  f"Generated {today.isoformat()} from Prometheus market data", 6)
+        for col, w in zip("ABCDEF", (46, 16, 12, 16, 26, 20)):
+            ws_a.column_dimensions[col].width = w
+        kit.put(ws_a, 4, 1, "Today's FX (EGP/USD)", kind="text", bold=True)
+        kit.put(ws_a, 4, 2, fx_today, "#,##0.0000", kind="input")
+        kit.put(ws_a, 5, 1, "Open contracts: use Form 4 FX when secured? (YES/NO)", kind="text", bold=True)
+        kit.put(ws_a, 5, 2, "YES", kind="input")
+        kit.put(ws_a, 6, 1, "Strong win threshold (EGP/MT)", kind="text", bold=True)
+        kit.put(ws_a, 6, 2, 500, "#,##0", kind="input")
+        kit.put(ws_a, 7, 1, "Loss threshold (EGP/MT, entered as a positive number)", kind="text", bold=True)
+        kit.put(ws_a, 7, 2, 500, "#,##0", kind="input")
+        FX_CELL, F4_CELL, STRONG_CELL, LOSS_CELL = (
+            f"{A}$B$4", f"{A}$B$5", f"{A}$B$6", f"{A}$B$7")
+
+        kit.header(ws_a, 9, [("CBOT board", None), ("Live CBOT", None),
+                             ("Unit", None), ("Factor → USD/MT", None),
+                             ("Quote as of", None)])
+        cbot_cell, factor_cell = {}, {}
+        r = 10
+        for board in ("CORN", "SOYBEAN", "WHEAT", "SBM"):
+            price, _src, as_of, unit = self._hd_live_quote_details(board)
+            kit.put(ws_a, r, 1, board, kind="text", bold=True)
+            kit.put(ws_a, r, 2, price, "#,##0.00", kind="input")
+            kit.put(ws_a, r, 3, unit, kind="note")
+            kit.put(ws_a, r, 4, cbot_conv_factor(board, strict=True), "0.00000", kind="input")
+            kit.put(ws_a, r, 5, as_of or "", kind="note")
+            cbot_cell[board] = f"{A}$B${r}"
+            factor_cell[board] = f"{A}$D${r}"
+            r += 1
+
+        # Latest local price per local key used by open contracts.
+        r += 1
+        local_hdr_row = r
+        kit.header(ws_a, r, [("Local price key", None), ("Latest local all-in EGP/MT", None),
+                             ("", None), ("", None), ("Price date", None)])
+        r += 1
+        local_cell = {}
+
+        def _local_ref(key):
+            nonlocal r
+            if key not in local_cell:
+                pairs = self._local_price_map(key) if key else []
+                d, p = (pairs[-1] if pairs else (None, None))
+                kit.put(ws_a, r, 1, key, kind="text", bold=True)
+                kit.put(ws_a, r, 2, p, "#,##0", kind="input")
+                kit.put(ws_a, r, 5, d.isoformat() if d else "no local price logged", kind="note")
+                local_cell[key] = f"{A}$B${r}"
+                r += 1
+            return local_cell[key]
+
+        # ── Closed – Realized ─────────────────────────────────────────
+        closed_cols = [
+            ("Contract", 18), ("Supplier", 14), ("Commodity", 11), ("Origin", 10),
+            ("Delivery /\nstorage date", 11), ("Qty MT", 9),
+            ("CIF\n$/MT", 9), ("Delivery FX\nEGP/$", 10),
+            ("Intake /\nDischarge", 9), ("Clearance", 9), ("Freight\n(effective)", 9),
+            ("Own-after\nEGP/MT", 11), ("Local price\ndate", 11), ("Local\nEGP/MT", 10),
+            ("Saving\nEGP/MT", 10), ("Total saving\nEGP", 14), ("Verdict", 13),
+            ("Premium", 9), ("Factor", 8), ("CBOT at\ndelivery −15d", 11),
+            ("CBOT date", 11), ("CIF if priced\nat D−15 $/MT", 12),
+            ("Pricing timing\nEGP/MT", 12), ("Pricing timing\ntotal EGP", 14),
+            ("Overall", 12),
+        ]
+        kit.title(ws_c, "Closed contracts — realized savings (identical to the Savings tab)",
+                  "Saving = Local price on the delivery/storage date − Own-after.   "
+                  "Own-after = CIF × Delivery FX + Intake + Clearance + Freight.   "
+                  "Pricing timing = what the same premium would have cost at the CBOT "
+                  "15 days before delivery (positive = you priced better).", len(closed_cols))
+        kit.header(ws_c, 4, closed_cols)
+        ws_c.freeze_panes = "B5"
+        cbot_hist_cache = {}
+        excluded = []
+        r_c = 5
+        for cid, c in sorted(contracts.items(),
+                             key=lambda x: (x[1].get("storage_start") or x[1].get("delivery_date") or "")):
+            if self._contract_is_open(c):
+                continue
+            row = self._sv_contract_saving_row(cid, c, f_status="Closed")
+            if row is None:
+                excluded.append((cid, c, "Contract is not marked as priced — the Savings tab skips it too"))
+                continue
+            comm = row["commodity"]
+            base = comm.split("-")[0]
+            factor = cbot_conv_factor(base, strict=True)
+            prem = to_float(c.get("premium_cents"), None)
+            # Same local price the Savings tab uses; look up its date for audit.
+            local, local_date = row["local"], ""
+            del_d = parse_date_flex(row["delivery_date"])
+            if local is not None and del_d is not None:
+                p_chk, _lk, d_chk = self._hd_local_for_contract(c, date_str=del_d.isoformat())
+                if p_chk == local:
+                    local_date = d_chk
+            cbot_d15 = cbot_d15_date = None
+            if factor and del_d is not None:
+                if base not in cbot_hist_cache:
+                    cbot_hist_cache[base] = self._basis_history_lists(base)[0]
+                cbot_d15, cbot_d15_date = self._basis_nearest_le(
+                    cbot_hist_cache[base], (del_d - dt.timedelta(days=15)).isoformat())
+            x = r_c
+            vals = [
+                (1, row["ref"], None, "text"), (2, row["supplier"], None, "text"),
+                (3, comm, None, "text"), (4, row["origin"], None, "text"),
+                (5, row["delivery_date"], None, "text"), (6, row["qty"], "#,##0", "input"),
+                (7, row["cif_usd"], "#,##0.00", "input"), (8, row["delivery_fx"], "#,##0.0000", "input"),
+                (9, row["discharge"], "#,##0.00", "input"), (10, row["clearance"], "#,##0.00", "input"),
+                (11, row["freight"], "#,##0.00", "input"),
+                (12, f'=IF(COUNT(G{x},H{x})<2,"",G{x}*H{x}+I{x}+J{x}+K{x})', "#,##0", "formula"),
+                (13, local_date or "", None, "note"), (14, local, "#,##0", "input"),
+                (15, f'=IF(OR(L{x}="",N{x}=""),"",N{x}-L{x})', "+#,##0;-#,##0;0", "formula"),
+                (16, f'=IF(OR(O{x}="",F{x}=""),"",O{x}*F{x})', "+#,##0;-#,##0;0", "formula"),
+                (17, f'=IF(O{x}="","—",IF(O{x}>={STRONG_CELL},"✔ STRONG WIN",IF(O{x}>0,"✔ WIN",'
+                     f'IF(O{x}>-{LOSS_CELL},"⚠ MARGINAL","✘ LOSS"))))', None, "formula"),
+                (18, prem, "#,##0.00", "input"), (19, factor, "0.00000", "input"),
+                (20, cbot_d15, "#,##0.00", "input"), (21, cbot_d15_date or "", None, "note"),
+                (22, f'=IF(COUNT(R{x},S{x},T{x})<3,"",(T{x}+R{x})*S{x})', "#,##0.00", "formula"),
+                (23, f'=IF(OR(V{x}="",G{x}="",H{x}=""),"",(V{x}-G{x})*H{x})', "+#,##0;-#,##0;0", "formula"),
+                (24, f'=IF(OR(W{x}="",F{x}=""),"",W{x}*F{x})', "+#,##0;-#,##0;0", "formula"),
+                (25, f'=IF(O{x}="","—",IF(AND(O{x}>0,N(W{x})>=0),"✔✔ OPTIMAL",IF(O{x}>0,"✔ WIN",'
+                     f'IF(O{x}<=-{LOSS_CELL},"✘ LOSS","⚠ MIXED"))))', None, "formula"),
+            ]
+            for col, v, fmt, kind in vals:
+                kit.put(ws_c, x, col, v, fmt, kind=kind, bold=(col == 1))
+            r_c += 1
+        closed_first, closed_last = 5, r_c - 1
+        n_closed = max(0, closed_last - closed_first + 1)
+        if n_closed:
+            tot = r_c
+            kit.put(ws_c, tot, 1, "TOTAL — closed contracts", kind="text", bold=True)
+            for col, fmt in ((6, "#,##0"), (16, "+#,##0;-#,##0;0"), (24, "+#,##0;-#,##0;0")):
+                cl = L(col)
+                kit.put(ws_c, tot, col, f"=SUM({cl}{closed_first}:{cl}{closed_last})", fmt, bold=True)
+            kit.put(ws_c, tot, 15, f'=IF(SUMIF(O{closed_first}:O{closed_last},"<>",F{closed_first}:F{closed_last})=0,"",'
+                                   f'P{tot}/SUMIF(O{closed_first}:O{closed_last},"<>",F{closed_first}:F{closed_last}))',
+                    "+#,##0;-#,##0;0", bold=True)
+            for col in range(1, len(closed_cols) + 1):
+                ws_c.cell(row=tot, column=col).fill = kit.tot_fill
+            kit.verdict_colours(ws_c, f"Q{closed_first}:Q{closed_last}")
+            kit.verdict_colours(ws_c, f"Y{closed_first}:Y{closed_last}")
+            for cl in ("O", "P", "W", "X"):
+                kit.sign_colours(ws_c, f"{cl}{closed_first}:{cl}{closed_last}")
+            ws_c.auto_filter.ref = f"A4:{L(len(closed_cols))}{closed_last}"
+            r_c += 2
+        if excluded:
+            kit.put(ws_c, r_c, 1, "Closed contracts not counted (same rule as the Savings tab)", kind="text", bold=True)
+            r_c += 1
+            for cid, c, why in excluded:
+                kit.put(ws_c, r_c, 1, c.get("contract_ref") or c.get("name") or cid, kind="text")
+                kit.put(ws_c, r_c, 3, (c.get("commodity") or "").upper(), kind="text")
+                ws_c.merge_cells(start_row=r_c, start_column=4, end_row=r_c, end_column=12)
+                kit.put(ws_c, r_c, 4, why, kind="note")
+                r_c += 1
+
+        # ── Open – Live MTM ───────────────────────────────────────────
+        open_cols = [
+            ("Contract", 18), ("Supplier", 14), ("Commodity", 11), ("Origin", 10),
+            ("Delivery\ndate", 11), ("Pricing\nstatus", 10), ("Open qty\nMT", 9),
+            ("Priced\nshare", 8), ("Contract CIF\n(priced part) $/MT", 12),
+            ("Premium", 9), ("Live CBOT", 10), ("Factor", 8),
+            ("CIF of the\nmoment $/MT", 11), ("CIF used\n$/MT", 10),
+            ("Form 4 FX\n(if secured)", 10), ("FX used\nEGP/$", 10),
+            ("Intake /\nDischarge", 9), ("Clearance", 9), ("Freight\n(effective)", 9),
+            ("Own-after\nEGP/MT", 11), ("Local key", 10), ("Local today\nEGP/MT", 11),
+            ("Expected saving\nEGP/MT", 12), ("Expected saving\ntotal EGP", 14), ("Verdict", 13),
+            ("Pricing MTM\nEGP/MT", 11), ("Pricing MTM\ntotal EGP", 13),
+        ]
+        kit.title(ws_o, f"Open contracts — live mark-to-market at {today.isoformat()}",
+                  "CIF of the moment = (Live CBOT + Premium) × Factor.   CIF used = priced part at the contract CIF, "
+                  "unpriced part at the CIF of the moment.   Expected saving = Local today − Own-after.   "
+                  "Pricing MTM = gain (+) or loss (−) from the price you already fixed versus today's market.",
+                  len(open_cols))
+        kit.header(ws_o, 4, open_cols)
+        ws_o.freeze_panes = "B5"
+        r_o = 5
+        for cid, c in sorted(contracts.items(), key=lambda x: (x[1].get("delivery_date") or "")):
+            if not self._contract_is_open(c):
+                continue
+            comm = (c.get("commodity") or "").upper()
+            base = comm.split("-")[0]
+            factor = cbot_conv_factor(base, strict=True)
+            econ = self._hd_cost_for_contract(cid, c, use_latest_fx=True, fx_mode="live")
+            status = self._contract_pricing_status(c)
+            frac, priced_cif = self._portfolio_priced_part(cid, c, factor)
+            if priced_cif is None and frac > 0:
+                frac = 0.0
+            prem = to_float(c.get("premium_cents"), None)
+            has_live = bool(factor) and prem is not None and base in cbot_cell
+            if not has_live and frac == 0 and self._contract_cif_usd(c, cid) is not None:
+                # Flat-priced / non-CBOT commodity: the saved CIF is the only price.
+                frac, priced_cif = 1.0, self._contract_cif_usd(c, cid)
+            form4 = to_float(c.get("form4_fx"), None)
+            _lp, local_key, _ld = self._hd_local_for_contract(c, latest=True)
+            if not local_key:
+                keys = self._hd_local_keys_for_contract(c)
+                local_key = keys[0] if keys else comm
+            x = r_o
+            if frac >= 1:
+                cif_used = f'=IF(I{x}="","",I{x})'
+            elif frac <= 0:
+                cif_used = f'=IF(M{x}="","",M{x})'
+            else:
+                cif_used = f'=IF(COUNT(I{x},M{x})<2,"",H{x}*I{x}+(1-H{x})*M{x})'
+            vals = [
+                (1, self._hd_ref(cid, c), None, "text"), (2, c.get("supplier", ""), None, "text"),
+                (3, comm, None, "text"), (4, c.get("origin", ""), None, "text"),
+                (5, c.get("delivery_date") or c.get("storage_start") or "", None, "text"),
+                (6, status.title(), None, "text"),
+                (7, econ.get("qty"), "#,##0", "input"),
+                (8, frac, "0%", "input"),
+                (9, priced_cif, "#,##0.00", "input"),
+                (10, prem, "#,##0.00", "input"),
+                (11, f"={cbot_cell[base]}" if has_live else None, "#,##0.00", "formula"),
+                (12, f"={factor_cell[base]}" if has_live else None, "0.00000", "formula"),
+                (13, f'=IF(COUNT(J{x},K{x},L{x})<3,"",(K{x}+J{x})*L{x})', "#,##0.00", "formula"),
+                (14, cif_used, "#,##0.00", "formula"),
+                (15, form4, "#,##0.0000", "input"),
+                (16, f'=IF(AND(UPPER({F4_CELL})="YES",N(O{x})>0),O{x},{FX_CELL})', "#,##0.0000", "formula"),
+                (17, econ.get("disc"), "#,##0.00", "input"), (18, econ.get("clr"), "#,##0.00", "input"),
+                (19, econ.get("freight"), "#,##0.00", "input"),
+                (20, f'=IF(COUNT(N{x},P{x})<2,"",N{x}*P{x}+Q{x}+R{x}+S{x})', "#,##0", "formula"),
+                (21, local_key, None, "text"),
+                (22, f"={_local_ref(local_key)}", "#,##0", "formula"),
+                (23, f'=IF(OR(T{x}="",V{x}="",V{x}=0),"",V{x}-T{x})', "+#,##0;-#,##0;0", "formula"),
+                (24, f'=IF(OR(W{x}="",G{x}=""),"",W{x}*G{x})', "+#,##0;-#,##0;0", "formula"),
+                (25, f'=IF(W{x}="","—",IF(W{x}>={STRONG_CELL},"✔ STRONG WIN",IF(W{x}>0,"✔ WIN",'
+                     f'IF(W{x}>-{LOSS_CELL},"⚠ MARGINAL","✘ LOSS"))))', None, "formula"),
+                (26, f'=IF(OR(H{x}<=0,I{x}="",M{x}="",P{x}=""),0,(M{x}-I{x})*P{x}*H{x})', "+#,##0;-#,##0;0", "formula"),
+                (27, f'=IF(G{x}="","",Z{x}*G{x})', "+#,##0;-#,##0;0", "formula"),
+            ]
+            for col, v, fmt, kind in vals:
+                kit.put(ws_o, x, col, v, fmt, kind=kind, bold=(col == 1))
+            r_o += 1
+        open_first, open_last = 5, r_o - 1
+        n_open = max(0, open_last - open_first + 1)
+        if n_open:
+            tot = r_o
+            kit.put(ws_o, tot, 1, "TOTAL — open contracts", kind="text", bold=True)
+            for col, fmt in ((7, "#,##0"), (24, "+#,##0;-#,##0;0"), (27, "+#,##0;-#,##0;0")):
+                cl = L(col)
+                kit.put(ws_o, tot, col, f"=SUM({cl}{open_first}:{cl}{open_last})", fmt, bold=True)
+            for col in range(1, len(open_cols) + 1):
+                ws_o.cell(row=tot, column=col).fill = kit.tot_fill
+            kit.verdict_colours(ws_o, f"Y{open_first}:Y{open_last}")
+            for cl in ("W", "X", "Z", "AA"):
+                kit.sign_colours(ws_o, f"{cl}{open_first}:{cl}{open_last}")
+            ws_o.auto_filter.ref = f"A4:{L(len(open_cols))}{open_last}"
+
+        # ── Summary ───────────────────────────────────────────────────
+        kit.title(ws_sum, "CPG Procurement Portfolio — savings vs local market",
+                  f"Generated {today.isoformat()}  ·  formula-based: edit Assumptions and "
+                  "every figure recalculates  ·  yellow = input, white = formula", 7)
+        for col, w in zip("ABCDEFG", (22, 14, 18, 16, 14, 18, 18)):
+            ws_sum.column_dimensions[col].width = w
+        kit.header(ws_sum, 4, [("Commodity", None), ("Closed qty MT", None),
+                               ("Realized saving EGP", None), ("Realized EGP/MT", None),
+                               ("Open qty MT", None), ("Open expected saving EGP", None),
+                               ("Open pricing MTM EGP", None)])
+        comms = sorted({(c.get("commodity") or "").upper() for c in contracts.values()} - {""})
+        cr = f"'Closed – Realized'!"
+        orr = f"'Open – Live MTM'!"
+        rs = 5
+        for comm in comms:
+            kit.put(ws_sum, rs, 1, comm, kind="text", bold=True)
+            if n_closed:
+                rng_c = f"{cr}$C${closed_first}:$C${closed_last}"
+                kit.put(ws_sum, rs, 2, f'=SUMIFS({cr}$F${closed_first}:$F${closed_last},{rng_c},A{rs},'
+                                       f'{cr}$O${closed_first}:$O${closed_last},"<>")', "#,##0")
+                kit.put(ws_sum, rs, 3, f"=SUMIFS({cr}$P${closed_first}:$P${closed_last},{rng_c},A{rs})",
+                        "+#,##0;-#,##0;0")
+                kit.put(ws_sum, rs, 4, f'=IF(B{rs}=0,"",C{rs}/B{rs})', "+#,##0;-#,##0;0")
+            if n_open:
+                rng_o = f"{orr}$C${open_first}:$C${open_last}"
+                kit.put(ws_sum, rs, 5, f"=SUMIFS({orr}$G${open_first}:$G${open_last},{rng_o},A{rs})", "#,##0")
+                kit.put(ws_sum, rs, 6, f"=SUMIFS({orr}$X${open_first}:$X${open_last},{rng_o},A{rs})",
+                        "+#,##0;-#,##0;0")
+                kit.put(ws_sum, rs, 7, f"=SUMIFS({orr}$AA${open_first}:$AA${open_last},{rng_o},A{rs})",
+                        "+#,##0;-#,##0;0")
+            rs += 1
+        if comms:
+            kit.put(ws_sum, rs, 1, "TOTAL", kind="text", bold=True)
+            for col in (2, 3, 5, 6, 7):
+                cl = L(col)
+                kit.put(ws_sum, rs, col, f"=SUM({cl}5:{cl}{rs - 1})",
+                        "#,##0" if col in (2, 5) else "+#,##0;-#,##0;0", bold=True)
+            kit.put(ws_sum, rs, 4, f'=IF(B{rs}=0,"",C{rs}/B{rs})', "+#,##0;-#,##0;0", bold=True)
+            for col in range(1, 8):
+                ws_sum.cell(row=rs, column=col).fill = kit.tot_fill
+            for cl in ("C", "D", "F", "G"):
+                kit.sign_colours(ws_sum, f"{cl}5:{cl}{rs}")
+        kit.notes(ws_sum, rs + 2, [
+            "HOW TO READ THIS",
+            "Realized saving (closed contracts) is final: it compares what the contract cost on arrival with the local "
+            "price on the delivery/storage date. It matches the Savings tab exactly.",
+            "Open expected saving is provisional: it uses today's CBOT, FX and local price from the Assumptions sheet, "
+            "so it moves every day until the contract closes.",
+            "Pricing MTM shows whether the CBOT you already fixed is better (+) or worse (−) than today's CBOT.",
+            "See 'How Savings Work' for every formula.",
+        ], 7)
+
+        # ── How Savings Work ──────────────────────────────────────────
+        ws_h.column_dimensions["A"].width = 140
+        kit.title(ws_h, "How the app calculates savings", None, 1)
+        kit.notes(ws_h, 3, [
+            "THE CORE FORMULA",
+            "Saving per MT = Local market price (EGP/MT, incl. local transport) − Own-after import cost (EGP/MT).",
+            "Own-after = CIF (USD/MT) × FX (EGP/USD) + Intake/Discharge + Clearance + Freight (effective, incl. VAT when the contract uses DETAILED freight).",
+            "CIF = (CBOT + Premium) × Factor.  Factors: Corn 0.3937, Soybean/Wheat 0.36745 (¢/bu → $/MT), SBM 1.1023 ($/short ton → $/MT).",
+            "Total saving = Saving per MT × Quantity.  Positive = importing was cheaper than buying locally.",
+            "",
+            "CLOSED CONTRACTS (realized)",
+            "CIF = the saved contract CIF.  FX = the contract's delivery FX.  Fees = the contract's selected intake, its clearance and its effective freight.",
+            "Local price = the last local price logged ON OR BEFORE the delivery/storage date (never a later price).",
+            "Only contracts marked Closed and priced are counted — exactly the Savings tab rule.",
+            "Pricing timing (extra, informative) = ((CBOT 15 days before delivery + premium) × factor − contract CIF) × FX. "
+            "Positive = you fixed the price better than waiting until 15 days before delivery.",
+            "",
+            "OPEN CONTRACTS (live mark-to-market)",
+            "CIF of the moment = (today's CBOT + the contract premium) × factor.  This is shown for every open CBOT contract.",
+            "CIF used = priced part at the contract CIF (or the pricing lots) + unpriced part at the CIF of the moment.",
+            "FX used = the Form 4 FX when it is secured (switch on the Assumptions sheet), otherwise today's FX.",
+            "Local = today's latest local price.  Quantity = remaining open quantity.",
+            "Pricing MTM = (CIF of the moment − contract CIF) × FX × priced share.  Positive = your fixed price beats today's market.",
+            "",
+            "WHAT CHANGED FROM THE OLD PORTFOLIO EXCEL",
+            "1) The old sheet used the closest local price within ±15 days, which could be a price logged AFTER delivery. "
+            "Now it is the last price on or before delivery, like the Savings tab.",
+            "2) The old sheet used raw freight (no VAT) and a discharge field only. Now fees come from the same resolver as Home "
+            "and the Savings tab (selected intake + clearance + effective freight).",
+            "3) Open unpriced contracts showed no CIF. Now they show the CIF of the moment and a full expected saving.",
+            "4) Everything is an Excel formula driven by the Assumptions sheet.",
+        ], 1)
+
+        return wb, {"closed": n_closed, "open": n_open, "excluded": len(excluded)}
 
     def _build_savings_tracker(self):
         p = self.tab_savings
@@ -21454,6 +20916,148 @@ class App(tk.Tk):
                   foreground="#64748b").pack(side="left", padx=(14, 0))
         self._last_stress = None
 
+        # ── Row 5: shock settings (your own %, or from CBOT history) ──
+        ui = self.state_obj.setdefault("ui", {})
+        sf = ttk.LabelFrame(sec, text="Shock settings — type your own % moves "
+                                      "(comma-separated), or build them from CBOT history",
+                            padding=6)
+        sf.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(10, 0))
+        ttk.Label(sf, text="CBOT shocks %").grid(row=0, column=0, sticky="w")
+        self._stress_cbot_pct_var = tk.StringVar(
+            value=ui.get("stress_cbot_shocks_pct", "-5, 5, 10"))
+        ttk.Entry(sf, textvariable=self._stress_cbot_pct_var, width=26
+                  ).grid(row=0, column=1, sticky="w", padx=(4, 14))
+        ttk.Label(sf, text="FX shocks %").grid(row=0, column=2, sticky="w")
+        self._stress_fx_pct_var = tk.StringVar(
+            value=ui.get("stress_fx_shocks_pct", "-3, 3, 5, 10"))
+        ttk.Entry(sf, textvariable=self._stress_fx_pct_var, width=22
+                  ).grid(row=0, column=3, sticky="w", padx=(4, 14))
+        ttk.Label(sf, text="History horizon (days)").grid(row=0, column=4, sticky="w")
+        self._stress_horizon_var = tk.StringVar(
+            value=str(ui.get("stress_hist_horizon_days", 30)))
+        ttk.Entry(sf, textvariable=self._stress_horizon_var, width=6
+                  ).grid(row=0, column=5, sticky="w", padx=(4, 14))
+        ttk.Button(sf, text="Apply", command=self._apply_stress_settings
+                   ).grid(row=0, column=6, padx=(0, 6))
+        ttk.Button(sf, text="📈 Use CBOT history",
+                   command=self._stress_shocks_from_history
+                   ).grid(row=0, column=7, padx=(0, 6))
+        ttk.Button(sf, text="Reset", command=self._reset_stress_settings
+                   ).grid(row=0, column=8)
+        attach_tooltip(sf, "Example: CBOT '-15, -5, 5, 15' tests CBOT 15% lower "
+                           "and higher. 0% (the base) is always included. "
+                           "'Use CBOT history' sets CBOT shocks to the 12-month "
+                           "low/high and the worst fall/rise seen over the horizon.")
+        self._stress_hist_var = tk.StringVar(value="")
+        ttk.Label(sec, textvariable=self._stress_hist_var, foreground="#334155",
+                  justify="left", wraplength=1000, font=("Consolas", 9)
+                  ).grid(row=7, column=0, columnspan=3, sticky="w", pady=(6, 0))
+
+    def _stress_settings(self):
+        """(cbot shocks, fx shocks, horizon days) from saved settings."""
+        ui = self.state_obj.get("ui", {}) or {}
+        cbot = _core_parse_shock_percent_text(ui.get("stress_cbot_shocks_pct"))
+        fx = _core_parse_shock_percent_text(ui.get("stress_fx_shocks_pct"))
+        horizon = int(to_float(ui.get("stress_hist_horizon_days"), 30) or 30)
+        return cbot, fx, max(1, horizon)
+
+    def _apply_stress_settings(self):
+        try:
+            cbot_txt = self._stress_cbot_pct_var.get()
+            fx_txt = self._stress_fx_pct_var.get()
+            if (cbot_txt.strip() and _core_parse_shock_percent_text(cbot_txt) is None) or \
+                    (fx_txt.strip() and _core_parse_shock_percent_text(fx_txt) is None):
+                messagebox.showerror(APP_NAME, "Enter shocks as percentages separated by "
+                                               "commas, e.g.  -10, -5, 5, 10")
+                return
+            horizon = to_float(self._stress_horizon_var.get(), None)
+            if horizon is None or horizon < 1:
+                messagebox.showerror(APP_NAME, "History horizon must be a number of days ≥ 1.")
+                return
+            ui = self.state_obj.setdefault("ui", {})
+            ui["stress_cbot_shocks_pct"] = cbot_txt.strip()
+            ui["stress_fx_shocks_pct"] = fx_txt.strip()
+            ui["stress_hist_horizon_days"] = int(horizon)
+            save_state(self.state_obj)
+            if getattr(self, "_last_single_outputs", None) is not None:
+                self.calculate_single()
+        except Exception as e:
+            log_exception(e, "_apply_stress_settings")
+
+    def _reset_stress_settings(self):
+        self._stress_cbot_pct_var.set(", ".join(f"{v * 100:g}" for v in STRESS_CBOT_SHOCKS if v))
+        self._stress_fx_pct_var.set(", ".join(f"{v * 100:g}" for v in STRESS_FX_SHOCKS if v))
+        self._stress_horizon_var.set("30")
+        self._apply_stress_settings()
+
+    def _stress_history(self, commodity, spot, horizon=None):
+        """CBOT history statistics + named scenarios for the stress test."""
+        base = (commodity or "").upper().split("-")[0]
+        if horizon is None:
+            horizon = self._stress_settings()[2]
+        series = self._basis_history_lists(base)[0]
+        return _core_cbot_history_scenarios(series, spot, horizon, dt.date.today())
+
+    def _stress_shocks_from_history(self):
+        try:
+            res = self._last_stress
+            if not res or res.get("error"):
+                messagebox.showinfo(APP_NAME, "Run Calculate first so the current CBOT is known.")
+                return
+            horizon = int(to_float(self._stress_horizon_var.get(), 30) or 30)
+            hist = self._stress_history(res["inputs"]["commodity"], res["inputs"]["cbot"], horizon)
+            shocks = _core_suggested_cbot_shocks(hist)
+            if not shocks:
+                messagebox.showinfo(APP_NAME, "Not enough CBOT history logged for this "
+                                              "commodity. Import or log CBOT closes first.")
+                return
+            self._stress_cbot_pct_var.set(", ".join(f"{v * 100:g}" for v in shocks if v))
+            self._apply_stress_settings()
+        except Exception as e:
+            log_exception(e, "_stress_shocks_from_history")
+
+    def _stress_named_scenarios(self, res):
+        """Saving under each CBOT-history scenario at base FX and premium."""
+        if not res or res.get("error") or res.get("cbot_locked"):
+            return None, []
+        inp = res["inputs"]
+        hist = self._stress_history(inp["commodity"], inp["cbot"])
+        out = []
+        for sc in (hist or {}).get("scenarios", []):
+            landed = _core_stress_landed_cost_egp_mt(
+                sc["cbot"], inp["premium_cents"], inp["factor"], inp["fx"],
+                inp["fees_egp_mt"], inp.get("finance_days", 0.0), inp.get("interest_rate", 0.0))
+            sav = inp["local_egp_mt"] - landed
+            out.append({**sc, "landed_egp_mt": landed, "saving_egp_mt": sav,
+                        "saving_total_egp": sav * inp["qty_mt"]})
+        return hist, out
+
+    def _refresh_stress_history_text(self, res):
+        try:
+            if not res or res.get("error"):
+                self._stress_hist_var.set("")
+                return
+            if res.get("cbot_locked"):
+                self._stress_hist_var.set("CBOT is fixed on this contract — CBOT history "
+                                          "scenarios do not apply (only FX is stressed).")
+                return
+            hist, rows = self._stress_named_scenarios(res)
+            if not hist:
+                self._stress_hist_var.set("No CBOT history logged for this commodity — "
+                                          "historical scenarios unavailable.")
+                return
+            lines = [f"CBOT history ({hist['points']} closes, {hist['first_date']} → "
+                     f"{hist['last_date']}):  12-month low {hist['low_12m']:,.2f} "
+                     f"({hist['low_12m_date']})  ·  high {hist['high_12m']:,.2f} "
+                     f"({hist['high_12m_date']})  ·  now {hist['spot']:,.2f}"]
+            for r in rows:
+                lines.append(f"  {r['name']:<42} CBOT {r['cbot']:>9,.2f} ({r['shock']:+.1%})  →  "
+                             f"saving {r['saving_egp_mt']:+,.0f} EGP/MT · total "
+                             f"{r['saving_total_egp']:+,.0f}   [{r['note']}]")
+            self._stress_hist_var.set("\n".join(lines))
+        except Exception as e:
+            log_exception(e, "_refresh_stress_history_text")
+
     def _on_stress_whatif_toggle(self):
         try:
             if self._stress_whatif_prem_var.get():
@@ -21520,6 +21124,7 @@ class App(tk.Tk):
                 for ch in self._stress_hm.winfo_children():
                     ch.destroy()
                 self._stress_detail_var.set("")
+                self._refresh_stress_history_text(res)
                 return
             _lock_note = ""
             if res.get("cbot_locked"):
@@ -21567,6 +21172,7 @@ class App(tk.Tk):
                     text="", bg="#ffffff")
             self._refresh_stress_heatmap()
             self._draw_stress_gauges()
+            self._refresh_stress_history_text(res)
         except Exception as e:
             log_exception(e, "_refresh_stress_section")
 
@@ -21607,12 +21213,12 @@ class App(tk.Tk):
                      font=("Segoe UI", 8, "bold"), width=10
                      ).grid(row=0, column=0, sticky="nsew", padx=1, pady=1)
             for j, cs in enumerate(_cbot_cols, start=1):
-                tk.Label(hm, text=f"{cs:+.0%}" if cs else "Base",
+                tk.Label(hm, text=f"{cs:+.1%}" if cs else "Base",
                          bg="#1f3864", fg="#ffffff",
                          font=("Segoe UI", 8, "bold"), width=11
                          ).grid(row=0, column=j, sticky="nsew", padx=1, pady=1)
-            for i, fs in enumerate(STRESS_FX_SHOCKS, start=1):
-                tk.Label(hm, text=f"FX {fs:+.0%}" if fs else "FX Base",
+            for i, fs in enumerate(res.get("fx_shocks_used", STRESS_FX_SHOCKS), start=1):
+                tk.Label(hm, text=f"FX {fs:+.1%}" if fs else "FX Base",
                          bg="#334155", fg="#ffffff",
                          font=("Segoe UI", 8, "bold"), width=10
                          ).grid(row=i, column=0, sticky="nsew", padx=1, pady=1)
@@ -21711,7 +21317,7 @@ class App(tk.Tk):
             tv.column(c, width=100, anchor="e" if c != "Classification" else "w")
         for r in res["rows"]:
             tv.insert("", "end", values=(
-                f"{r['cbot_shock']:+.0%}", f"{r['fx_shock']:+.0%}",
+                f"{r['cbot_shock']:+.1%}", f"{r['fx_shock']:+.1%}",
                 f"{r['prem_shock']:+,.0f}", f"{r['cbot']:,.2f}",
                 f"{r['fx']:.4f}", f"{r['premium']:,.1f}",
                 f"{r['landed_egp_mt']:,.0f}", f"{r['saving_egp_mt']:+,.0f}",
@@ -21721,14 +21327,7 @@ class App(tk.Tk):
         tv.configure(yscrollcommand=ysb.set)
 
     def export_stress_excel(self):
-        """Formula-based stress test export.
-
-        Base CBOT/FX/premium/qty/local/fees/factor/finance days/rate live on the Assumptions
-        sheet as plain input cells (B2:B10). Every case row and every grid
-        cell is a live Excel formula built from those cells plus each row's
-        fixed shock magnitude, so editing an assumption recalculates the
-        whole sheet — exactly what a plain Python-computed export can't do.
-        """
+        """Export the formula-based stress test (Calculate tab)."""
         res = self._last_stress
         try:
             if not res or res.get("error"):
@@ -21744,176 +21343,231 @@ class App(tk.Tk):
                 defaultextension=".xlsx", filetypes=[("Excel", "*.xlsx")])
             if not fp:
                 return
-            from openpyxl import Workbook
-            from openpyxl.styles import Font, PatternFill, Alignment
-            wb = Workbook()
-            ws = wb.active
-            ws.title = "Stress Test"
-            inp = res["inputs"]
-
-            wsA = wb.create_sheet("Assumptions")
-            wsA["A1"] = "Stress Test — input assumptions (edit B2:B10)"
-            wsA["A1"].font = Font(bold=True, size=12)
-            assumption_rows = [
-                ("Base CBOT (¢/bu)", inp["cbot"], "#,##0.00"),
-                ("Base FX (EGP/USD)", inp["fx"], "#,##0.0000"),
-                ("Base Premium (¢/bu or $/st)", inp["premium_cents"], "#,##0.0"),
-                ("Quantity (MT)", inp["qty_mt"], "#,##0"),
-                ("Local price (EGP/MT)", inp["local_egp_mt"], "#,##0"),
-                ("Fees / direct intake (EGP/MT)", inp["fees_egp_mt"], "#,##0"),
-                ("Conversion factor (CBOT unit → USD/MT)", inp["factor"], "0.0000"),
-                ("Finance days", inp.get("finance_days", 0.0), "#,##0"),
-                ("Annual interest rate (%)", inp.get("interest_rate", 0.0), "0.00"),
-            ]
-            for i, (label, value, fmt) in enumerate(assumption_rows, start=2):
-                wsA.cell(row=i, column=1, value=label).font = Font(bold=True)
-                c = wsA.cell(row=i, column=2, value=value)
-                c.number_format = fmt
-            wsA["A12"] = ("Formula: CIF USD/MT = (shocked CBOT + shocked premium) × factor; "
-                          "Carry USD/MT = CIF × annual rate × finance days / 360; "
-                          "Landed EGP/MT = (CIF + Carry) × shocked FX + fees/direct intake")
-            wsA["A13"] = "Saving EGP/MT = Local price − Landed EGP/MT   ·   Total EGP = Saving × Qty"
-            wsA["A14"] = ("CBOT/FX shocks are % moves off B2/B3; premium shocks are moves off B4. "
-                          "Finance days and interest rate stay fixed unless you edit Assumptions. "
-                          "The zero-shock Base must reconcile to the Single Deal Calculator Direct Saving.")
-            wsA.column_dimensions["A"].width = 44
-            wsA.column_dimensions["B"].width = 14
-
-            def _saving_formula(cbot_shock, fx_shock, prem_shock):
-                return (f"=Assumptions!$B$6-((((Assumptions!$B$2*(1+{cbot_shock})+"
-                        f"(Assumptions!$B$4+{prem_shock}))*Assumptions!$B$8)*"
-                        f"(1+(Assumptions!$B$10/100)*(Assumptions!$B$9/360))*"
-                        f"(Assumptions!$B$3*(1+{fx_shock})))+Assumptions!$B$7)")
-
-            def _total_formula(cbot_shock, fx_shock, prem_shock):
-                return f"=({_saving_formula(cbot_shock, fx_shock, prem_shock)[1:]})*Assumptions!$B$5"
-
-            def _cbot_formula(cbot_shock):
-                return f"=Assumptions!$B$2*(1+{cbot_shock})"
-
-            def _fx_formula(fx_shock):
-                return f"=Assumptions!$B$3*(1+{fx_shock})"
-
-            def _premium_formula(prem_shock):
-                return f"=Assumptions!$B$4+{prem_shock}"
-
-            def _landed_formula(cbot_shock, fx_shock, prem_shock):
-                return (f"=(((Assumptions!$B$2*(1+{cbot_shock})+"
-                        f"(Assumptions!$B$4+{prem_shock}))*Assumptions!$B$8)*"
-                        f"(1+(Assumptions!$B$10/100)*(Assumptions!$B$9/360))*"
-                        f"(Assumptions!$B$3*(1+{fx_shock})))+Assumptions!$B$7")
-
-            ws["A1"] = (f"Stress Test — {inp['commodity']}   ·   engine "
-                        f"v{res['version']}   ·   {res['ts']}")
-            ws["A1"].font = Font(bold=True, size=13)
-            ws["A2"] = ("Formula-based: edit Assumptions!B2:B10 (CBOT, FX, premium, "
-                        "qty, local, fees, factor, finance days, interest rate) and every case and grid cell "
-                        "below recalculates automatically.")
-            ws["A3"] = ("Market data is prototype/public-feed grade unless "
-                        "manually verified — not a licensed live feed.")
-            r = 5
-            ws.cell(row=r, column=1, value="Case").font = Font(bold=True)
-            for ci, h in enumerate(["Saving EGP/MT", "Total EGP", "Δ Saving vs Base %",
-                                    "CBOT", "FX", "Premium", "Landed EGP/MT"], start=2):
-                ws.cell(row=r, column=ci, value=h).font = Font(bold=True)
-            case_order = (("best", "Best"), ("base", "Base"), ("adverse", "Adverse"))
-            case_rows = {key: r + 1 + i for i, (key, _label) in enumerate(case_order)}
-            base_saving_cell = f"B{case_rows['base']}"
-            for key, label in case_order:
-                r = case_rows[key]
-                row = res[key]
-                cs, fs, ps = row["cbot_shock"], row["fx_shock"], row["prem_shock"]
-                ws.cell(row=r, column=1, value=label)
-                c_sav = ws.cell(row=r, column=2, value=_saving_formula(cs, fs, ps))
-                c_sav.number_format = "#,##0"
-                c_tot = ws.cell(row=r, column=3, value=_total_formula(cs, fs, ps))
-                c_tot.number_format = "#,##0"
-                if key == "base":
-                    ws.cell(row=r, column=4, value="—")
-                else:
-                    c_delta = ws.cell(
-                        row=r, column=4,
-                        value=f"=(B{r}-{base_saving_cell})/ABS({base_saving_cell})*100")
-                    c_delta.number_format = "+#,##0.0;[Red]-#,##0.0"
-                ws.cell(row=r, column=5, value=_cbot_formula(cs)).number_format = "#,##0.00"
-                ws.cell(row=r, column=6, value=_fx_formula(fs)).number_format = "#,##0.0000"
-                ws.cell(row=r, column=7, value=_premium_formula(ps)).number_format = "#,##0.0"
-                ws.cell(row=r, column=8, value=_landed_formula(cs, fs, ps)).number_format = "#,##0"
-            r = case_rows["adverse"]
-            r += 2
-            ws.cell(row=r, column=1,
-                    value=f"High Risk (at export-time assumptions): {'YES' if res['high_risk'] else 'No'}"
-                    ).font = Font(bold=True,
-                                  color="B00020" if res["high_risk"] else "1A7A1A")
-            r += 1
-            ws.cell(row=r, column=1,
-                    value=(f"Break-even CBOT: "
-                           f"{res['be_cbot'] if res['be_cbot'] is not None else 'Not available'}"
-                           f"   (buffer {res['cbot_buffer']} / "
-                           f"{res['cbot_buffer_pct']}%)"))
-            r += 1
-            ws.cell(row=r, column=1,
-                    value=(f"Break-even FX: "
-                           f"{res['be_fx'] if res['be_fx'] is not None else 'Not available'}"
-                           f"   (buffer {res['fx_buffer']} / "
-                           f"{res['fx_buffer_pct']}%)"))
-            r += 1
-            ws.cell(row=r, column=1,
-                    value=("Note: Best/Base/Adverse and the two break-evens above reflect "
-                           "the shock combination identified as such when this was exported. "
-                           "Editing Assumptions recalculates their values using that same "
-                           "combination — it does not re-search the grid for a new best/worst "
-                           "corner. The full grid below always recalculates every cell live."),
-                    ).alignment = Alignment(wrap_text=True)
-            ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=8)
-            ws.row_dimensions[r].height = 30
-            r += 2
-            # scenario matrices, one block per premium shock — every cell a
-            # live formula referencing Assumptions!B2:B10 plus this cell's
-            # fixed CBOT/FX/premium shock.
-            base_premium = to_float(inp.get("premium_cents"), None)
-            for ps in res.get("prem_shocks_used", STRESS_PREM_SHOCKS):
-                if res.get("premium_locked"):
-                    _ps_lbl = "premium LOCKED by contract (base only)"
-                else:
-                    pct_txt = (f" ({ps / base_premium * 100:+.0f}% of base premium)"
-                               if base_premium else "")
-                    _ps_lbl = f"premium shock {ps:+,.0f}¢{pct_txt}"
-                ws.cell(row=r, column=1,
-                        value=f"Saving EGP/MT — {_ps_lbl}"
-                        ).font = Font(bold=True)
-                r += 1
-                ws.cell(row=r, column=1, value="FX \\ CBOT").font = Font(bold=True)
-                for j, cs in enumerate(res.get("cbot_shocks_used", STRESS_CBOT_SHOCKS), start=2):
-                    ws.cell(row=r, column=j,
-                            value=f"{cs:+.0%}" if cs else "Base"
-                            ).font = Font(bold=True)
-                for fs in STRESS_FX_SHOCKS:
-                    r += 1
-                    ws.cell(row=r, column=1,
-                            value=f"{fs:+.0%}" if fs else "Base"
-                            ).font = Font(bold=True)
-                    for j, cs in enumerate(res.get("cbot_shocks_used", STRESS_CBOT_SHOCKS), start=2):
-                        row = next(x for x in res["rows"]
-                                   if x["cbot_shock"] == cs
-                                   and x["fx_shock"] == fs
-                                   and x["prem_shock"] == ps)
-                        cell = ws.cell(row=r, column=j,
-                                       value=_saving_formula(cs, fs, ps))
-                        cell.number_format = "#,##0"
-                        if row["classification"] == "Material Loss":
-                            cell.font = Font(color="FFFFFF", bold=True)
-                            cell.fill = PatternFill("solid", fgColor="DC2626")
-                        elif row["saving_egp_mt"] < 0:
-                            cell.font = Font(color="991B1B")
-                r += 2
-            for col, w in (("A", 16), ("B", 14), ("C", 14), ("D", 16),
-                           ("E", 12), ("F", 12), ("G", 12), ("H", 14)):
-                ws.column_dimensions[col].width = w
+            hist, named = self._stress_named_scenarios(res)
+            wb = self._build_stress_workbook(res, hist)
             wb.save(fp)
-            messagebox.showinfo(APP_NAME, f"Stress test exported with live formulas:\n{fp}")
+            messagebox.showinfo(APP_NAME, "Stress test exported with live formulas.\n\n"
+                                          "• Assumptions — base inputs and the shock % lists "
+                                          "(edit them; every grid recalculates)\n"
+                                          "• Stress Test — base, best, adverse, break-evens, grids\n"
+                                          "• CBOT History Scenarios — 12-month low/high and "
+                                          "worst historical moves\n\n" + fp)
         except Exception as e:
             self._surface_error("export_stress_excel", e, show=True)
+
+    def _build_stress_workbook(self, res, hist=None):
+        """Formula-based stress workbook.
+
+        Assumptions!B2:B10 hold the base deal; row 13 holds the CBOT shock
+        percentages and row 14 the FX shock percentages.  Every grid cell is
+        a formula that reads those cells, so the user can type any shock
+        (e.g. -20 or +15) in Excel and see the whole grid recalculate.
+        """
+        from openpyxl import Workbook
+        from openpyxl.formatting.rule import CellIsRule
+        from openpyxl.utils import get_column_letter as L
+
+        kit = _XlKit()
+        inp = res["inputs"]
+        wb = Workbook()
+        wb.calculation.calcOnSave = True
+        wb.calculation.fullCalcOnLoad = True
+        ws = wb.active
+        ws.title = "Stress Test"
+        wsA = wb.create_sheet("Assumptions")
+        wsH = wb.create_sheet("CBOT History Scenarios")
+
+        # ── Assumptions ───────────────────────────────────────────────
+        kit.title(wsA, "Stress Test — inputs (edit the yellow cells)", None, 10)
+        wsA.column_dimensions["A"].width = 44
+        for ci in range(2, 16):
+            wsA.column_dimensions[L(ci)].width = 11
+        base_rows = [
+            ("Base CBOT (¢/bu, SBM $/st)", inp["cbot"], "#,##0.00"),
+            ("Base FX (EGP/USD)", inp["fx"], "#,##0.0000"),
+            ("Base premium (same unit as CBOT)", inp["premium_cents"], "#,##0.00"),
+            ("Quantity (MT)", inp["qty_mt"], "#,##0"),
+            ("Local price (EGP/MT)", inp["local_egp_mt"], "#,##0"),
+            ("Local costs: intake + clearance + freight (EGP/MT)", inp["fees_egp_mt"], "#,##0.00"),
+            ("Conversion factor (CBOT unit → USD/MT)", inp["factor"], "0.00000"),
+            ("Finance days", inp.get("finance_days", 0.0), "#,##0"),
+            ("Annual interest rate (%)", inp.get("interest_rate", 0.0), "0.00"),
+        ]
+        for i, (label, value, fmt) in enumerate(base_rows, start=2):
+            wsA.cell(row=i, column=1, value=label).font = kit.bold_font
+            wsA.cell(row=i, column=1).border = kit.border
+            kit.put(wsA, i, 2, value, fmt, kind="input")
+        material = res.get("material_egp_mt", STRESS_MATERIAL_LOSS_EGP_MT)
+        wsA.cell(row=11, column=1, value="Material loss threshold (EGP/MT)").font = kit.bold_font
+        kit.put(wsA, 11, 2, material, "#,##0", kind="input")
+        cbot_sh = list(res.get("cbot_shocks_used", STRESS_CBOT_SHOCKS))
+        fx_sh = list(res.get("fx_shocks_used", STRESS_FX_SHOCKS))
+        wsA.cell(row=13, column=1, value="CBOT shocks (%) — type any values").font = kit.bold_font
+        wsA.cell(row=14, column=1, value="FX shocks (%) — type any values").font = kit.bold_font
+        for j, v in enumerate(cbot_sh):
+            kit.put(wsA, 13, 2 + j, round(v * 100, 4), "+0.0;-0.0;0", kind="input")
+        for j, v in enumerate(fx_sh):
+            kit.put(wsA, 14, 2 + j, round(v * 100, 4), "+0.0;-0.0;0", kind="input")
+        kit.notes(wsA, 16, [
+            "FORMULAS",
+            "CIF USD/MT = (CBOT × (1 + CBOT shock) + premium) × factor",
+            "Finance carry multiplier = 1 + annual rate/100 × finance days/360",
+            "Landed EGP/MT = CIF × carry multiplier × FX × (1 + FX shock) + local costs",
+            "Saving EGP/MT = Local price − Landed.   Total = Saving × Quantity.",
+            "Keep one shock at 0 in each list — that column/row is the base case and reconciles to the Single Deal Calculator.",
+        ], 10)
+        CBOT, FX, PREM, QTY, LOC, FEES, FAC, DAYS, RATE, MAT = (
+            f"Assumptions!$B${r}" for r in range(2, 12))
+        CARRY = f"(1+({RATE}/100)*({DAYS}/360))"
+
+        def saving_f(cbot_expr, fx_expr, prem_expr):
+            return f"={LOC}-((({cbot_expr})+({prem_expr}))*{FAC}*{CARRY}*({fx_expr})+{FEES})"
+
+        # ── Stress Test sheet ─────────────────────────────────────────
+        kit.title(ws, f"Stress Test — {inp['commodity']}  ·  engine v{res['version']}  ·  {res['ts']}",
+                  "Formula-based: edit Assumptions (base inputs and shock %) and everything below "
+                  "recalculates. Market data is public-feed grade unless verified.", 9)
+        ws.column_dimensions["A"].width = 30
+        for ci in range(2, 16):
+            ws.column_dimensions[L(ci)].width = 13
+        kit.header(ws, 4, [("Case", None), ("Saving EGP/MT", None), ("Total EGP", None),
+                           ("CBOT", None), ("FX", None), ("Premium", None), ("Landed EGP/MT", None)])
+        # Base (zero shock)
+        kit.put(ws, 5, 1, "Base (no shock)", kind="text", bold=True)
+        kit.put(ws, 5, 2, saving_f(CBOT, FX, PREM), "+#,##0;-#,##0;0", bold=True)
+        kit.put(ws, 5, 3, f"=B5*{QTY}", "+#,##0;-#,##0;0")
+        kit.put(ws, 5, 4, f"={CBOT}", "#,##0.00")
+        kit.put(ws, 5, 5, f"={FX}", "#,##0.0000")
+        kit.put(ws, 5, 6, f"={PREM}", "#,##0.00")
+        kit.put(ws, 5, 7, f"={LOC}-B5", "#,##0")
+
+        # Grids (one per premium shock) — written first so best/adverse can
+        # reference their ranges.
+        grid_start = 16
+        r = grid_start
+        grid_ranges = []
+        n_c, n_f = len(cbot_sh), len(fx_sh)
+        base_premium = to_float(inp.get("premium_cents"), None)
+        for ps in res.get("prem_shocks_used", STRESS_PREM_SHOCKS):
+            if res.get("premium_locked"):
+                lbl = "premium fixed by contract (base premium)"
+            else:
+                pct_txt = (f" ({ps / base_premium * 100:+.0f}% of base premium)" if base_premium else "")
+                lbl = f"premium shock {ps:+,.1f}{pct_txt}"
+            ws.cell(row=r, column=1, value=f"Saving EGP/MT — {lbl}").font = kit.bold_font
+            r += 1
+            kit.put(ws, r, 1, "FX shock ↓   /   CBOT shock →", kind="text", bold=True)
+            for j in range(n_c):
+                kit.put(ws, r, 2 + j, f"=Assumptions!{L(2 + j)}$13/100", "+0.0%;-0.0%;\"Base\"", bold=True)
+                ws.cell(row=r, column=2 + j).fill = kit.grp_fill
+            hdr_row = r
+            for i in range(n_f):
+                r += 1
+                kit.put(ws, r, 1, f"=Assumptions!{L(2 + i)}$14/100", "+0.0%;-0.0%;\"Base\"", bold=True)
+                ws.cell(row=r, column=1).fill = kit.grp_fill
+                for j in range(n_c):
+                    col = L(2 + j)
+                    kit.put(ws, r, 2 + j,
+                            saving_f(f"{CBOT}*(1+{col}${hdr_row})", f"{FX}*(1+$A{r})", f"{PREM}+({ps})"),
+                            "+#,##0;-#,##0;0")
+            rng = f"B{hdr_row + 1}:{L(1 + n_c)}{r}"
+            grid_ranges.append(rng)
+            ws.conditional_formatting.add(rng, CellIsRule(
+                operator="lessThanOrEqual", formula=[f"-{MAT}"],
+                fill=kit.PatternFill("solid", fgColor="DC2626"), font=kit.Font(color="FFFFFF", bold=True)))
+            ws.conditional_formatting.add(rng, CellIsRule(
+                operator="lessThan", formula=["0"], fill=kit.red_fill, font=kit.Font(color="991B1B")))
+            ws.conditional_formatting.add(rng, CellIsRule(
+                operator="greaterThan", formula=["0"], fill=kit.grn_fill, font=kit.Font(color="166534")))
+            r += 2
+
+        all_cells = ",".join(grid_ranges)
+        kit.put(ws, 6, 1, "Best case (max of all grids)", kind="text", bold=True)
+        kit.put(ws, 6, 2, f"=MAX({all_cells})", "+#,##0;-#,##0;0", bold=True)
+        kit.put(ws, 6, 3, f"=B6*{QTY}", "+#,##0;-#,##0;0")
+        kit.put(ws, 7, 1, "Adverse case (min of all grids)", kind="text", bold=True)
+        kit.put(ws, 7, 2, f"=MIN({all_cells})", "+#,##0;-#,##0;0", bold=True)
+        kit.put(ws, 7, 3, f"=B7*{QTY}", "+#,##0;-#,##0;0")
+        kit.put(ws, 8, 1, "High risk? (base profitable, adverse ≤ −material)", kind="text", bold=True)
+        kit.put(ws, 8, 2, f'=IF(AND(B5>0,B7<=-{MAT}),"⚠ HIGH RISK","✔ Pass")', None, bold=True)
+        kit.verdict_colours(ws, "B8:B8")
+        kit.sign_colours(ws, "B5:C7")
+
+        kit.put(ws, 10, 1, "Break-even CBOT", kind="text", bold=True)
+        kit.put(ws, 10, 2, f"=(({LOC}-{FEES})/{FX})/({FAC}*{CARRY})-{PREM}", "#,##0.00", bold=True)
+        kit.put(ws, 10, 3, f"=B10-{CBOT}", "+#,##0.00;-#,##0.00;0")
+        kit.put(ws, 10, 4, f"=IF({CBOT}=0,\"\",C10/{CBOT})", "+0.0%;-0.0%;0")
+        kit.put(ws, 10, 5, "buffer vs base CBOT (points, %)", kind="note")
+        kit.put(ws, 11, 1, "Break-even FX", kind="text", bold=True)
+        kit.put(ws, 11, 2, f"=({LOC}-{FEES})/(({CBOT}+{PREM})*{FAC}*{CARRY})", "#,##0.0000", bold=True)
+        kit.put(ws, 11, 3, f"=B11-{FX}", "+#,##0.0000;-#,##0.0000;0")
+        kit.put(ws, 11, 4, f"=IF({FX}=0,\"\",C11/{FX})", "+0.0%;-0.0%;0")
+        kit.put(ws, 11, 5, "buffer vs base FX (EGP, %)", kind="note")
+        kit.notes(ws, 13, [
+            "Best and adverse are the highest and lowest cells of the grids below, so they follow whatever shocks you type.",
+            "Grid colours: green = saving, light red = loss, dark red = material loss (Assumptions!B11).",
+        ], 9)
+
+        # ── CBOT History Scenarios ────────────────────────────────────
+        kit.title(wsH, "CBOT history scenarios — what if CBOT goes back to levels it has "
+                       "actually traded at?", None, 8)
+        wsH.column_dimensions["A"].width = 40
+        for col, w in zip("BCDEFGH", (12, 12, 44, 16, 16, 18, 18)):
+            wsH.column_dimensions[col].width = w
+        if res.get("cbot_locked"):
+            kit.notes(wsH, 3, ["CBOT is fixed on this contract, so CBOT scenarios do not apply. "
+                               "Only FX is stressed on the Stress Test sheet."], 8)
+        elif not hist:
+            kit.notes(wsH, 3, ["No CBOT history is logged for this commodity yet. Import or log "
+                               "CBOT daily closes (CBOT tab) to enable these scenarios."], 8)
+        else:
+            stats = [
+                ("History used", f"{hist['points']} closes, {hist['first_date']} → {hist['last_date']}"),
+                ("CBOT now (base)", hist["spot"]),
+                ("12-month low", f"{hist['low_12m']:,.2f} on {hist['low_12m_date']}"),
+                ("12-month high", f"{hist['high_12m']:,.2f} on {hist['high_12m_date']}"),
+                ("All-history low", f"{hist['low_all']:,.2f} on {hist['low_all_date']}"),
+                ("All-history high", f"{hist['high_all']:,.2f} on {hist['high_all_date']}"),
+                (f"Worst {hist['horizon_days']}-day fall / rise",
+                 (f"{hist['worst_fall_pct']:+.1%} / {hist['worst_rise_pct']:+.1%}"
+                  if hist.get("worst_fall_pct") is not None else "not enough history")),
+                (f"5th / 95th percentile {hist['horizon_days']}-day move",
+                 (f"{hist['p05_pct']:+.1%} / {hist['p95_pct']:+.1%}"
+                  if hist.get("p05_pct") is not None else "not enough history")),
+            ]
+            rr = 3
+            for k, v in stats:
+                kit.put(wsH, rr, 1, k, kind="text", bold=True)
+                kit.put(wsH, rr, 2, v, "#,##0.00" if isinstance(v, float) else None, kind="note")
+                rr += 1
+            rr += 1
+            kit.header(wsH, rr, [("Scenario", None), ("CBOT level", None), ("vs base CBOT", None),
+                                 ("Where it comes from", None), ("Saving EGP/MT\n(base FX)", None),
+                                 ("Total EGP\n(base FX)", None), ("Saving EGP/MT\n(+ worst FX shock)", None),
+                                 ("Total EGP\n(+ worst FX shock)", None)])
+            fx_hi = f"MAX(Assumptions!$B$14:${L(1 + n_f)}$14)/100"
+            first_sc = rr + 1
+            for sc in hist.get("scenarios", []):
+                rr += 1
+                kit.put(wsH, rr, 1, sc["name"], kind="text", bold=True)
+                kit.put(wsH, rr, 2, sc["cbot"], "#,##0.00", kind="input")
+                kit.put(wsH, rr, 3, f"=IF({CBOT}=0,\"\",B{rr}/{CBOT}-1)", "+0.0%;-0.0%;0")
+                kit.put(wsH, rr, 4, sc["note"], kind="note")
+                kit.put(wsH, rr, 5, saving_f(f"B{rr}", FX, PREM), "+#,##0;-#,##0;0")
+                kit.put(wsH, rr, 6, f"=E{rr}*{QTY}", "+#,##0;-#,##0;0")
+                kit.put(wsH, rr, 7, saving_f(f"B{rr}", f"{FX}*(1+{fx_hi})", PREM), "+#,##0;-#,##0;0")
+                kit.put(wsH, rr, 8, f"=G{rr}*{QTY}", "+#,##0;-#,##0;0")
+            if rr >= first_sc:
+                kit.sign_colours(wsH, f"E{first_sc}:H{rr}")
+            kit.notes(wsH, rr + 2, [
+                "HOW TO USE",
+                "The CBOT levels are real prices from your logged CBOT history — not an arbitrary ±5%. "
+                "Edit any level to test your own view.",
+                "'Worst N-day move' repeats the largest move ever seen over the horizon set in the app "
+                "(History horizon). Percentile rows show a bad-but-typical move.",
+                "The last two columns combine the CBOT scenario with the largest FX shock on the Assumptions sheet.",
+            ], 8)
+        return wb
 
     def _build_future_snapshot(self):
         ttk.Label(self.tab_future, text="Future Contract Snapshot (No contract selection needed)", font=("Segoe UI", 12, "bold")).grid(row=0, column=0, sticky="w")
@@ -28426,8 +28080,10 @@ class App(tk.Tk):
         if (min_ctx and latest_cbot and fx_now
                 and min_ctx.get("prem") is not None
                 and min_ctx.get("qty")):
+            _sig_cbot_sh, _sig_fx_sh, _sig_hz = self._stress_settings()
             _sig_inputs = {
                 "commodity": base, "cbot": latest_cbot, "fx": fx_now,
+                "cbot_shocks_custom": _sig_cbot_sh, "fx_shocks_custom": _sig_fx_sh,
                 "premium_locked": True,
                 "cbot_locked": bool(min_ctx.get("cbot_locked")),
                 "premium_cents": min_ctx["prem"], "qty_mt": min_ctx["qty"],
@@ -34061,8 +33717,11 @@ class App(tk.Tk):
                 _prem_locked = not _whatif_ready
                 _cbot_locked = bool(_lots) and all(
                     to_float(l.get("cbot"), None) is not None for l in _lots)
+                _cbot_sh, _fx_sh, _hz = self._stress_settings()
                 stress_inputs = {
                     "commodity": comm,
+                    "cbot_shocks_custom": _cbot_sh,
+                    "fx_shocks_custom": _fx_sh,
                     "premium_locked": _prem_locked,
                     "prem_shocks_custom": (self._stress_whatif_custom
                                            if _whatif_ready else None),
