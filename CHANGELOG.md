@@ -1,3 +1,7 @@
+# 2026-09-24 (c) — Calculate: finance carry applies to contracts too
+
+- With a contract selected, Finance Days and Interest Rate were ignored (carry forced to 0 to match Home). They now apply: Carry USD/MT = CIF × rate × days / 360 is added to Own-after, the saving and the stress test. Leave them at 0 to reconcile with Home/Portfolio; the status line states whether carry is included.
+
 # 2026-09-24 (b) — Calculate: local price matches Home and Savings
 
 - Selecting a contract in Calculate now always refreshes the Local Price (all-in, incl. local transport): open contracts use today's latest local price (same as Home, Live mode); closed contracts use the last price on/before delivery (same as the Savings tab). Previously the field was only refilled when the contract had a delivery date, so a previous deal's local price could stay in the field. The status line shows which price and date were used.

@@ -33650,7 +33650,9 @@ class App(tk.Tk):
                 selected_intake = indirect if mode.startswith("INDIRECT") else direct
             clearance = to_float(c.get("clearance_egp_mt"), 0.0) or 0.0
             canonical_landed_fees = (selected_intake or 0.0) + clearance + (freight or 0.0)
-            finance_days_value = 0.0
+            # Finance carry is applied when you enter Finance Days and Interest
+            # Rate (leave them at 0 to reconcile with Home / Portfolio, which
+            # carry no finance cost).
 
         inp = {
             "comm_meta": comm_meta,
@@ -33690,7 +33692,12 @@ class App(tk.Tk):
                 _clr = to_float(c.get("clearance_egp_mt"), 0.0) or 0.0
                 self.sd_market_status_var.set(
                     f"Contract reconciliation: {_mode} intake + clearance {_clr:,.2f} + freight · "
-                    f"total logistics {canonical_landed_fees:,.2f} EGP/MT · finance carry excluded")
+                    f"total logistics {canonical_landed_fees:,.2f} EGP/MT · "
+                    + (f"finance carry {fmt_num(out.get('carry_usd_mt'), 2)} USD/MT included "
+                       f"({to_float(inp.get('finance_days'), 0) or 0:,.0f} days @ "
+                       f"{to_float(inp.get('interest_rate'), 0) or 0:,.2f}%) — Home/Portfolio exclude it"
+                       if (to_float(out.get('carry_usd_mt'), 0) or 0) > 0 else
+                       "no finance carry (enter Finance Days + Interest Rate to include it)"))
             except Exception:
                 pass
 
