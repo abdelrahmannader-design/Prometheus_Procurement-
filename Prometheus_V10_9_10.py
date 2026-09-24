@@ -33319,24 +33319,28 @@ class App(tk.Tk):
                 if cur_fx and not self.sd_fx_var.get():
                     self.sd_fx_var.set(f"{cur_fx:.4f}")
 
-            # Local price — carry-forward from logged prices on delivery date
-            delivery_date_str = c.get("delivery_date") or ""
-            if delivery_date_str:
-                try:
-                    del_date = dt.date.fromisoformat(delivery_date_str)
-                    comm_keys = self._hd_local_keys_for_contract(c)
-                    local = None
-                    for ck in comm_keys:
-                        pairs = self._local_price_map(ck)
-                        if pairs:
-                            local = next((p for d, p in reversed(pairs)
-                                          if d <= del_date), None)
-                            if local:
-                                break
-                    if local:
-                        self.sd_local_var.set(str(int(local)))
-                except Exception as _e_19529:
-                    log_exception(_e_19529, "on_single_contract_change")
+            # Local price (all-in = logged price + local transport), chosen
+            # the same way as the other screens so the numbers reconcile:
+            #   open contract   → today's latest local price (Home, Live mode)
+            #   closed contract → last price on/before delivery (Savings tab)
+            # The field is always refreshed — a previous deal's local price is
+            # never left behind.
+            try:
+                if self._contract_is_open(c):
+                    local, _lk, local_date = self._hd_local_for_contract(c, latest=True)
+                    basis_txt = "today's latest (as Home, Live)"
+                else:
+                    del_d = parse_date_flex(c.get("storage_start") or c.get("delivery_date"))
+                    local, _lk, local_date = ((self._hd_local_for_contract(c, date_str=del_d.isoformat()))
+                                              if del_d else (None, "", ""))
+                    basis_txt = "on/before delivery (as Savings tab)"
+                self.sd_local_var.set(f"{local:.0f}" if local is not None else "")
+                if hasattr(self, "sd_market_status_var"):
+                    self.sd_market_status_var.set(
+                        f"Local price {local:,.0f} from {_lk} {local_date} — {basis_txt}, incl. local transport"
+                        if local is not None else "No logged local price for this contract — enter one")
+            except Exception as _e_19529:
+                log_exception(_e_19529, "on_single_contract_change")
 
             # Show BOTH supplier Intake alternatives in the calculator, but do
             # not confuse Indirect Intake with contract Clearance.  The actual

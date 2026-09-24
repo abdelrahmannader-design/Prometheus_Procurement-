@@ -1,3 +1,7 @@
+# 2026-09-24 (b) — Calculate: local price matches Home and Savings
+
+- Selecting a contract in Calculate now always refreshes the Local Price (all-in, incl. local transport): open contracts use today's latest local price (same as Home, Live mode); closed contracts use the last price on/before delivery (same as the Savings tab). Previously the field was only refilled when the contract had a delivery date, so a previous deal's local price could stay in the field. The status line shows which price and date were used.
+
 # 2026-09-24 — Stress Excel: complete best/adverse rows
 
 - Best and Adverse rows on the Stress Test sheet now show CBOT, FX, premium, landed cost and the shocks used (they previously showed only saving and total). Best = lowest shock of each list, Adverse = highest; a check column confirms they equal the grid max/min.
