@@ -21420,7 +21420,17 @@ class App(tk.Tk):
             kit.put(wsA, 13, 2 + j, round(v * 100, 4), "+0.0;-0.0;0", kind="input")
         for j, v in enumerate(fx_sh):
             kit.put(wsA, 14, 2 + j, round(v * 100, 4), "+0.0;-0.0;0", kind="input")
-        kit.notes(wsA, 16, [
+        prem_sh = list(res.get("prem_shocks_used", STRESS_PREM_SHOCKS))
+        wsA.cell(row=15, column=1, value=("Premium shocks (same unit as CBOT) — fixed by contract"
+                                          if res.get("premium_locked") else
+                                          "Premium shocks (same unit as CBOT) — type any values")
+                 ).font = kit.bold_font
+        for j, v in enumerate(prem_sh):
+            kit.put(wsA, 15, 2 + j, v, "+0.0;-0.0;0", kind="input")
+        CB_RNG = f"Assumptions!$B$13:${L(1 + len(cbot_sh))}$13"
+        FX_RNG = f"Assumptions!$B$14:${L(1 + len(fx_sh))}$14"
+        PR_RNG = f"Assumptions!$B$15:${L(1 + len(prem_sh))}$15"
+        kit.notes(wsA, 17, [
             "FORMULAS",
             "CIF USD/MT = (CBOT × (1 + CBOT shock) + premium) × factor",
             "Finance carry multiplier = 1 + annual rate/100 × finance days/360",
@@ -21438,20 +21448,35 @@ class App(tk.Tk):
         # ── Stress Test sheet ─────────────────────────────────────────
         kit.title(ws, f"Stress Test — {inp['commodity']}  ·  engine v{res['version']}  ·  {res['ts']}",
                   "Formula-based: edit Assumptions (base inputs and shock %) and everything below "
-                  "recalculates. Market data is public-feed grade unless verified.", 9)
+                  "recalculates. Market data is public-feed grade unless verified.", 10)
+        ws.merge_cells("A3:J3")
+        ws["A3"].value = ("If the numbers look empty, click 'Enable Editing' at the top of Excel — "
+                          "values appear once Excel calculates the formulas (previews and Protected View do not).")
+        ws["A3"].font = kit.note_font
         ws.column_dimensions["A"].width = 30
         for ci in range(2, 16):
             ws.column_dimensions[L(ci)].width = 13
         kit.header(ws, 4, [("Case", None), ("Saving EGP/MT", None), ("Total EGP", None),
-                           ("CBOT", None), ("FX", None), ("Premium", None), ("Landed EGP/MT", None)])
-        # Base (zero shock)
-        kit.put(ws, 5, 1, "Base (no shock)", kind="text", bold=True)
-        kit.put(ws, 5, 2, saving_f(CBOT, FX, PREM), "+#,##0;-#,##0;0", bold=True)
-        kit.put(ws, 5, 3, f"=B5*{QTY}", "+#,##0;-#,##0;0")
-        kit.put(ws, 5, 4, f"={CBOT}", "#,##0.00")
-        kit.put(ws, 5, 5, f"={FX}", "#,##0.0000")
-        kit.put(ws, 5, 6, f"={PREM}", "#,##0.00")
-        kit.put(ws, 5, 7, f"={LOC}-B5", "#,##0")
+                           ("CBOT", None), ("FX", None), ("Premium", None), ("Landed EGP/MT", None),
+                           ("CBOT shock", None), ("FX shock", None), ("Premium shock", None)])
+        # Base, best and adverse rows.  Landed cost rises with CBOT, FX and
+        # premium, so the best case is the lowest shock of each list and the
+        # adverse case the highest — the same cells as MAX/MIN of the grids,
+        # but with every input shown.
+        for rr, label, cs, fs, ps in (
+                (5, "Base (no shock)", "0", "0", "0"),
+                (6, "Best case (lowest shocks)", f"MIN({CB_RNG})/100", f"MIN({FX_RNG})/100", f"MIN({PR_RNG})"),
+                (7, "Adverse case (highest shocks)", f"MAX({CB_RNG})/100", f"MAX({FX_RNG})/100", f"MAX({PR_RNG})")):
+            kit.put(ws, rr, 1, label, kind="text", bold=True)
+            kit.put(ws, rr, 8, f"={cs}", "+0.0%;-0.0%;0")
+            kit.put(ws, rr, 9, f"={fs}", "+0.0%;-0.0%;0")
+            kit.put(ws, rr, 10, f"={ps}", "+#,##0.0;-#,##0.0;0")
+            kit.put(ws, rr, 4, f"={CBOT}*(1+H{rr})", "#,##0.00")
+            kit.put(ws, rr, 5, f"={FX}*(1+I{rr})", "#,##0.0000")
+            kit.put(ws, rr, 6, f"={PREM}+J{rr}", "#,##0.00")
+            kit.put(ws, rr, 7, f"=(D{rr}+F{rr})*{FAC}*{CARRY}*E{rr}+{FEES}", "#,##0")
+            kit.put(ws, rr, 2, f"={LOC}-G{rr}", "+#,##0;-#,##0;0", bold=True)
+            kit.put(ws, rr, 3, f"=B{rr}*{QTY}", "+#,##0;-#,##0;0")
 
         # Grids (one per premium shock) — written first so best/adverse can
         # reference their ranges.
@@ -21460,7 +21485,8 @@ class App(tk.Tk):
         grid_ranges = []
         n_c, n_f = len(cbot_sh), len(fx_sh)
         base_premium = to_float(inp.get("premium_cents"), None)
-        for ps in res.get("prem_shocks_used", STRESS_PREM_SHOCKS):
+        for k, ps in enumerate(prem_sh):
+            prem_cell = f"Assumptions!${L(2 + k)}$15"
             if res.get("premium_locked"):
                 lbl = "premium fixed by contract (base premium)"
             else:
@@ -21480,7 +21506,7 @@ class App(tk.Tk):
                 for j in range(n_c):
                     col = L(2 + j)
                     kit.put(ws, r, 2 + j,
-                            saving_f(f"{CBOT}*(1+{col}${hdr_row})", f"{FX}*(1+$A{r})", f"{PREM}+({ps})"),
+                            saving_f(f"{CBOT}*(1+{col}${hdr_row})", f"{FX}*(1+$A{r})", f"{PREM}+{prem_cell}"),
                             "+#,##0;-#,##0;0")
             rng = f"B{hdr_row + 1}:{L(1 + n_c)}{r}"
             grid_ranges.append(rng)
@@ -21494,12 +21520,8 @@ class App(tk.Tk):
             r += 2
 
         all_cells = ",".join(grid_ranges)
-        kit.put(ws, 6, 1, "Best case (max of all grids)", kind="text", bold=True)
-        kit.put(ws, 6, 2, f"=MAX({all_cells})", "+#,##0;-#,##0;0", bold=True)
-        kit.put(ws, 6, 3, f"=B6*{QTY}", "+#,##0;-#,##0;0")
-        kit.put(ws, 7, 1, "Adverse case (min of all grids)", kind="text", bold=True)
-        kit.put(ws, 7, 2, f"=MIN({all_cells})", "+#,##0;-#,##0;0", bold=True)
-        kit.put(ws, 7, 3, f"=B7*{QTY}", "+#,##0;-#,##0;0")
+        kit.put(ws, 6, 11, f"=IF(ABS(B6-MAX({all_cells}))<0.01,\"✔ = grid max\",\"check grid\")", None, kind="note")
+        kit.put(ws, 7, 11, f"=IF(ABS(B7-MIN({all_cells}))<0.01,\"✔ = grid min\",\"check grid\")", None, kind="note")
         kit.put(ws, 8, 1, "High risk? (base profitable, adverse ≤ −material)", kind="text", bold=True)
         kit.put(ws, 8, 2, f'=IF(AND(B5>0,B7<=-{MAT}),"⚠ HIGH RISK","✔ Pass")', None, bold=True)
         kit.verdict_colours(ws, "B8:B8")
@@ -21516,7 +21538,7 @@ class App(tk.Tk):
         kit.put(ws, 11, 4, f"=IF({FX}=0,\"\",C11/{FX})", "+0.0%;-0.0%;0")
         kit.put(ws, 11, 5, "buffer vs base FX (EGP, %)", kind="note")
         kit.notes(ws, 13, [
-            "Best and adverse are the highest and lowest cells of the grids below, so they follow whatever shocks you type.",
+            "Best = lowest CBOT, FX and premium shocks; Adverse = highest. They equal the highest and lowest cells of the grids below and follow whatever shocks you type.",
             "Grid colours: green = saving, light red = loss, dark red = material loss (Assumptions!B11).",
         ], 9)
 

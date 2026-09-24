@@ -112,7 +112,11 @@ class FormulaWorkbookTests(unittest.TestCase):
         self.assertEqual([a.cell(row=13, column=c).value for c in (2, 3, 4)], [-20.0, 0.0, 20.0])
         ws = wb["Stress Test"]
         self.assertEqual(ws["B17"].value, "=Assumptions!B$13/100")
-        self.assertTrue(ws["B6"].value.startswith("=MAX("))
+        # Best/adverse rows show every input, not just the saving.
+        for cell in ("D6", "E6", "F6", "G6", "H6", "D7", "E7", "F7", "G7", "H7"):
+            self.assertTrue(str(ws[cell].value).startswith("="), cell)
+        self.assertIn("MIN(Assumptions!$B$13:$D$13)", ws["H6"].value)
+        self.assertIn("MAX(Assumptions!$B$14:$C$14)", ws["I7"].value)
         self.assertTrue(named)
         self.assertEqual(named[0]["name"], "CBOT at 12-month low")
 

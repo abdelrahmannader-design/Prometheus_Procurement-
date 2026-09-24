@@ -1,3 +1,9 @@
+# 2026-09-24 — Stress Excel: complete best/adverse rows
+
+- Best and Adverse rows on the Stress Test sheet now show CBOT, FX, premium, landed cost and the shocks used (they previously showed only saving and total). Best = lowest shock of each list, Adverse = highest; a check column confirms they equal the grid max/min.
+- Premium shocks are editable cells (Assumptions row 15) that drive the grids.
+- Note on the sheet: values appear once Excel calculates (click Enable Editing; previews and Protected View do not calculate).
+
 # 2026-09-23 (b) — Stress test for flat-price deals
 
 - Stress test and its Excel now work for flat-price deals (SFM, DDGS, fixed $/MT contracts): the flat CIF price is shocked with the CBOT/price % list and FX with the FX list. A contract with a saved price is fixed, so only FX is stressed. Previously these deals had no stress result and the export said "Run Calculate first".
