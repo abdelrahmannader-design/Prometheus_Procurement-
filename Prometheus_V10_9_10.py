@@ -31317,7 +31317,6 @@ class App(tk.Tk):
 
     def _build_ms_signals(self, p):
         p.columnconfigure(0, weight=1)
-        p.rowconfigure(3, weight=1)
         bar = ttk.Frame(p)
         bar.grid(row=0, column=0, sticky="ew")
         ttk.Button(bar, text="⟳ Fetch latest (CFTC · USDA · curve)", command=self._ms_fetch).pack(side="left")
@@ -31347,21 +31346,23 @@ class App(tk.Tk):
         self._ms_over.bind("<<TreeviewSelect>>", lambda e: self._ms_show_detail())
 
         det = ttk.LabelFrame(p, text="Signals", padding=6)
-        det.grid(row=3, column=0, sticky="nsew", pady=(8, 0))
+        det.grid(row=3, column=0, sticky="new", pady=(8, 0))
         det.columnconfigure(0, weight=1)
-        det.rowconfigure(1, weight=1)
         self._ms_title_var = tk.StringVar(value="")
         ttk.Label(det, textvariable=self._ms_title_var, font=("Segoe UI", 10, "bold"), foreground="#1a4fa0",
                   wraplength=1150).grid(row=0, column=0, sticky="w")
         dcols = [("Signal", 190), ("Lean", 110), ("Weight", 60), ("Reading", 380), ("Why it matters", 420),
                  ("Source", 150), ("As of", 90)]
-        self._ms_tree = ttk.Treeview(det, columns=[c for c, _ in dcols], show="headings", height=8)
+        self._ms_tree = ttk.Treeview(det, columns=[c for c, _ in dcols], show="headings", height=7)
         for c, w in dcols:
             self._ms_tree.heading(c, text=c)
             self._ms_tree.column(c, width=w, anchor="e" if c == "Weight" else "w")
         self._ms_tree.grid(row=1, column=0, sticky="nsew", pady=(4, 4))
         for tag, fg in (("up", "#b00020"), ("down", "#1a7a1a"), ("missing", "#94a3b8")):
             self._ms_tree.tag_configure(tag, foreground=fg)
+        self._ms_tree.bind("<Double-1>", lambda e: self._ms_signal_popup())
+        ttk.Label(det, text="Double-click a signal to read it in full.", foreground="#64748b"
+                  ).grid(row=4, column=0, sticky="w", pady=(2, 0))
 
         wf = ttk.LabelFrame(det, text="WASDE ending stocks — type them after each monthly report "
                                       "(US in million bu, or 1000 short tons for meal; world in million t)",
@@ -31461,11 +31462,20 @@ class App(tk.Tk):
     def _ms_save_key(self):
         self.state_obj.setdefault("ui", {})["nass_api_key"] = (self._ms_key_var.get() or "").strip()
         save_state(self.state_obj)
-        self._ms_status_var.set("NASS key saved. Press ⟳ Fetch latest.")
+        self._ms_status_var.set("NASS key saved — fetching…")
+        self._ms_fetch()
 
     def _ms_selected(self):
         sel = self._ms_over.selection() if hasattr(self, "_ms_over") else ()
         return sel[0] if sel else ""
+
+    def _ms_signal_popup(self):
+        sel = self._ms_tree.selection()
+        if not sel:
+            return
+        v = self._ms_tree.item(sel[0])["values"]
+        messagebox.showinfo(APP_NAME, f"{v[0]}  —  {v[1]}\n\nReading: {v[3]}\n\nWhy it matters: {v[4]}"
+                                      f"\n\nSource: {v[5]}   As of: {v[6]}")
 
     def _ms_save_wasde(self):
         base = self._ms_selected()
@@ -31515,56 +31525,80 @@ class App(tk.Tk):
 
     def _ms_fetch(self):
         if getattr(self, "_ms_fetching", False):
+            self._ms_status_var.set("Still fetching (started "
+                                    f"{self._ms_fetch_started:%H:%M:%S}) — " + self._ms_progress_text())
             return
-        self._ms_fetching = True
-        self._ms_status_var.set("Fetching CFTC fund positions, USDA crop condition and the futures curve…")
-        key = ((self.state_obj.get("ui", {}) or {}).get("nass_api_key") or "").strip()
+        typed = (self._ms_key_var.get() or "").strip() if hasattr(self, "_ms_key_var") else ""
+        ui = self.state_obj.setdefault("ui", {})
+        if typed and typed != ui.get("nass_api_key"):
+            ui["nass_api_key"] = typed
+            save_state(self.state_obj)
+        key = (ui.get("nass_api_key") or "").strip()
         today = dt.date.today()
+        res = {"cot": {}, "nass": {}, "curve": {}, "errors": {}}
+        jobs = {}   # label -> "…" / "✔" / "✖"
 
-        def _run():
-            res = {"cot": {}, "nass": {}, "curve": {}, "errors": {}}
+        def _cot(base):
+            res["cot"][base] = {"rows": fetch_cftc_cot(base)[-160:], "fetched": dt.datetime.now().isoformat()}
+
+        def _curve(base):
+            front = fetch_yahoo_futures_quote(CBOT_YAHOO_SYMBOLS.get(base) or f"{base}=F")["price"]
+            sym, label = _core_deferred_contract(base, today)
+            deferred = fetch_yahoo_futures_quote(sym)["price"] if sym else None
+            res["curve"][base] = {"front": front, "deferred": deferred, "label": label, "symbol": sym,
+                                  "fetched": dt.datetime.now().isoformat()}
+
+        def _nass(crop):
+            weeks, ly = fetch_nass_condition(crop, key, today.year)
+            if not weeks:
+                weeks, ly = ly, []  # before the new season starts: last year's final weeks
             for base in MARKET_SIGNAL_COMMODITIES:
-                try:
-                    res["cot"][base] = {"rows": fetch_cftc_cot(base)[-160:], "fetched": dt.datetime.now().isoformat()}
-                except Exception as ex:
-                    res["errors"][f"CFTC {base}"] = str(ex)[:160]
-                try:
-                    front = fetch_yahoo_futures_quote(CBOT_YAHOO_SYMBOLS.get(base) or f"{base}=F")["price"]
-                    sym, label = _core_deferred_contract(base, today)
-                    deferred = fetch_yahoo_futures_quote(sym)["price"] if sym else None
-                    res["curve"][base] = {"front": front, "deferred": deferred, "label": label, "symbol": sym,
-                                          "fetched": dt.datetime.now().isoformat()}
-                except Exception as ex:
-                    res["errors"][f"Curve {base}"] = str(ex)[:160]
-            if key:
-                done = {}
-                for base in MARKET_SIGNAL_COMMODITIES:
-                    crop = NASS_COMMODITY.get(base)
-                    try:
-                        if crop not in done:
-                            done[crop] = fetch_nass_condition(base, key, today.year)
-                        weeks, ly = done[crop]
-                        if not weeks:
-                            weeks, ly = ly, []  # before the new season starts: last year's final weeks
-                        res["nass"][base] = {"weeks": weeks, "last_year": ly,
-                                             "fetched": dt.datetime.now().isoformat()}
-                    except Exception as ex:
-                        res["errors"][f"USDA {base}"] = str(ex)[:160]
-                        done[crop] = ([], [])
-            box.append(res)
+                if NASS_COMMODITY.get(base) == NASS_COMMODITY.get(crop):
+                    res["nass"][base] = {"weeks": weeks, "last_year": ly, "fetched": dt.datetime.now().isoformat()}
 
-        # The worker never touches Tk; the main thread polls for the result.
-        box = []
+        tasks = [(f"CFTC {b}", _cot, b) for b in MARKET_SIGNAL_COMMODITIES]
+        tasks += [(f"Curve {b}", _curve, b) for b in MARKET_SIGNAL_COMMODITIES]
+        if key:
+            crops = []
+            for b in MARKET_SIGNAL_COMMODITIES:
+                if NASS_COMMODITY.get(b) not in [NASS_COMMODITY.get(c) for c in crops]:
+                    crops.append(b)
+            tasks += [(f"USDA {NASS_COMMODITY[b].title()}", _nass, b) for b in crops]
 
-        def _poll():
-            if box:
-                self._ms_fetch_done(box[0])
-            else:
-                self.after(250, _poll)
+        def _one(label, fn, arg):
+            try:
+                fn(arg)
+                jobs[label] = "✔"
+            except Exception as ex:
+                res["errors"][label] = str(ex)[:160]
+                jobs[label] = "✖"
 
         import threading
-        threading.Thread(target=_run, daemon=True).start()
-        self.after(250, _poll)
+        threads = []
+        for label, fn, arg in tasks:
+            jobs[label] = "…"
+            t = threading.Thread(target=_one, args=(label, fn, arg), daemon=True)
+            threads.append(t)
+        self._ms_jobs = jobs
+        self._ms_fetching = True
+        self._ms_fetch_started = dt.datetime.now()
+        for t in threads:   # all sources in parallel: total wait = the slowest one
+            t.start()
+
+        # The workers never touch Tk; the main thread polls for progress.
+        def _poll():
+            if any(t.is_alive() for t in threads):
+                secs = (dt.datetime.now() - self._ms_fetch_started).seconds
+                self._ms_status_var.set(f"Fetching… {secs}s   " + self._ms_progress_text())
+                self.after(400, _poll)
+            else:
+                self._ms_fetch_done(res)
+
+        self._ms_status_var.set("Fetching… " + self._ms_progress_text())
+        self.after(400, _poll)
+
+    def _ms_progress_text(self):
+        return "   ".join(f"{k} {v}" for k, v in (getattr(self, "_ms_jobs", {}) or {}).items())
 
     def _ms_fetch_done(self, res):
         self._ms_fetching = False

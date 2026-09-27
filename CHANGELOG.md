@@ -1,3 +1,10 @@
+# 2026-09-27 (i) — Market Signals: faster fetch with live progress
+
+- All sources (CFTC ×3, futures curve ×3, USDA) are now fetched in parallel, so the wait is the slowest source, not the sum.
+- The status line shows live progress per source (… / ✔ / ✖) and the seconds elapsed; pressing Fetch while a fetch runs shows its progress instead of doing nothing.
+- "Save key" saves and fetches straight away; a key typed but not saved is also used by Fetch.
+- Signals table is compact so the WASDE box and buttons sit right under it; double-click a signal to read it in full.
+
 # 2026-09-27 (h) — Market Signals: which way is the CBOT risk leaning?
 
 - New Analysis → Market Signals tab with three views.
