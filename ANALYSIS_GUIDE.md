@@ -187,12 +187,24 @@ Each purchase is judged **on its own date, with data available that day**.
 
 ---
 
-## Inconsistencies found (not changed yet)
+## One savings engine (2026-09-27)
 
-- **Contract Detail, Supplier Scorecard, Seasonality**
-  - They build own-after from the raw `freight_egp_mt` and `discharge_egp_mt` fields, not the shared fee resolver, so DETAILED-mode freight VAT and supplier-intake fallbacks are missed.
-  - They take the local price *closest* to delivery within ±14 days, which can be after delivery.
-  - Their "vs local" figures can therefore differ from the Savings Tracker.
-- **Contract Performance**
-  - The contract card shows raw fees, while the table uses the resolver.
-  - The delivery anchor can be a price after delivery.
+Every screen now takes a contract's cost and saving from one calculation:
+
+| Contract | Rule | Same as |
+|---|---|---|
+| **Closed** | Saved CIF × delivery FX + selected intake + clearance + effective freight (VAT included for DETAILED freight), against the last local price logged **on or before** delivery/storage | Savings Tracker |
+| **Open** | Today's CBOT + premium, today's FX, today's latest local price, remaining quantity | Home → Open MTM (Live) |
+
+Screens moved onto it:
+- Contract Detail, Supplier Scorecard and Seasonality
+- the Contract Performance card and its delivery anchor (no longer a price logged after delivery)
+- the Contract Intelligence export
+- the Contracts table totals
+- the Local Purchases import KPIs
+- the monthly import-parity fees
+- the Portfolio Excel
+
+In **Contract Detail**, the "Local avg window" now averages only the days *before* the reference date.
+
+The **Portfolio Excel** open sheet matches Home by default. Two switches on its Assumptions sheet give the contract view instead: keep the contract CIF, and use the Form 4 FX.

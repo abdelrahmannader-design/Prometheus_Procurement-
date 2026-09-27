@@ -5542,18 +5542,13 @@ class App(tk.Tk):
                               "","",""))
 
         # import totals
-        for c in self.state_obj.get("contracts", {}).values():
-            qty  = to_float(c.get("qty_mt"), None) or 0
-            cif  = self._contract_cif_usd(c)
-            fx   = to_float(c.get("delivery_fx"), None) or to_float(
-                (self.state_obj.get("market_data",{})
-                 .get("fx",{}) or {}).get("price"), None)
-            disc = to_float(c.get("discharge_egp_mt"), None) or 0
-            clr  = to_float(c.get("clearance_egp_mt"), None) or 0
-            frt  = to_float(c.get("freight_egp_mt"), None) or 0
-            if cif and fx and qty:
+        for _cid, c in (self.state_obj.get("contracts", {}) or {}).items():
+            qty = to_float(c.get("qty_mt"), None) or 0
+            # Contract landed cost from the shared engine (realized basis).
+            own = self._contract_savings_economics(_cid, {**c, "status": "Closed"})["own_after"]
+            if own and qty:
                 total_imp_qty  += qty
-                total_imp_paid += (cif * fx + disc + clr + frt) * qty
+                total_imp_paid += own * qty
 
         lp_avg  = (total_lp_paid / total_lp_qty)  if total_lp_qty  else None
         imp_avg = (total_imp_paid / total_imp_qty) if total_imp_qty else None
@@ -7807,9 +7802,8 @@ class App(tk.Tk):
                      if (c.get("commodity") or "").upper().split("-")[0] == base]
         if contracts:
             latest = max(contracts, key=lambda c: c.get("delivery_date") or "")
-            fees_egp = ((to_float(latest.get("discharge_egp_mt"), 0) or 0) +
-                        (to_float(latest.get("clearance_egp_mt"), 0) or 0) +
-                        (to_float(self._contract_freight_egp_mt(latest), 0) or 0))
+            _d, _cl, _fr = self._hd_resolve_fees(latest)
+            fees_egp = (_d or 0) + (_cl or 0) + (_fr or 0)
 
         return {
             "commodity": base,
@@ -11491,12 +11485,14 @@ class App(tk.Tk):
         if not c:
             return
 
-        fx   = to_float(c.get("delivery_fx"), None)
-        cif  = to_float(c.get("cif_usd_mt") or c.get("own_after_usd_mt"), None)
-        disc = to_float(c.get("discharge_egp_mt"), 0) or 0
-        clr  = to_float(c.get("clearance_egp_mt"), 0) or 0
-        frt  = to_float(c.get("freight_egp_mt"), 0) or 0
-        own  = cif * fx + disc + clr + frt if cif and fx else None
+        # Contract cost from the shared engine (contract CIF × delivery FX +
+        # selected intake + clearance + effective freight) — same as the
+        # Performance table and the Savings tab.
+        _econ = self._contract_savings_economics(cid, {**c, "status": "Closed"})
+        fx   = _econ["fx"]
+        cif  = _econ["cif"]
+        disc, clr, frt = _econ["disc"], _econ["clr"], _econ["freight"]
+        own  = _econ["own_after"]
 
         dv = self._pf_det_vars
         dv["pf_det_comm"].set((c.get("commodity") or "—").upper())
@@ -11657,19 +11653,22 @@ class App(tk.Tk):
                 return
 
             # ── Find delivery anchor ──────────────────────────────────
-            # Closest local price to delivery date (the price you avoided)
+            # Last local price logged on or before delivery (the price you
+            # avoided) — the same rule as the Savings tab; never a later price.
             anchor_price = anchor_date = None
             if delivery_date:
-                closest = min(pairs, key=lambda x: abs((x[0] - delivery_date).days),
-                              default=None)
-                if closest:
-                    anchor_price = closest[1]
-                    anchor_date  = closest[0]
+                before = [x for x in pairs if x[0] <= delivery_date]
+                if before:
+                    anchor_date, anchor_price = before[-1]
 
             # ── Split: pre-delivery and post-delivery ─────────────────
             if delivery_date:
                 pre_pairs  = [(d,p) for d,p in pairs if d <  delivery_date]
                 post_pairs = [(d,p) for d,p in pairs if d >= delivery_date]
+                # Show the delivery anchor as the first row even when it was
+                # logged a few days before delivery.
+                if anchor_date is not None and anchor_date < delivery_date:
+                    post_pairs.insert(0, (anchor_date, anchor_price))
             else:
                 pre_pairs  = []
                 post_pairs = pairs
@@ -11917,18 +11916,22 @@ class App(tk.Tk):
         status    = (c.get("status") or "Open")
         comm_raw  = (c.get("commodity") or "CORN").upper()
         base_comm = comm_raw.split("-")[0] if "-" in comm_raw else comm_raw
-        cif       = to_float(c.get("cif_usd_mt") or c.get("own_after_usd_mt"))
+        # Contract cost from the shared savings engine (realized basis:
+        # contract CIF × delivery FX + selected intake + clearance +
+        # effective freight) so this report matches the Savings tab.
+        _econ     = self._contract_savings_economics(cid, {**c, "status": "Closed"})
+        cif       = _econ["cif"]
         prem      = to_float(c.get("premium_cents"), 0) or 0
-        fx        = to_float(c.get("delivery_fx"))
-        disc      = to_float(c.get("discharge_egp_mt"),  0) or 0
-        clr_fee   = to_float(c.get("clearance_egp_mt"),  0) or 0
-        frt       = to_float(c.get("freight_egp_mt"),    0) or 0
+        fx        = _econ["fx"]
+        disc      = _econ["disc"]
+        clr_fee   = _econ["clr"]
+        frt       = _econ["freight"]
         qty       = to_float(c.get("qty_mt"), 0) or 0
         del_str   = c.get("storage_start") or c.get("delivery_date") or ""
         fut_mon   = c.get("futures_month","")
         supplier  = c.get("supplier","")
         origin    = c.get("origin","")
-        own_after = (cif * fx + disc + clr_fee + frt) if cif and fx else None
+        own_after = _econ["own_after"]
 
         try:
             del_date = _dt.date.fromisoformat(del_str) if del_str else None
@@ -12154,13 +12157,8 @@ class App(tk.Tk):
 
             # Delivery anchor local
             if del_date:
-                local_at_del = None
-                for d, p in local_series:
-                    if d == del_date:
-                        local_at_del = p; break
-                if local_at_del is None and local_series:
-                    local_at_del = min(local_series,
-                        key=lambda x: abs((x[0]-del_date).days))[1]
+                # Last local price on/before delivery — the Savings tab rule.
+                local_at_del = _econ["local"]
                 if local_at_del and own_after:
                     cur += 1
                     cur = _sec(ws1, cur, "📊  Performance at Delivery", 3)
@@ -15797,7 +15795,7 @@ class App(tk.Tk):
         self._an_cbot_win = tk.StringVar(value="90")
         _ent(1, self._an_cbot_win)
 
-        _lbl(2, "Local price window (±days):")
+        _lbl(2, "Local avg window (days before):")
         self._an_local_win = tk.StringVar(value="14")
         _ent(3, self._an_local_win)
 
@@ -16366,16 +16364,14 @@ class App(tk.Tk):
         import datetime as _dt
         comm    = (c.get("commodity") or "").upper()
         base    = comm.split("-")[0] if "-" in comm else comm
-        cif     = to_float(c.get("cif_usd_mt") or c.get("own_after_usd_mt"), None)
+        # Cost and local price come from the shared savings engine: closed =
+        # Savings tab (realized), open = Home Open MTM (live).
+        econ    = self._contract_savings_economics(cid, c)
+        cif     = self._contract_cif_usd(c, cid)       # contract price → implied CBOT
         prem    = to_float(c.get("premium_cents"), None)
         del_str = c.get("storage_start") or c.get("delivery_date") or ""
-        fx_act  = to_float(c.get("delivery_fx"), None) or to_float(
-                  (self.state_obj.get("market_data",{})
-                   .get("fx",{}) or {}).get("price"), 50.0)
-        disc    = to_float(c.get("discharge_egp_mt"), 0) or 0
-        clr     = to_float(c.get("clearance_egp_mt"), 0) or 0
-        frt     = to_float(c.get("freight_egp_mt"), 0) or 0
-        fees    = disc + clr + frt
+        fx_act  = econ["fx"]
+        fees    = econ["fees"]
         status  = (c.get("status") or "Open")
         name    = c.get("name") or cid
         qty     = to_float(c.get("qty_mt"), 0) or 0
@@ -16509,8 +16505,9 @@ class App(tk.Tk):
                     else:                      open_cbot_signal = "⬆ WAIT — near historical high"
 
         # ── 3. Own-after + FX impact ──────────────────────────────────
-        own_after     = (cif * fx_act + fees) if cif and fx_act else None
-        own_at_ref_fx = (cif * ref_fx + fees) if cif and ref_fx else None
+        own_after     = econ["own_after"]
+        econ_cif      = econ["cif"]
+        own_at_ref_fx = (econ_cif * ref_fx + fees) if econ_cif and ref_fx else None
         fx_impact_egp = None
         if own_after and own_at_ref_fx:
             fx_impact_egp = own_at_ref_fx - own_after   # +ve = FX saved you money
@@ -16520,23 +16517,12 @@ class App(tk.Tk):
         local_edge = local_verdict = margin_pct = None
         break_even_fx = None
 
-        if del_str:
-            try:
-                del_d2 = _dt.date.fromisoformat(del_str)
-                lo2    = del_d2 - _dt.timedelta(days=local_win)
-                hi2    = del_d2 + _dt.timedelta(days=local_win)
-                for ck in ([comm] if comm == base else [comm, base]):
-                    pairs  = self._local_price_map(ck)
-                    in_win = [(pd, pp) for pd, pp in pairs
-                              if lo2 <= pd <= hi2]
-                    if in_win:
-                        best       = min(in_win, key=lambda x: abs((x[0]-del_d2).days))
-                        local_price = best[1]
-                        local_date  = best[0].isoformat()
-                        local_avg   = sum(p for _,p in in_win)/len(in_win)
-                        break
-            except Exception:
-                pass
+        # Local price = the engine's (on/before delivery for closed, today's
+        # latest for open); the window average only looks backwards.
+        local_price = econ["local"]
+        local_date = econ["local_date"] or None
+        _anchor = parse_date_flex(local_date) if local_date else None
+        local_avg = self._local_window_avg(c, _anchor, local_win) if _anchor else None
 
         if own_after is not None and local_price is not None:
             local_edge = local_price - own_after          # +ve = import cheaper
@@ -16548,8 +16534,8 @@ class App(tk.Tk):
 
         # Break-even FX: at what FX does own-after = local?
         # own_after = cif * fx_be + fees = local → fx_be = (local - fees) / cif
-        if cif and local_price is not None and cif > 0:
-            break_even_fx = (local_price - fees) / cif
+        if econ_cif and local_price is not None and econ_cif > 0:
+            break_even_fx = (local_price - fees) / econ_cif
 
         # ── 5. Overall verdict ────────────────────────────────────────
         overall = "—"
@@ -16705,7 +16691,7 @@ class App(tk.Tk):
 
         self._an_status_lbl.set(
             f"{len(results)} contracts  |  "
-            f"CBOT window: {cbot_win}d  |  Local window: ±{local_win}d  |  "
+            f"CBOT window: {cbot_win}d  |  Local avg: {local_win}d before  |  "
             f"FX ref: {ref_fx:.4f}")
 
     def _an_on_select(self, event=None):
@@ -17642,13 +17628,17 @@ class App(tk.Tk):
         kit.put(ws_a, 4, 1, "Today's FX (EGP/USD)", kind="text", bold=True)
         kit.put(ws_a, 4, 2, fx_today, "#,##0.0000", kind="input")
         kit.put(ws_a, 5, 1, "Open contracts: use Form 4 FX when secured? (YES/NO)", kind="text", bold=True)
-        kit.put(ws_a, 5, 2, "YES", kind="input")
+        kit.put(ws_a, 5, 2, "NO", kind="input")
         kit.put(ws_a, 6, 1, "Strong win threshold (EGP/MT)", kind="text", bold=True)
         kit.put(ws_a, 6, 2, 500, "#,##0", kind="input")
         kit.put(ws_a, 7, 1, "Loss threshold (EGP/MT, entered as a positive number)", kind="text", bold=True)
         kit.put(ws_a, 7, 2, 500, "#,##0", kind="input")
-        FX_CELL, F4_CELL, STRONG_CELL, LOSS_CELL = (
-            f"{A}$B$4", f"{A}$B$5", f"{A}$B$6", f"{A}$B$7")
+        kit.put(ws_a, 8, 1, "Open priced contracts: keep contract CIF instead of today's CBOT? (YES/NO)",
+                kind="text", bold=True)
+        kit.put(ws_a, 8, 2, "NO", kind="input")
+        kit.put(ws_a, 8, 5, "NO + NO = same as Home Open MTM (Live)", kind="note")
+        FX_CELL, F4_CELL, STRONG_CELL, LOSS_CELL, KEEP_CELL = (
+            f"{A}$B$4", f"{A}$B$5", f"{A}$B$6", f"{A}$B$7", f"{A}$B$8")
 
         kit.header(ws_a, 9, [("CBOT board", None), ("Live CBOT", None),
                              ("Unit", None), ("Factor → USD/MT", None),
@@ -17802,8 +17792,8 @@ class App(tk.Tk):
             ("Pricing MTM\nEGP/MT", 11), ("Pricing MTM\ntotal EGP", 13),
         ]
         kit.title(ws_o, f"Open contracts — live mark-to-market at {today.isoformat()}",
-                  "CIF of the moment = (Live CBOT + Premium) × Factor.   CIF used = priced part at the contract CIF, "
-                  "unpriced part at the CIF of the moment.   Expected saving = Local today − Own-after.   "
+                  "CIF of the moment = (Live CBOT + Premium) × Factor.   CIF used / FX used = same as Home Open MTM "
+                  "(Live) unless you switch to contract CIF / Form 4 FX on Assumptions.   Expected saving = Local today − Own-after.   "
                   "Pricing MTM = gain (+) or loss (−) from the price you already fixed versus today's market.",
                   len(open_cols))
         kit.header(ws_o, 4, open_cols)
@@ -17831,12 +17821,20 @@ class App(tk.Tk):
                 keys = self._hd_local_keys_for_contract(c)
                 local_key = keys[0] if keys else comm
             x = r_o
-            if frac >= 1:
-                cif_used = f'=IF(I{x}="","",I{x})'
-            elif frac <= 0:
-                cif_used = f'=IF(M{x}="","",M{x})'
+            # Default (switch NO) = Home Live: every open CBOT contract at the
+            # CIF of the moment.  Switch YES keeps the priced part at its
+            # contract CIF.  Rows without a live CIF use the contract CIF.
+            if frac <= 0:
+                contract_view = f'M{x}'
+            elif frac >= 1:
+                contract_view = f'I{x}'
             else:
-                cif_used = f'=IF(COUNT(I{x},M{x})<2,"",H{x}*I{x}+(1-H{x})*M{x})'
+                contract_view = f'H{x}*I{x}+(1-H{x})*M{x}'
+            if has_live:
+                cif_used = (f'=IF(M{x}="",IF(I{x}="","",I{x}),'
+                            f'IF(AND(UPPER({KEEP_CELL})="YES",N(H{x})>0,I{x}<>""),{contract_view},M{x}))')
+            else:
+                cif_used = f'=IF(I{x}="","",I{x})'
             vals = [
                 (1, self._hd_ref(cid, c), None, "text"), (2, c.get("supplier", ""), None, "text"),
                 (3, comm, None, "text"), (4, c.get("origin", ""), None, "text"),
@@ -17953,8 +17951,9 @@ class App(tk.Tk):
             "",
             "OPEN CONTRACTS (live mark-to-market)",
             "CIF of the moment = (today's CBOT + the contract premium) × factor.  This is shown for every open CBOT contract.",
-            "CIF used = priced part at the contract CIF (or the pricing lots) + unpriced part at the CIF of the moment.",
-            "FX used = the Form 4 FX when it is secured (switch on the Assumptions sheet), otherwise today's FX.",
+            "CIF used = the CIF of the moment and FX used = today's FX — exactly Home's Open MTM (Live), so both screens agree.",
+            "Two switches on the Assumptions sheet give the contract view instead: keep the priced part at its contract CIF "
+            "(or pricing lots), and use the Form 4 FX when it is secured.",
             "Local = today's latest local price.  Quantity = remaining open quantity.",
             "Pricing MTM = (CIF of the moment − contract CIF) × FX × priced share.  Positive = your fixed price beats today's market.",
             "",
@@ -18232,6 +18231,69 @@ class App(tk.Tk):
                 return parsed
         return None
 
+    def _contract_savings_economics(self, cid, c):
+        """THE savings engine — every screen that shows a contract's cost or
+        saving against local reads it from here, so the numbers agree.
+
+        Closed contract (realized, = Savings tab):
+            CIF = saved contract CIF · FX = delivery FX (today's FX only if
+            none saved) · fees = selected intake + clearance + effective
+            freight (_hd_resolve_fees) · local = last logged local price ON
+            OR BEFORE the delivery/storage date · qty = contract qty.
+        Open contract (live, = Home Open MTM in Live mode):
+            _hd_cost_for_contract(use_latest_fx=True, fx_mode="live") —
+            today's CBOT/FX/local, remaining qty.
+        Own-after = CIF × FX + intake + clearance + freight.
+        Saving/MT = local − own-after (positive = import cheaper).
+        """
+        c = c or {}
+        if self._contract_is_open(c):
+            e = self._hd_cost_for_contract(cid, c, use_latest_fx=True, fx_mode="live")
+            return {
+                "basis": "live", "cif": e.get("cif"), "fx": e.get("fx"),
+                "disc": e.get("disc") or 0.0, "clr": e.get("clr") or 0.0,
+                "freight": e.get("freight") or 0.0,
+                "fees": (e.get("disc") or 0.0) + (e.get("clr") or 0.0) + (e.get("freight") or 0.0),
+                "own_after": e.get("own_after"), "local": e.get("local"),
+                "local_key": e.get("local_key") or "", "local_date": e.get("local_date") or "",
+                "sav_mt": e.get("sav_mt"), "qty": e.get("qty"),
+                "total_sav": e.get("total_sav"),
+            }
+        cif = self._contract_cif_usd(c, cid)
+        fx = to_float(c.get("delivery_fx"), None)
+        if fx is None:
+            fx = to_float((self.state_obj.get("market_data", {})
+                           .get("fx", {}) or {}).get("price"), None)
+        disc, clr, freight = self._hd_resolve_fees(c, cid)
+        disc, clr, freight = disc or 0.0, clr or 0.0, freight or 0.0
+        own_after = (cif * fx + disc + clr + freight) if (cif and fx) else None
+        local = None
+        local_key = local_date = ""
+        del_d = parse_date_flex(c.get("storage_start") or c.get("delivery_date") or "")
+        if del_d is not None:
+            local, local_key, local_date = self._hd_local_for_contract(c, date_str=del_d.isoformat())
+        qty = to_float(c.get("qty_mt"), None)
+        sav_mt = (local - own_after) if (local and own_after is not None) else None
+        return {
+            "basis": "realized", "cif": cif, "fx": fx, "disc": disc, "clr": clr,
+            "freight": freight, "fees": disc + clr + freight, "own_after": own_after,
+            "local": local, "local_key": local_key or "", "local_date": local_date or "",
+            "sav_mt": sav_mt, "qty": qty,
+            "total_sav": (sav_mt * qty) if (sav_mt is not None and qty) else None,
+        }
+
+    def _local_window_avg(self, c, end_date, days):
+        """Average local all-in price over [end_date − days, end_date] —
+        never uses prices logged after end_date."""
+        if end_date is None:
+            return None
+        lo = end_date - dt.timedelta(days=max(0, int(days or 0)))
+        for ck in self._hd_local_keys_for_contract(c):
+            vals = [p for d, p in self._local_price_map(ck) if lo <= d <= end_date]
+            if vals:
+                return sum(vals) / len(vals)
+        return None
+
     def _sv_contract_saving_row(self, cid, c, f_comm="All", f_sup="All", f_orig="All", f_status="Closed"):
         """Canonical realized-savings row.
 
@@ -18267,41 +18329,15 @@ class App(tk.Tk):
         realized_date = self._contract_realized_date(c) if is_realized else None
         qty = to_float(c.get("qty_mt"), None)
         cif_usd = self._contract_cif_usd(c)
-        delivery_fx = to_float(c.get("delivery_fx"), None)
-        if delivery_fx is None:
-            delivery_fx = to_float(
-                (self.state_obj.get("market_data", {})
-                 .get("fx", {}) or {}).get("price"), None)
-
-        # Fees: ONE selected intake/discharge + contract Clearance + freight.
-        # Indirect Intake is an alternative route rate, never a Clearance fallback.
-        disc, clr, freight = self._hd_resolve_fees(c, cid)
-        disc = disc or 0
-        clr = clr or 0
-        own_after = None
-        if cif_usd and delivery_fx:
-            own_after = cif_usd * delivery_fx + disc + clr + freight
-
-        # Local price at delivery/storage date (carry-forward from logged prices).
-        local = None
-        local_src = "missing"
-        if del_date_str:
-            try:
-                del_date = parse_date_flex(del_date_str)
-                if del_date is None:
-                    raise ValueError(f"unparseable delivery date: {del_date_str!r}")
-                comm_keys = self._hd_local_keys_for_contract(c)
-                for ck in comm_keys:
-                    pairs = self._local_price_map(ck)
-                    if pairs:
-                        local = next((pr for d, pr in reversed(pairs)
-                                      if d <= del_date), None)
-                        if local:
-                            local_src = f"✓ {ck}"
-                            break
-            except Exception as _e_12861:
-                log_exception(_e_12861, "_sv_contract_saving_row")
-
+        # Numbers come from the shared engine (realized basis) so every
+        # screen reports the same saving for the same closed contract.
+        _econ = self._contract_savings_economics(cid, {**c, "status": "Closed"})
+        cif_usd = _econ["cif"]
+        delivery_fx = _econ["fx"]
+        disc, clr, freight = _econ["disc"], _econ["clr"], _econ["freight"]
+        own_after = _econ["own_after"]
+        local = _econ["local"]
+        local_src = f"✓ {_econ['local_key']}" if local else "missing"
         sav_mt = (local - own_after) if (local and own_after) else None
         # Keep realized and open MTM separate: open contracts are displayed as
         # audit rows only and are never included in realized totals.
@@ -18564,9 +18600,9 @@ class App(tk.Tk):
         qty          = to_float(c.get("qty_mt"), 0) or 0
         cif_usd      = self._contract_cif_usd(c) or 0
         delivery_fx  = to_float(c.get("delivery_fx"), 0) or 0
-        disc         = to_float(c.get("discharge_egp_mt"), 0) or 0
-        clr          = to_float(c.get("clearance_egp_mt"),  0) or 0
-        freight      = self._contract_freight_egp_mt(c)
+        # Same fee resolver as the shared savings engine.
+        disc, clr, freight = self._hd_resolve_fees(c)
+        disc, clr, freight = disc or 0, clr or 0, freight or 0
         del_date     = c.get("delivery_date", "")
 
         if not cif_usd or not delivery_fx or not local_price:
@@ -22871,13 +22907,11 @@ class App(tk.Tk):
         # Typical fees for import parity
         contracts = self.state_obj.get("contracts",{}) or {}
         fees_list = []
-        for c in contracts.values():
+        for _cid, c in contracts.items():
             if (c.get("commodity","").upper().startswith(base_comm)
                     and (c.get("status","Open")) == "Closed"):
-                d2 = to_float(c.get("discharge_egp_mt"),0) or 0
-                cl = to_float(c.get("clearance_egp_mt"),0) or 0
-                fr = to_float(c.get("freight_egp_mt"),0) or 0
-                fees_list.append(d2+cl+fr)
+                d2, cl, fr = self._hd_resolve_fees(c, _cid)
+                fees_list.append((d2 or 0) + (cl or 0) + (fr or 0))
         avg_fees = sum(fees_list)/len(fees_list) if fees_list else 600.0
 
         # Get typical premium from open contracts
@@ -30820,9 +30854,14 @@ class App(tk.Tk):
             dis = to_float(c.get("discharge_egp_mt"), 0) or 0
             clr = to_float(c.get("clearance_egp_mt"), 0) or 0
             frt = to_float(c.get("freight_egp_mt"), None)
-            own_after = None
-            if cif_val is not None and fx_val is not None:
-                own_after = (cif_val * fx_val) + dis + clr + (frt or 0)
+            # Own-after and edge from the shared savings engine (open = Home
+            # live MTM, closed = Savings tab) instead of a local re-derivation.
+            _econ = self._contract_savings_economics(cid, c)
+            own_after = _econ["own_after"]
+            if _econ["cif"] is not None:
+                cif_val = _econ["cif"]
+            if _econ["fx"] is not None:
+                fx_val = _econ["fx"]
 
             row_missing = False
             if status == "Open":
@@ -30837,7 +30876,7 @@ class App(tk.Tk):
                         open_unpriced_qty += qty
                 if rem is not None and own_after is not None:
                     open_value += own_after * rem
-                latest_local, _lday = self._latest_local_price_for_commodity(comm)
+                latest_local = _econ["local"]
                 if latest_local is not None and own_after is not None and rem is not None:
                     open_edge += (latest_local - own_after) * rem
                     open_edge_has_value = True

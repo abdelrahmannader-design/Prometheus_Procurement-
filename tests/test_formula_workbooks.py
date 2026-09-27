@@ -69,6 +69,23 @@ class FormulaWorkbookTests(unittest.TestCase):
         self.assertAlmostEqual(own_after, row["own_after"])
         self.assertAlmostEqual(ws["N5"].value - own_after, row["sav_mt"])
 
+    def test_one_savings_engine_across_screens(self):
+        app = self._app()
+        # Freight in DETAILED mode (+14% VAT) used to be missed by Contract Detail.
+        app.state_obj["contracts"]["C1"].update({"freight_mode": "DETAILED", "freight_base_egp_mt": 300})
+        for cid, c in app.state_obj["contracts"].items():
+            engine = app._contract_savings_economics(cid, c)
+            detail = app._an_analyse_contract(cid, c, 90, 14, 50.0)
+            self.assertAlmostEqual(detail["local_edge"], engine["sav_mt"], places=6)
+            if app._contract_is_open(c):
+                home = app._hd_cost_for_contract(cid, c, use_latest_fx=True, fx_mode="live")
+                self.assertAlmostEqual(home["sav_mt"], engine["sav_mt"], places=6)
+            else:
+                row = app._sv_contract_saving_row(cid, c, f_status="Closed")
+                self.assertAlmostEqual(row["sav_mt"], engine["sav_mt"], places=6)
+                self.assertAlmostEqual(engine["freight"], 342.0)   # 300 × 1.14
+                self.assertLessEqual(engine["local_date"], c["delivery_date"])
+
     def test_portfolio_open_unpriced_shows_cif_of_the_moment(self):
         app = self._app()
         wb, _info = app._build_portfolio_workbook(today=TODAY)

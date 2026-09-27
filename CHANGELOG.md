@@ -1,3 +1,12 @@
+# 2026-09-27 — One savings engine everywhere
+
+- New `_contract_savings_economics`: closed contracts = Savings tab (saved CIF × delivery FX + resolved fees, local on/before delivery); open contracts = Home Open MTM (Live).
+- Contract Detail, Supplier Scorecard and Seasonality no longer use raw freight (missing DETAILED VAT) or a local price up to 14 days after delivery. The local window now averages only earlier days.
+- Contract Performance: card uses the resolver fees; delivery anchor = last price on/before delivery (shown as first row).
+- Contract Intelligence export, Contracts table totals (no more corn-only 0.3937 live CIF), Local Purchases import KPIs, monthly import-parity fees and the savings narrative use the same fees.
+- Portfolio Excel open sheet defaults to Home's Live figures; switches for contract CIF and Form 4 FX.
+- Regression test: every screen returns the same saving per contract.
+
 # 2026-09-24 (c) — Calculate: finance carry applies to contracts too
 
 - With a contract selected, Finance Days and Interest Rate were ignored (carry forced to 0 to match Home). They now apply: Carry USD/MT = CIF × rate × days / 360 is added to Own-after, the saving and the stress test. Leave them at 0 to reconcile with Home/Portfolio; the status line states whether carry is included.
