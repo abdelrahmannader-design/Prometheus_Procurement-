@@ -5,6 +5,7 @@ import math
 import unittest
 
 from prometheus_core import (
+    stock_cover_plan,
     compare_offers,
     cbot_history_scenarios,
     evaluate_local_purchase,
@@ -143,6 +144,34 @@ class OfferComparisonTests(unittest.TestCase):
         res = compare_offers(self.shared, [{"name": "No premium"}])
         self.assertIsNone(res["rows"][0]["rank"])
         self.assertIn("premium", res["rows"][0]["missing"])
+
+
+class StockCoverPlanTests(unittest.TestCase):
+    today = dt.date(2026, 9, 27)
+
+    def test_dates_and_quantity(self):
+        r = stock_cover_plan(30000, 500, [{"date": "2026-10-20", "qty_mt": 20000, "ref": "A"}],
+                             today=self.today, horizon_days=180, lead_time_days=45, safety_days=15)
+        # 50,000 MT at 500/day drops below 7,500 after 86 days, runs out after 101
+        self.assertEqual(r["below_safety_date"], self.today + dt.timedelta(days=86))
+        self.assertEqual(r["runout_date"], self.today + dt.timedelta(days=101))
+        self.assertEqual(r["buy_by_date"], r["below_safety_date"] - dt.timedelta(days=45))
+        self.assertAlmostEqual(r["qty_to_buy_mt"], 7500 - (50000 - 500 * 180))
+        self.assertEqual(r["status"], "PLAN")
+
+    def test_late_when_lead_time_no_longer_fits(self):
+        r = stock_cover_plan(10000, 500, [], today=self.today, lead_time_days=45, safety_days=10)
+        self.assertEqual(r["status"], "LATE")
+
+    def test_covered_and_undated_arrivals_not_counted(self):
+        r = stock_cover_plan(200000, 100, [{"date": None, "qty_mt": 5000, "ref": "X"}],
+                             today=self.today, horizon_days=180)
+        self.assertEqual(r["status"], "COVERED")
+        self.assertEqual(len(r["undated_arrivals"]), 1)
+        self.assertEqual(r["arrivals"], [])
+
+    def test_no_rate(self):
+        self.assertEqual(stock_cover_plan(1000, None)["status"], "NO_RATE")
 
 
 class CbotHistoryScenarioTests(unittest.TestCase):

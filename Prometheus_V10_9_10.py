@@ -64,6 +64,7 @@ from prometheus_core import (
     import_parity_egp_mt as _core_import_parity_egp_mt,
     evaluate_local_purchase as _core_evaluate_local_purchase,
     compare_offers as _core_compare_offers,
+    stock_cover_plan as _core_stock_cover_plan,
 )
 
 # ══════════════════════════════════════════════════════════════════════
@@ -15089,6 +15090,7 @@ class App(tk.Tk):
             "open_unpriced": o_unp, "open_fx_open": o_fx,
             "local_purchases": lp_rows, "lp_saving": lp_sav, "lp_poor": lp_poor,
             "alerts": alerts, "health": health, "summary": s,
+            "buy_plans": self._buying_plan_rows(today=today),
             "generated": now_ts(),
         }
 
@@ -15232,6 +15234,20 @@ class App(tk.Tk):
                       table(rows, [3 * cm, 2 * cm, 2.6 * cm, 2.8 * cm, 2.8 * cm, 3.4 * cm],
                             num_cols=range(1, 6), sign_cols=(5,))]
 
+        # Stock cover / buying plan
+        plans = [pl for pl in d.get("buy_plans") or [] if pl.get("daily_use_mt")]
+        if plans:
+            rows = [["Commodity", "Stock MT", "Cover days", "Arriving MT", "Below safety on", "Buy by", "Qty to buy MT"]]
+            for pl in plans:
+                rows.append([pl["commodity"], f"{pl['stock_mt']:,.0f}", f"{pl['cover_days_now']:,.0f}",
+                             f"{sum(a['qty_mt'] for a in pl.get('arrivals', [])):,.0f}",
+                             pl["below_safety_date"].isoformat() if pl.get("below_safety_date") else "covered",
+                             pl["buy_by_date"].isoformat() if pl.get("buy_by_date") else "—",
+                             f"{pl['qty_to_buy_mt']:,.0f}" if pl.get("qty_to_buy_mt") else "—"])
+            story += [Paragraph("Stock cover and buying plan", h2),
+                      table(rows, [2.6 * cm, 2.4 * cm, 2 * cm, 2.4 * cm, 2.8 * cm, 2.4 * cm, 2.6 * cm],
+                            num_cols=(1, 2, 3, 6))]
+
         # Local purchases
         if d["local_purchases"]:
             rows = [["Date", "Supplier", "Commodity", "MT", "All-in", "Local − Import", "Verdict"]]
@@ -15323,6 +15339,317 @@ class App(tk.Tk):
         except Exception as e:
             self._surface_error("_export_monthly_report_pdf", e, show=True)
 
+    # ══════════════════════════════════════════════════════════════════
+    #  STOCK COVER & BUYING PLAN — when does each commodity run short and
+    #  by when must we buy (prometheus_core.stock_cover_plan).
+    # ══════════════════════════════════════════════════════════════════
+    def _buy_plan_settings(self):
+        bp = (self.state_obj.get("ui", {}) or {}).get("buy_plan") or {}
+        return (int(to_float(bp.get("horizon_days"), 180) or 180),
+                int(to_float(bp.get("lead_days"), 45) or 45),
+                int(to_float(bp.get("safety_days"), 15) or 15))
+
+    def _buying_plan_rows(self, today=None):
+        """One plan per base commodity with stock, a use rate or open contracts.
+
+        Stock = current FIFO inventory; daily use = the FIFO rate (entered in
+        Consumption or estimated from the log); arrivals = open contracts
+        still to be delivered (future delivery date).  Open contracts with no
+        delivery date are listed but not counted.
+        """
+        today = today or dt.date.today()
+        horizon, lead, safety = self._buy_plan_settings()
+        contracts = self.state_obj.get("contracts", {}) or {}
+        try:
+            fifo = self._fifo_portfolio(as_of=today)
+        except Exception as e:
+            log_exception(e, "_buying_plan_rows:fifo")
+            fifo = {}
+        bases = set(fifo)
+        for c in contracts.values():
+            if self._contract_is_open(c):
+                bases.add((c.get("commodity") or "").upper().split("-")[0])
+        for k in (self.state_obj.get("consumption", {}) or {}):
+            bases.add(str(k).upper().split("-")[0])
+        bases.discard("")
+        out = []
+        for base in sorted(bases):
+            row = fifo.get(base) or {}
+            stock = to_float(row.get("remaining_mt"), 0.0) or 0.0
+            rate = to_float(row.get("daily_consumption_rate"), None)
+            if not rate:
+                rate = self.get_consumption_mt_day(base)
+            arrivals = []
+            for lot in row.get("inbound", []) or []:
+                arrivals.append({"date": lot.get("delivery_date"), "qty_mt": lot.get("original_mt"),
+                                 "ref": self._hd_ref(lot.get("contract_id"), contracts.get(lot.get("contract_id")) or {})
+                                 if lot.get("contract_id") else (lot.get("source_ref") or "")})
+            for cid, c in contracts.items():
+                if not self._contract_is_open(c) or (c.get("commodity") or "").upper().split("-")[0] != base:
+                    continue
+                if parse_date_flex(c.get("delivery_date") or c.get("storage_start") or "") is None:
+                    arrivals.append({"date": None, "qty_mt": self._hd_contract_qty(c), "ref": self._hd_ref(cid, c)})
+            plan = _core_stock_cover_plan(stock, rate, arrivals, today=today, horizon_days=horizon,
+                                          lead_time_days=lead, safety_days=safety)
+            plan["commodity"] = base
+            out.append(plan)
+        return out
+
+    _BP_STATUS = {"LATE": ("✘ LATE — buy now / local", "High"),
+                  "BUY_SOON": ("⚠ Buy within 14 days", "High"),
+                  "PLAN": ("◷ Plan purchase", "Medium"),
+                  "COVERED": ("✔ Covered", "Low"),
+                  "NO_RATE": ("— no use rate", "Low")}
+
+    def _build_buying_plan(self):
+        p = self.tab_buying_plan
+        p.columnconfigure(0, weight=1)
+        p.rowconfigure(3, weight=1)
+        ttk.Label(p, text="📅  Stock Cover & Buying Plan — when do we run short, and by when must we buy?",
+                  font=("Segoe UI", 12, "bold")).grid(row=0, column=0, sticky="w")
+        ttk.Label(p, text="Stock today (FIFO) + open contracts arriving on their delivery dates − daily use. "
+                          "Buy-by date = the day stock drops below the safety level − the lead time.",
+                  foreground="#475569", wraplength=1150).grid(row=1, column=0, sticky="w", pady=(2, 6))
+        bar = ttk.Frame(p)
+        bar.grid(row=2, column=0, sticky="w", pady=(0, 6))
+        horizon, lead, safety = self._buy_plan_settings()
+        self._bp_vars = {}
+        for key, label, val in (("horizon_days", "Horizon (days)", horizon),
+                                ("lead_days", "Import lead time (days)", lead),
+                                ("safety_days", "Safety stock (days of use)", safety)):
+            ttk.Label(bar, text=label).pack(side="left", padx=(0, 4))
+            v = tk.StringVar(value=str(val))
+            self._bp_vars[key] = v
+            ttk.Entry(bar, textvariable=v, width=6).pack(side="left", padx=(0, 12))
+        ttk.Button(bar, text="Apply & refresh", command=self._buying_plan_apply).pack(side="left", padx=(0, 6))
+        ttk.Button(bar, text="⬇ Export to Excel", command=self._buying_plan_export).pack(side="left")
+
+        pan = ttk.PanedWindow(p, orient="vertical")
+        pan.grid(row=3, column=0, sticky="nsew")
+        top = ttk.Frame(pan)
+        bot = ttk.Frame(pan)
+        pan.add(top, weight=2)
+        pan.add(bot, weight=3)
+        cols = [("Commodity", 90), ("Status", 170), ("Stock MT", 90), ("Use MT/day", 85), ("Cover days", 80),
+                ("Arriving MT", 95), ("No-date MT", 85), ("Below safety on", 110), ("Runs out on", 100),
+                ("Buy by", 100), ("Days left", 75), ("Qty to buy MT", 105)]
+        top.columnconfigure(0, weight=1)
+        top.rowconfigure(0, weight=1)
+        self._bp_tree = ttk.Treeview(top, columns=[c for c, _ in cols], show="headings", height=6)
+        for c, w in cols:
+            self._bp_tree.heading(c, text=c)
+            self._bp_tree.column(c, width=w, anchor="w" if c in ("Commodity", "Status") else "e")
+        self._bp_tree.grid(row=0, column=0, sticky="nsew")
+        for tag, fg in (("High", "#b00020"), ("Medium", "#b36000"), ("Low", "#1a7a1a")):
+            self._bp_tree.tag_configure(tag, foreground=fg)
+        self._bp_tree.bind("<<TreeviewSelect>>", lambda e: self._buying_plan_show_months())
+        self._bp_note_var = tk.StringVar(value="")
+        ttk.Label(top, textvariable=self._bp_note_var, foreground="#1a4fa0", wraplength=1150,
+                  font=("Segoe UI", 9, "bold")).grid(row=1, column=0, sticky="w", pady=(4, 0))
+
+        bot.columnconfigure(0, weight=1)
+        bot.rowconfigure(1, weight=1)
+        self._bp_month_title = tk.StringVar(value="Select a commodity to see its month-by-month projection")
+        ttk.Label(bot, textvariable=self._bp_month_title, font=("Segoe UI", 10, "bold")
+                  ).grid(row=0, column=0, sticky="w", pady=(6, 2))
+        mcols = [("Month", 90), ("Opening MT", 110), ("+ Arrivals MT", 110), ("− Use MT", 100),
+                 ("Closing MT", 110), ("Cover days at month end", 160), ("Below safety?", 110)]
+        self._bp_mtree = ttk.Treeview(bot, columns=[c for c, _ in mcols], show="headings", height=8)
+        for c, w in mcols:
+            self._bp_mtree.heading(c, text=c)
+            self._bp_mtree.column(c, width=w, anchor="e" if c != "Month" else "w")
+        self._bp_mtree.grid(row=1, column=0, sticky="nsew")
+        self._bp_mtree.tag_configure("short", foreground="#b00020")
+        self._bp_plans = {}
+
+    def _buying_plan_apply(self):
+        try:
+            vals = {}
+            for k, v in self._bp_vars.items():
+                n = to_float(v.get(), None)
+                if n is None or n < 0:
+                    messagebox.showerror(APP_NAME, "Horizon, lead time and safety days must be numbers ≥ 0.")
+                    return
+                vals[k] = int(n)
+            vals["horizon_days"] = max(30, vals["horizon_days"])
+            self.state_obj.setdefault("ui", {})["buy_plan"] = vals
+            save_state(self.state_obj)
+            self.refresh_buying_plan()
+        except Exception as e:
+            self._surface_error("_buying_plan_apply", e, show=True)
+
+    def refresh_buying_plan(self):
+        if not hasattr(self, "_bp_tree"):
+            return
+        try:
+            tv = self._bp_tree
+            for i in tv.get_children():
+                tv.delete(i)
+            plans = self._buying_plan_rows()
+            self._bp_plans = {pl["commodity"]: pl for pl in plans}
+
+            def dtxt(d):
+                return d.isoformat() if d else "—"
+            urgent = []
+            for pl in plans:
+                label, sev = self._BP_STATUS.get(pl["status"], (pl["status"], "Low"))
+                arriving = sum(a["qty_mt"] for a in pl.get("arrivals", []))
+                undated = sum(a["qty_mt"] for a in pl.get("undated_arrivals", []))
+                rate = pl.get("daily_use_mt")
+                tv.insert("", "end", iid=pl["commodity"], tags=(sev,), values=(
+                    pl["commodity"], label, f"{pl['stock_mt']:,.0f}",
+                    f"{rate:,.0f}" if rate else "—",
+                    f"{pl.get('cover_days_now', 0):,.0f}" if rate else "—",
+                    f"{arriving:,.0f}", f"{undated:,.0f}" if undated else "—",
+                    dtxt(pl.get("below_safety_date")), dtxt(pl.get("runout_date")),
+                    dtxt(pl.get("buy_by_date")),
+                    (f"{pl['days_to_buy']:,}" if pl.get("days_to_buy") is not None else "—"),
+                    (f"{pl['qty_to_buy_mt']:,.0f}" if rate and pl.get("qty_to_buy_mt") else "—")))
+                if pl["status"] in ("LATE", "BUY_SOON"):
+                    urgent.append(pl)
+            if urgent:
+                self._bp_note_var.set("Action: " + "  ·  ".join(
+                    f"{pl['commodity']} buy {pl['qty_to_buy_mt']:,.0f} MT by {dtxt(pl['buy_by_date'])}"
+                    + (" (lead time no longer fits — consider local)" if pl['status'] == "LATE" else "")
+                    for pl in urgent))
+            else:
+                self._bp_note_var.set("No purchase is due within 14 days." if plans else
+                                      "No stock, consumption rate or open contracts to plan.")
+            sel = self._bp_tree.selection()
+            if not sel and plans:
+                self._bp_tree.selection_set(plans[0]["commodity"])
+            self._buying_plan_show_months()
+        except Exception as e:
+            self._surface_error("refresh_buying_plan", e)
+
+    def _buying_plan_show_months(self):
+        tv = self._bp_mtree
+        for i in tv.get_children():
+            tv.delete(i)
+        sel = self._bp_tree.selection()
+        pl = self._bp_plans.get(sel[0]) if sel else None
+        if not pl:
+            return
+        if pl["status"] == "NO_RATE":
+            self._bp_month_title.set(f"{pl['commodity']}: {pl.get('note')}")
+            return
+        undated = pl.get("undated_arrivals") or []
+        self._bp_month_title.set(
+            f"{pl['commodity']} — {pl['stock_mt']:,.0f} MT in stock, using {pl['daily_use_mt']:,.0f} MT/day, "
+            f"safety level {pl['safety_mt']:,.0f} MT ({pl['safety_days']} days)"
+            + (f".  Not counted (no delivery date): " + ", ".join(f"{a['ref']} {a['qty_mt']:,.0f} MT" for a in undated)
+               if undated else ""))
+        for m in pl["months"]:
+            tv.insert("", "end", tags=("short",) if m["short"] else (), values=(
+                m["month"], f"{m['opening_mt']:,.0f}", f"{m['arrivals_mt']:,.0f}", f"{m['use_mt']:,.0f}",
+                f"{m['closing_mt']:,.0f}", f"{m['cover_days']:,.0f}", "YES" if m["short"] else ""))
+
+    def _buying_plan_alerts(self):
+        """Home Action Centre / Exposure alerts for purchases that are due."""
+        out = []
+        try:
+            for pl in self._buying_plan_rows():
+                if pl["status"] not in ("LATE", "BUY_SOON"):
+                    continue
+                late = pl["status"] == "LATE"
+                out.append({
+                    "priority": "High",
+                    "issue": (f"{pl['commodity']}: stock falls below safety on "
+                              f"{pl['below_safety_date'].isoformat()} (runs out "
+                              f"{pl['runout_date'].isoformat() if pl.get('runout_date') else 'after horizon'})"),
+                    "action": (f"Buy ~{pl['qty_to_buy_mt']:,.0f} MT "
+                               + ("now — import lead time no longer fits, consider local purchase"
+                                  if late else f"by {pl['buy_by_date'].isoformat()}")
+                               + " (Analysis → Stock Cover & Buying Plan)."),
+                })
+        except Exception as e:
+            log_exception(e, "_buying_plan_alerts")
+        return out
+
+    def _buying_plan_export(self):
+        if not _need_openpyxl():
+            return
+        try:
+            fp = filedialog.asksaveasfilename(
+                initialdir=get_default_export_dir(),
+                initialfile=f"Buying_Plan_{dt.date.today().isoformat()}.xlsx",
+                defaultextension=".xlsx", filetypes=[("Excel", "*.xlsx")], title="Export Buying Plan")
+            if not fp:
+                return
+            wb = self._build_buying_plan_workbook()
+            wb.save(fp)
+            messagebox.showinfo(APP_NAME, f"Buying plan exported.\n\n{fp}")
+        except Exception as e:
+            self._surface_error("_buying_plan_export", e, show=True)
+
+    def _build_buying_plan_workbook(self, today=None):
+        """Summary sheet + one formula-based month projection per commodity."""
+        from openpyxl import Workbook
+        kit = _XlKit()
+        plans = self._buying_plan_rows(today=today)
+        horizon, lead, safety = self._buy_plan_settings()
+        wb = Workbook()
+        wb.calculation.calcOnSave = True
+        wb.calculation.fullCalcOnLoad = True
+        ws = wb.active
+        ws.title = "Buying Plan"
+        kit.title(ws, f"Stock Cover & Buying Plan — {dt.date.today().isoformat()}",
+                  f"Horizon {horizon} days · import lead time {lead} days · safety stock {safety} days of use. "
+                  "Buy-by = date stock drops below safety − lead time.", 12)
+        kit.header(ws, 4, [("Commodity", 12), ("Status", 24), ("Stock MT", 11), ("Use MT/day", 11),
+                           ("Cover days", 10), ("Arriving MT", 12), ("No-date MT", 11), ("Below safety on", 14),
+                           ("Runs out on", 12), ("Buy by", 12), ("Days left", 9), ("Qty to buy MT", 13)])
+        r = 5
+        for pl in plans:
+            label, _sev = self._BP_STATUS.get(pl["status"], (pl["status"], ""))
+            vals = [pl["commodity"], label, pl["stock_mt"], pl.get("daily_use_mt"),
+                    pl.get("cover_days_now"), sum(a["qty_mt"] for a in pl.get("arrivals", [])),
+                    sum(a["qty_mt"] for a in pl.get("undated_arrivals", [])),
+                    pl.get("below_safety_date"), pl.get("runout_date"), pl.get("buy_by_date"),
+                    pl.get("days_to_buy"), pl.get("qty_to_buy_mt") if pl.get("daily_use_mt") else None]
+            fmts = [None, None, "#,##0", "#,##0", "#,##0", "#,##0", "#,##0", "yyyy-mm-dd", "yyyy-mm-dd",
+                    "yyyy-mm-dd", "0", "#,##0"]
+            for j, (v, f) in enumerate(zip(vals, fmts), start=1):
+                kit.put(ws, r, j, v, f, kind="text" if j <= 2 else "formula", bold=(j == 1))
+            r += 1
+        kit.verdict_colours(ws, f"B5:B{max(5, r - 1)}")
+        for pl in plans:
+            if not pl.get("months"):
+                continue
+            wm = wb.create_sheet(pl["commodity"][:28])
+            kit.title(wm, f"{pl['commodity']} — month-by-month projection (edit use or arrivals)", None, 7)
+            kit.put(wm, 3, 1, "Daily use MT", kind="text", bold=True)
+            kit.put(wm, 3, 2, pl["daily_use_mt"], "#,##0.0", kind="input")
+            kit.put(wm, 4, 1, "Safety stock MT", kind="text", bold=True)
+            kit.put(wm, 4, 2, "=B3*" + str(pl["safety_days"]), "#,##0")
+            kit.header(wm, 6, [("Month", 10), ("Opening MT", 13), ("+ Arrivals MT", 13), ("Days of use", 11),
+                               ("− Use MT", 12), ("Closing MT", 13), ("Cover days", 11), ("Below safety?", 13)])
+            x = 7
+            for i, m in enumerate(pl["months"]):
+                days = round(m["use_mt"] / pl["daily_use_mt"]) if pl["daily_use_mt"] else 0
+                kit.put(wm, x, 1, m["month"], kind="text", bold=True)
+                kit.put(wm, x, 2, pl["stock_mt"] if i == 0 else f"=F{x - 1}", "#,##0",
+                        kind="input" if i == 0 else "formula")
+                kit.put(wm, x, 3, m["arrivals_mt"], "#,##0", kind="input")
+                kit.put(wm, x, 4, days, "0", kind="input")
+                kit.put(wm, x, 5, f"=D{x}*$B$3", "#,##0")
+                kit.put(wm, x, 6, f"=B{x}+C{x}-E{x}", "#,##0")
+                kit.put(wm, x, 7, f"=IF(F{x}<=0,0,F{x}/$B$3)", "#,##0")
+                kit.put(wm, x, 8, f'=IF(F{x}<$B$4,"✘ YES","✔ no")', None)
+                x += 1
+            kit.verdict_colours(wm, f"H7:H{x - 1}")
+            kit.sign_colours(wm, f"F7:F{x - 1}")
+            if pl.get("arrivals") or pl.get("undated_arrivals"):
+                x += 1
+                kit.put(wm, x, 1, "Arrivals used (open contracts)", kind="text", bold=True)
+                x += 1
+                for a in pl.get("arrivals", []) + pl.get("undated_arrivals", []):
+                    kit.put(wm, x, 1, a["date"].isoformat() if a.get("date") else "no date (not counted)", kind="note")
+                    kit.put(wm, x, 2, a.get("ref", ""), kind="text")
+                    kit.put(wm, x, 3, a["qty_mt"], "#,##0", kind="text")
+                    x += 1
+        return wb
+
     def _ceo_digest_export_catalog(self):
         """One selectable catalogue for the meaningful exports already available in Prometheus."""
         return [
@@ -15330,6 +15657,7 @@ class App(tk.Tk):
             ('monthly_report','Procurement Monthly Report (PDF)','pdf','_export_monthly_report_pdf',()),
             ('fifo','FIFO Inventory — Formula Workbook','xlsx','_export_fifo_inventory_excel',('ALL',)),
             ('scenario','Scenario Lab — Formula Workbook','xlsx','_scenario_export_excel',()),
+            ('buying_plan','Stock Cover & Buying Plan','xlsx','_buying_plan_export',()),
             ('inventory_market','Inventory vs Market','xlsx','export_inventory_market_excel',()),
             ('local_purchases','Local Purchases + CBOT Parity','xlsx','_lp_export_excel',()),
             ('contracts','Contracts — All','xlsx','_export_contracts_excel',('all',)),
@@ -15457,9 +15785,9 @@ class App(tk.Tk):
         self._an_nb=ttk.Notebook(p); self._an_nb.grid(row=1,column=0,sticky='nsew')
         self.tab_performance=ttk.Frame(self._an_nb,padding=10); self.tab_an_contract=ttk.Frame(self._an_nb,padding=6); self.tab_an_supplier=ttk.Frame(self._an_nb,padding=6); self.tab_an_season=ttk.Frame(self._an_nb,padding=6)
         self.tab_origin_cmp_outer=ttk.Frame(self._an_nb); self.tab_savings_outer=ttk.Frame(self._an_nb); self.tab_origin_cmp=self._make_scrollable_tab(self.tab_origin_cmp_outer,padding=10); self.tab_savings=self._make_scrollable_tab(self.tab_savings_outer,padding=10)
-        self.tab_basis=ttk.Frame(self._an_nb,padding=10); self.tab_exposure=ttk.Frame(self._an_nb,padding=10); self.tab_inventory_market=ttk.Frame(self._an_nb,padding=10); self.tab_scenario=ttk.Frame(self._an_nb,padding=10); self.tab_ceo_digest=ttk.Frame(self._an_nb,padding=10)
-        for tab,label in [(self.tab_performance,'Contract Performance'),(self.tab_an_contract,'Contract Detail'),(self.tab_an_supplier,'Supplier Scorecard'),(self.tab_an_season,'Seasonality'),(self.tab_origin_cmp_outer,'Origin Compare'),(self.tab_savings_outer,'Savings Tracker'),(self.tab_basis,'Basis Tracker'),(self.tab_exposure,'Exposure & Risk'),(self.tab_inventory_market,'Inventory vs Market'),(self.tab_scenario,'Scenario Lab'),(self.tab_ceo_digest,'CEO Email Digest')]: self._an_nb.add(tab,text=label)
-        self._build_performance(); self._build_an_contract_subtab(); self._build_an_supplier_subtab(); self._build_an_season_subtab(); self._build_origin_compare(); self._build_savings_tracker(); self._build_basis_tracker(); self._build_exposure_risk(); self._build_inventory_market(); self._build_scenario_lab(); self._build_ceo_digest_tab()
+        self.tab_basis=ttk.Frame(self._an_nb,padding=10); self.tab_exposure=ttk.Frame(self._an_nb,padding=10); self.tab_inventory_market=ttk.Frame(self._an_nb,padding=10); self.tab_scenario=ttk.Frame(self._an_nb,padding=10); self.tab_buying_plan=ttk.Frame(self._an_nb,padding=10); self.tab_ceo_digest=ttk.Frame(self._an_nb,padding=10)
+        for tab,label in [(self.tab_performance,'Contract Performance'),(self.tab_an_contract,'Contract Detail'),(self.tab_an_supplier,'Supplier Scorecard'),(self.tab_an_season,'Seasonality'),(self.tab_origin_cmp_outer,'Origin Compare'),(self.tab_savings_outer,'Savings Tracker'),(self.tab_basis,'Basis Tracker'),(self.tab_exposure,'Exposure & Risk'),(self.tab_inventory_market,'Inventory vs Market'),(self.tab_scenario,'Scenario Lab'),(self.tab_buying_plan,'Stock Cover & Buying Plan'),(self.tab_ceo_digest,'CEO Email Digest')]: self._an_nb.add(tab,text=label)
+        self._build_performance(); self._build_an_contract_subtab(); self._build_an_supplier_subtab(); self._build_an_season_subtab(); self._build_origin_compare(); self._build_savings_tracker(); self._build_basis_tracker(); self._build_exposure_risk(); self._build_inventory_market(); self._build_scenario_lab(); self._build_buying_plan(); self._build_ceo_digest_tab()
 
     def _inventory_market_rows(self, commodity="ALL", status="ALL"):
         """Build auditable remaining FIFO inventory vs today's local/CBOT.
@@ -29181,6 +29509,10 @@ class App(tk.Tk):
                          f"{ex['open_mt']:,.0f} MT, ~${top['usd']:,.0f})",
                 "action": "Diversify sourcing or confirm this supplier's "
                           "delivery/credit risk is acceptable at this size."})
+
+        # 6. Stock cover — a purchase is due (or already late) to stay
+        #    above the safety stock (Analysis → Stock Cover & Buying Plan).
+        alerts.extend(self._buying_plan_alerts())
         return alerts
 
     def refresh_risk_alerts(self):
@@ -31884,6 +32216,10 @@ class App(tk.Tk):
             self.refresh_savings_tracker()
         except Exception as e:
             log_exception(e, "refresh_all→refresh_savings_tracker")
+        try:
+            self.refresh_buying_plan()
+        except Exception as e:
+            log_exception(e, "refresh_all→refresh_buying_plan")
         try:
             self.refresh_local_purchases()
         except Exception:

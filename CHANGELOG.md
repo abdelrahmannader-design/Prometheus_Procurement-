@@ -1,3 +1,9 @@
+# 2026-09-27 (f) — Stock Cover & Buying Plan
+
+- New Analysis tab: per commodity, stock today (FIFO) + open contracts arriving on their delivery dates − daily use, projected day by day over a horizon (default 180 days). Shows cover days, the date stock drops below the safety level (default 15 days of use), the run-out date, the buy-by date (safety date − import lead time, default 45 days) and the quantity to buy. Open contracts without a delivery date are listed, not counted.
+- Month-by-month projection per commodity; formula-based Excel export (edit use or arrivals and it recalculates).
+- Home Action Centre / Exposure & Risk get a High alert when a purchase is due within 14 days or the lead time no longer fits; the Monthly Report gets a "Stock cover and buying plan" table.
+
 # 2026-09-27 (e) — Offer Comparison: intake by supplier/origin, Direct + Indirect, live CIF
 
 - Changing the supplier (or origin) now always refreshes the intake. Lookup uses the origin-specific key (CORN-BRZ, CORN-UKR…) then the base commodity; a supplier saved only under origin rows is found too, and a note shows which Setup row was used.

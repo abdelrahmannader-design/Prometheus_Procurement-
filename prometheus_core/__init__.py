@@ -51,3 +51,5 @@ from .local_purchase import (
 )
 
 from .offers import OFFERS_ENGINE_VERSION, compare_offers
+
+from .planning import PLANNING_ENGINE_VERSION, stock_cover_plan
