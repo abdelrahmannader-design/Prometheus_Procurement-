@@ -1,3 +1,9 @@
+# 2026-09-27 (e) — Offer Comparison: intake by supplier/origin, Direct + Indirect, live CIF
+
+- Changing the supplier (or origin) now always refreshes the intake. Lookup uses the origin-specific key (CORN-BRZ, CORN-UKR…) then the base commodity; a supplier saved only under origin rows is found too, and a note shows which Setup row was used.
+- Separate Direct intake and Indirect intake columns plus "Intake used" (DIRECT / INDIRECT) — only the chosen route is charged; the Excel export has the same columns and formula.
+- CIF $/MT column computes automatically as soon as a premium (or flat CIF) is typed, and follows CBOT/commodity changes.
+
 # 2026-09-27 (d) — Supplier Offer Comparison
 
 - New tab Calculate → Offer Comparison: up to 6 offers (CBOT + premium or flat CIF), each with its own freight, intake, clearance, payment days, quality adjustment and quantity, priced on one shared CBOT / FX / interest rate / local price (⟳ fills them from the market).

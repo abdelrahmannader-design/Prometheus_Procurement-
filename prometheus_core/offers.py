@@ -40,8 +40,17 @@ def compare_offers(shared: dict[str, Any], offers: list[dict[str, Any]]) -> dict
         prem = to_float(o.get("premium"), None)
         flat = to_float(o.get("flat_cif"), None)
         days = to_float(o.get("payment_days"), 0.0) or 0.0
-        fees = sum(to_float(o.get(k), 0.0) or 0.0
-                   for k in ("freight_egp_mt", "intake_egp_mt", "clearance_egp_mt"))
+        # Intake: Direct and Indirect are alternative routes — only the
+        # selected one is charged.  A plain intake_egp_mt is still accepted.
+        mode = str(o.get("intake_mode") or "DIRECT").upper()
+        direct = to_float(o.get("intake_direct_egp_mt"), None)
+        indirect = to_float(o.get("intake_indirect_egp_mt"), None)
+        if direct is not None or indirect is not None:
+            intake = (indirect if mode.startswith("INDIRECT") else direct) or 0.0
+        else:
+            intake = to_float(o.get("intake_egp_mt"), 0.0) or 0.0
+        fees = intake + sum(to_float(o.get(k), 0.0) or 0.0
+                            for k in ("freight_egp_mt", "clearance_egp_mt"))
         quality = to_float(o.get("quality_adj_egp_mt"), 0.0) or 0.0
         qty = to_float(o.get("qty_mt"), None)
         missing = []
@@ -68,7 +77,8 @@ def compare_offers(shared: dict[str, Any], offers: list[dict[str, Any]]) -> dict
         rows.append({
             "index": i, "name": name, "supplier": o.get("supplier", ""), "origin": o.get("origin", ""),
             "price_type": kind, "premium": prem, "flat_cif": flat, "payment_days": days,
-            "fees_egp_mt": fees, "quality_adj_egp_mt": quality, "qty_mt": qty,
+            "fees_egp_mt": fees, "intake_egp_mt": intake, "intake_mode": "INDIRECT" if mode.startswith("INDIRECT") else "DIRECT",
+            "quality_adj_egp_mt": quality, "qty_mt": qty,
             "cif_usd_mt": cif, "carry_usd_mt": carry, "carry_mult": mult,
             "landed_egp_mt": landed, "saving_vs_local_egp_mt": saving,
             "saving_total_egp": (saving * qty) if (saving is not None and qty) else None,

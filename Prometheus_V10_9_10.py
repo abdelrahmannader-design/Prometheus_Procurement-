@@ -22442,8 +22442,11 @@ class App(tk.Tk):
         ("price_type", "Price type", 8, "type"),
         ("premium", "Premium\n(CBOT unit)", 8, "num"),
         ("flat_cif", "Flat CIF\n$/MT", 8, "num"),
+        ("cif_auto", "CIF $/MT\n(auto)", 9, "auto"),
         ("freight_egp_mt", "Freight\nEGP/MT", 8, "num"),
-        ("intake_egp_mt", "Intake\nEGP/MT", 8, "num"),
+        ("intake_direct_egp_mt", "Direct intake\nEGP/MT", 9, "num"),
+        ("intake_indirect_egp_mt", "Indirect intake\nEGP/MT", 9, "num"),
+        ("intake_mode", "Intake\nused", 8, "mode"),
         ("clearance_egp_mt", "Clearance\nEGP/MT", 8, "num"),
         ("payment_days", "Payment /\nfinance days", 8, "num"),
         ("quality_adj_egp_mt", "Quality adj.\nEGP/MT (+cost)", 9, "num"),
@@ -22497,14 +22500,26 @@ class App(tk.Tk):
         self._oc2_rows = []
         for i in range(self._OFFER_ROWS):
             rv = {}
-            srow = saved_rows[i] if i < len(saved_rows) else {}
+            srow = dict(saved_rows[i]) if i < len(saved_rows) else {}
+            if srow.get("intake_egp_mt") and not srow.get("intake_direct_egp_mt"):
+                srow["intake_direct_egp_mt"] = srow.get("intake_egp_mt")   # older saved offers
             for j, (key, _h, w, kind) in enumerate(self._OFFER_FIELDS):
                 var = tk.StringVar(value=str(srow.get(key, "") if srow.get(key) is not None else ""))
                 rv[key] = var
                 if kind == "supplier":
                     cb = ttk.Combobox(grid, textvariable=var, values=suppliers, width=w)
                     cb.grid(row=i + 1, column=j, padx=2, pady=1)
-                    cb.bind("<<ComboboxSelected>>", lambda e, r=rv: self._offers_supplier_defaults(r))
+                    cb.bind("<<ComboboxSelected>>", lambda e, r=rv: self._offers_supplier_defaults(r, force=True))
+                    cb.bind("<FocusOut>", lambda e, r=rv: self._offers_supplier_defaults(r))
+                elif kind == "auto":
+                    var.set("")
+                    ttk.Label(grid, textvariable=var, width=w, anchor="e", foreground="#1a4fa0",
+                              font=("Segoe UI", 9, "bold")).grid(row=i + 1, column=j, padx=2, pady=1)
+                elif kind == "mode":
+                    if var.get() not in ("DIRECT", "INDIRECT"):
+                        var.set("DIRECT")
+                    ttk.Combobox(grid, textvariable=var, values=["DIRECT", "INDIRECT"], width=w,
+                                 state="readonly").grid(row=i + 1, column=j, padx=2, pady=1)
                 elif kind == "type":
                     if not var.get():
                         var.set("CBOT")
@@ -22512,7 +22527,19 @@ class App(tk.Tk):
                                  state="readonly").grid(row=i + 1, column=j, padx=2, pady=1)
                 else:
                     ttk.Entry(grid, textvariable=var, width=w).grid(row=i + 1, column=j, padx=2, pady=1)
+            for key in ("premium", "flat_cif", "price_type"):
+                rv[key].trace_add("write", lambda *_a, r=rv: self._offers_update_cif(r))
+            rv["origin"].trace_add("write", lambda *_a, r=rv: self._offers_supplier_defaults(r, force=True))
             self._oc2_rows.append(rv)
+        for key in ("cbot", "commodity"):
+            self._oc2_vars[key].trace_add("write", lambda *_a: [self._offers_update_cif(r) for r in self._oc2_rows])
+        self._oc2_vars["commodity"].trace_add(
+            "write", lambda *_a: [self._offers_supplier_defaults(r, force=True, quiet=True) for r in self._oc2_rows])
+        self._oc2_intake_note = tk.StringVar(value="")
+        ttk.Label(grid, textvariable=self._oc2_intake_note, foreground="#475569", wraplength=1100
+                  ).grid(row=self._OFFER_ROWS + 1, column=0, columnspan=len(self._OFFER_FIELDS), sticky="w", pady=(4, 0))
+        for r in self._oc2_rows:
+            self._offers_update_cif(r)
 
         bb = ttk.Frame(p)
         bb.grid(row=4, column=0, sticky="w", pady=(8, 4))
@@ -22562,27 +22589,78 @@ class App(tk.Tk):
         except Exception as e:
             log_exception(e, "_offers_fill_market")
 
-    def _offers_supplier_defaults(self, rv):
-        """Supplier picked → intake from Setup → Suppliers, freight default."""
+    def _offers_commodity_key(self, origin):
+        """Shared commodity + this offer's origin → the key used in Setup
+        (e.g. CORN + Brazil → CORN-BRZ), same mapping as the rest of the app."""
+        comm = (self._oc2_vars["commodity"].get() or "CORN").upper()
+        keys = self._hd_local_keys_for_contract({"commodity": comm, "origin": origin or ""})
+        return keys[0] if keys else comm
+
+    def _offers_supplier_defaults(self, rv, force=False, quiet=False):
+        """Fill Direct and Indirect intake from Setup → Suppliers.
+
+        Uses the origin-specific key first (CORN-BRZ, CORN-UKR…), then the
+        base commodity; when a supplier only has origin rows and the origin
+        is not given, the first matching origin row is used and named.
+        force=True (supplier/origin changed) always replaces the intakes.
+        """
         try:
-            comm = (self._oc2_vars["commodity"].get() or "CORN").upper()
-            rec, _m = self._supplier_intake_defaults(rv["supplier"].get(), comm)
-            if rec and not rv["intake_egp_mt"].get().strip():
-                v = to_float(rec.get("direct_egp_mt"), None)
-                if v is not None:
-                    rv["intake_egp_mt"].set(f"{v:g}")
+            sup = (rv["supplier"].get() or "").strip()
+            if not sup:
+                return
+            key = self._offers_commodity_key(rv["origin"].get())
+            rec, matched = self._supplier_intake_defaults(sup, key)
+            if not rec:
+                comms = (self.state_obj.get("suppliers", {}) or {}).get(sup) or {}
+                base = key.split("-")[0]
+                fam = sorted(k for k in comms if str(k).upper().split("-")[0] == base)
+                if fam:
+                    matched = fam[0]
+                    rec = comms.get(matched) or {}
+            if rec:
+                for fld, src in (("intake_direct_egp_mt", "direct_egp_mt"),
+                                 ("intake_indirect_egp_mt", "indirect_egp_mt")):
+                    v = to_float(rec.get(src), None)
+                    if v is not None and (force or not rv[fld].get().strip()):
+                        rv[fld].set(f"{v:g}")
+                if not quiet and hasattr(self, "_oc2_intake_note"):
+                    self._oc2_intake_note.set(
+                        f"{sup}: intake taken from Setup → Suppliers [{matched}] — direct "
+                        f"{to_float(rec.get('direct_egp_mt'), 0) or 0:g}, indirect "
+                        f"{to_float(rec.get('indirect_egp_mt'), 0) or 0:g} EGP/MT. "
+                        "Set Origin to pick another origin's rates.")
+            elif not quiet and hasattr(self, "_oc2_intake_note"):
+                self._oc2_intake_note.set(f"{sup}: no intake saved for {key} in Setup → Suppliers — type it in.")
             if not rv["freight_egp_mt"].get().strip():
+                comm = (self._oc2_vars["commodity"].get() or "CORN").upper()
                 rv["freight_egp_mt"].set(f"{get_commodity_freight_egp_mt(self.state_obj, comm):g}")
-            if not rv["name"].get().strip():
-                rv["name"].set(rv["supplier"].get())
+            known = set((self.state_obj.get("suppliers", {}) or {}).keys())
+            cur_name = rv["name"].get().strip()
+            if not cur_name or (cur_name in known and cur_name != sup):
+                rv["name"].set(sup)   # name was auto-filled from a supplier: follow the new one
         except Exception as e:
             log_exception(e, "_offers_supplier_defaults")
+
+    def _offers_update_cif(self, rv):
+        """Live CIF preview: (CBOT + premium) × factor, or the flat CIF."""
+        try:
+            if (rv["price_type"].get() or "CBOT").upper() == "FLAT":
+                v = to_float(rv["flat_cif"].get(), None)
+            else:
+                comm = (self._oc2_vars["commodity"].get() or "CORN").upper()
+                factor = cbot_conv_factor(comm, strict=True)
+                cbot = to_float(self._oc2_vars["cbot"].get(), None)
+                prem = to_float(rv["premium"].get(), None)
+                v = (cbot + prem) * factor if (factor and cbot is not None and prem is not None) else None
+            rv["cif_auto"].set(f"{v:,.2f}" if v is not None else "")
+        except Exception:
+            rv["cif_auto"].set("")
 
     def _offers_inputs(self):
         shared = {k: v.get().strip() for k, v in self._oc2_vars.items()}
         offers = []
         for rv in self._oc2_rows:
-            o = {k: v.get().strip() for k, v in rv.items()}
+            o = {k: v.get().strip() for k, v in rv.items() if k != "cif_auto"}
             if not any(o.get(k) for k in ("name", "supplier", "premium", "flat_cif")):
                 continue
             offers.append(o)
@@ -22592,7 +22670,8 @@ class App(tk.Tk):
         try:
             shared, offers = self._offers_inputs()
             self.state_obj.setdefault("ui", {})["offer_compare"] = {
-                "shared": shared, "offers": [{k: v.get() for k, v in rv.items()} for rv in self._oc2_rows]}
+                "shared": shared, "offers": [{k: v.get() for k, v in rv.items() if k != "cif_auto"}
+                                             for rv in self._oc2_rows]}
             save_state(self.state_obj)
             tv = self._oc2_tree
             for i in tv.get_children():
@@ -22648,7 +22727,7 @@ class App(tk.Tk):
     def _offers_clear(self):
         for rv in self._oc2_rows:
             for k, v in rv.items():
-                v.set("CBOT" if k == "price_type" else "")
+                v.set("CBOT" if k == "price_type" else "DIRECT" if k == "intake_mode" else "")
         for i in self._oc2_tree.get_children():
             self._oc2_tree.delete(i)
         self._oc2_verdict_var.set("")
@@ -22677,8 +22756,9 @@ class App(tk.Tk):
         CBOT, FAC, FX, RATE, LOC = "$B$5", "$B$6", "$B$7", "$B$8", "$B$9"
         hdr = 11
         heads = [("Offer", 16), ("Supplier", 16), ("Origin", 10), ("Type", 7), ("Premium", 9), ("Flat CIF", 9),
-                 ("Freight", 9), ("Intake", 9), ("Clearance", 9), ("Pay days", 8), ("Quality adj", 9),
-                 ("Qty MT", 9), ("CIF $/MT", 10), ("Carry $/MT", 10), ("Landed EGP/MT", 12),
+                 ("Freight", 9), ("Direct intake", 10), ("Indirect intake", 10), ("Intake used", 9),
+                 ("Clearance", 9), ("Pay days", 8), ("Quality adj", 9), ("Qty MT", 9),
+                 ("CIF $/MT", 10), ("Carry $/MT", 10), ("Landed EGP/MT", 12),
                  ("vs Local /MT", 11), ("vs Local total", 14), ("Rank", 6), ("Gap vs best /MT", 12),
                  ("Price to match best", 14)]
         kit.header(ws, hdr, heads)
@@ -22686,32 +22766,39 @@ class App(tk.Tk):
         last = first + len(offers) - 1
         for i, o in enumerate(offers):
             x = first + i
+            direct = o.get("intake_direct_egp_mt")
+            if direct in (None, "") and o.get("intake_egp_mt") not in (None, ""):
+                direct = o.get("intake_egp_mt")
             kit.put(ws, x, 1, o.get("name") or f"Offer {i + 1}", kind="text", bold=True)
             kit.put(ws, x, 2, o.get("supplier", ""), kind="text")
             kit.put(ws, x, 3, o.get("origin", ""), kind="text")
             kit.put(ws, x, 4, (o.get("price_type") or "CBOT").upper(), kind="input")
-            for col, key, fmt in ((5, "premium", "#,##0.00"), (6, "flat_cif", "#,##0.00"),
-                                  (7, "freight_egp_mt", "#,##0.00"), (8, "intake_egp_mt", "#,##0.00"),
-                                  (9, "clearance_egp_mt", "#,##0.00"), (10, "payment_days", "0"),
-                                  (11, "quality_adj_egp_mt", "#,##0.00"), (12, "qty_mt", "#,##0")):
-                kit.put(ws, x, col, to_float(o.get(key), None), fmt, kind="input")
-            kit.put(ws, x, 13, f'=IF(D{x}="FLAT",IF(F{x}="","",F{x}),IF(E{x}="","",({CBOT}+E{x})*{FAC}))', "#,##0.00")
-            kit.put(ws, x, 14, f'=IF(M{x}="","",M{x}*{RATE}/100*N(J{x})/360)', "#,##0.00")
-            kit.put(ws, x, 15, f'=IF(M{x}="","",(M{x}+N{x})*{FX}+N(G{x})+N(H{x})+N(I{x})+N(K{x}))', "#,##0")
-            kit.put(ws, x, 16, f'=IF(OR(O{x}="",{LOC}=""),"",{LOC}-O{x})', "+#,##0;-#,##0;0")
-            kit.put(ws, x, 17, f'=IF(OR(P{x}="",L{x}=""),"",P{x}*L{x})', "+#,##0;-#,##0;0")
-            kit.put(ws, x, 18, f'=IF(O{x}="","",RANK(O{x},$O${first}:$O${last},1))', "0", bold=True)
-            kit.put(ws, x, 19, f'=IF(O{x}="","",O{x}-MIN($O${first}:$O${last}))', "+#,##0;-#,##0;0")
-            kit.put(ws, x, 20, (f'=IF(O{x}="","",IF(D{x}="FLAT",(MIN($O${first}:$O${last})-N(G{x})-N(H{x})-N(I{x})-N(K{x}))'
-                                f'/{FX}/(1+{RATE}/100*N(J{x})/360),(MIN($O${first}:$O${last})-N(G{x})-N(H{x})-N(I{x})-N(K{x}))'
-                                f'/{FX}/(1+{RATE}/100*N(J{x})/360)/{FAC}-{CBOT}))'), "#,##0.00")
+            kit.put(ws, x, 10, (o.get("intake_mode") or "DIRECT").upper(), kind="input")
+            for col, val, fmt in ((5, o.get("premium"), "#,##0.00"), (6, o.get("flat_cif"), "#,##0.00"),
+                                  (7, o.get("freight_egp_mt"), "#,##0.00"), (8, direct, "#,##0.00"),
+                                  (9, o.get("intake_indirect_egp_mt"), "#,##0.00"),
+                                  (11, o.get("clearance_egp_mt"), "#,##0.00"), (12, o.get("payment_days"), "0"),
+                                  (13, o.get("quality_adj_egp_mt"), "#,##0.00"), (14, o.get("qty_mt"), "#,##0")):
+                kit.put(ws, x, col, to_float(val, None), fmt, kind="input")
+            fees = f'N(G{x})+IF(J{x}="INDIRECT",N(I{x}),N(H{x}))+N(K{x})+N(M{x})'
+            carry = f'(1+{RATE}/100*N(L{x})/360)'
+            kit.put(ws, x, 15, f'=IF(D{x}="FLAT",IF(F{x}="","",F{x}),IF(E{x}="","",({CBOT}+E{x})*{FAC}))', "#,##0.00")
+            kit.put(ws, x, 16, f'=IF(O{x}="","",O{x}*{RATE}/100*N(L{x})/360)', "#,##0.00")
+            kit.put(ws, x, 17, f'=IF(O{x}="","",(O{x}+P{x})*{FX}+{fees})', "#,##0")
+            kit.put(ws, x, 18, f'=IF(OR(Q{x}="",{LOC}=""),"",{LOC}-Q{x})', "+#,##0;-#,##0;0")
+            kit.put(ws, x, 19, f'=IF(OR(R{x}="",N{x}=""),"",R{x}*N{x})', "+#,##0;-#,##0;0")
+            kit.put(ws, x, 20, f'=IF(Q{x}="","",RANK(Q{x},$Q${first}:$Q${last},1))', "0", bold=True)
+            kit.put(ws, x, 21, f'=IF(Q{x}="","",Q{x}-MIN($Q${first}:$Q${last}))', "+#,##0;-#,##0;0")
+            kit.put(ws, x, 22, (f'=IF(Q{x}="","",IF(D{x}="FLAT",(MIN($Q${first}:$Q${last})-({fees}))/{FX}/{carry},'
+                                f'(MIN($Q${first}:$Q${last})-({fees}))/{FX}/{carry}/{FAC}-{CBOT}))'), "#,##0.00")
         if offers:
-            kit.sign_colours(ws, f"P{first}:Q{last}")
+            kit.sign_colours(ws, f"R{first}:S{last}")
             from openpyxl.formatting.rule import FormulaRule
-            ws.conditional_formatting.add(f"A{first}:T{last}", FormulaRule(
-                formula=[f"$R{first}=1"], fill=kit.grn_fill))
+            ws.conditional_formatting.add(f"A{first}:V{last}", FormulaRule(
+                formula=[f"$T{first}=1"], fill=kit.grn_fill))
         kit.notes(ws, last + 3, [
             "Carry = interest on the CIF for the payment days (simple interest, 360-day year).",
+            "Intake used: DIRECT or INDIRECT — only the chosen route is charged (they are alternatives, never added together).",
             "Quality adj = extra cost per MT you expect from this origin/quality (e.g. fines, moisture); negative = better than standard.",
             "Price to match best = premium (CBOT unit) or flat CIF ($/MT) at which this offer would cost the same as the cheapest one.",
         ], 20)

@@ -130,6 +130,15 @@ class OfferComparisonTests(unittest.TestCase):
                                               "payment_days": worse["payment_days"]}])
         self.assertAlmostEqual(again["rows"][0]["landed_egp_mt"], res["best"]["landed_egp_mt"])
 
+    def test_direct_or_indirect_intake_only_the_chosen_one(self):
+        base = {"premium": 175, "freight_egp_mt": 485, "intake_direct_egp_mt": 235,
+                "intake_indirect_egp_mt": 365}
+        res = compare_offers(self.shared, [{**base, "name": "D"}, {**base, "name": "I", "intake_mode": "INDIRECT"}])
+        by = {r["name"]: r for r in res["rows"]}
+        self.assertEqual(by["D"]["intake_egp_mt"], 235)
+        self.assertEqual(by["I"]["intake_egp_mt"], 365)
+        self.assertAlmostEqual(by["I"]["landed_egp_mt"] - by["D"]["landed_egp_mt"], 130)
+
     def test_incomplete_offer_is_not_ranked(self):
         res = compare_offers(self.shared, [{"name": "No premium"}])
         self.assertIsNone(res["rows"][0]["rank"])
