@@ -90,6 +90,15 @@ from prometheus_core.budget import (
     budget_year_range as _core_budget_year_range,
     budget_vs_actual as _core_budget_vs_actual,
 )
+from prometheus_core.history import (
+    snapshot as _core_history_snapshot,
+    diff as _core_history_diff,
+    fingerprint as _core_approval_fingerprint,
+    changed_terms as _core_approval_changed_terms,
+    approval_status as _core_approval_status,
+    hash_pin as _core_hash_pin,
+    APPROVAL_FIELDS as _core_APPROVAL_FIELDS,
+)
 from prometheus_core.importer import (
     IMPORT_SHEETS as _core_IMPORT_SHEETS,
     EXAMPLES as _core_IMPORT_EXAMPLES,
@@ -2219,6 +2228,58 @@ def load_state():
             messagebox.showwarning(APP_NAME, f"Could not load state file. Starting fresh.\n\n{e}")
     return ensure_state_schema(default_state())
 
+# ── Change history: every save logs field-level changes to the key records
+_HISTORY_SHADOW = {"snap": None, "paused": False}
+HISTORY_MAX_ROWS = 20000
+
+
+def history_user(state):
+    name = ((state or {}).get("ui", {}) or {}).get("user_name") or ""
+    if not name:
+        try:
+            import getpass
+            name = getpass.getuser()
+        except Exception:
+            name = "user"
+    return str(name)
+
+
+def history_prime(state, paused=None):
+    """Remember the records as loaded, so the next save logs only real edits.
+    paused=True while the app starts up: its own clean-ups are not user edits."""
+    try:
+        if paused is not None:
+            _HISTORY_SHADOW["paused"] = bool(paused)
+        _HISTORY_SHADOW["snap"] = _core_history_snapshot(state or {})
+    except Exception as exc:
+        log_exception(exc, "history_prime")
+
+
+def history_record(state, note=""):
+    try:
+        new = _core_history_snapshot(state)
+        old = _HISTORY_SHADOW.get("snap")
+        _HISTORY_SHADOW["snap"] = new
+        if old is None or _HISTORY_SHADOW.get("paused"):
+            return 0
+        changes = _core_history_diff(old, new)
+        if not changes:
+            return 0
+        log = state.setdefault("change_history", [])
+        ts, user = now_ts(), history_user(state)
+        for ch in changes[:2000]:
+            ch.update({"ts": ts, "user": user})
+            if note:
+                ch["note"] = note
+            log.append(ch)
+        if len(log) > HISTORY_MAX_ROWS:
+            del log[:-HISTORY_MAX_ROWS]
+        return len(changes)
+    except Exception as exc:
+        log_exception(exc, "history_record")
+        return 0
+
+
 def save_state(state):
     try:
         # Ensure app data dir exists (important for EXE runs)
@@ -2226,6 +2287,7 @@ def save_state(state):
         # Rolling backup before overwrite
         backup_state_file()
         state = ensure_state_schema(state)
+        history_record(state)
         state["meta"]["saved_ts"]=now_ts()
         # Atomic write: dump to a temp file in the SAME directory, then
         # os.replace() — a crash mid-write can no longer leave a truncated
@@ -3469,6 +3531,7 @@ class App(tk.Tk):
         self.minsize(1000, 650)
 
         self.state_obj = ensure_state_schema(load_state())
+        history_prime(self.state_obj, paused=True)
         # Ensure required keys exist / backward compatible keys
         self.state_obj.setdefault("contracts", {})
         self.state_obj.setdefault("suppliers", {})
@@ -3548,6 +3611,7 @@ class App(tk.Tk):
         self._build_tabs()
         self._build_status_bar()
         self.refresh_all()
+        history_prime(self.state_obj, paused=False)   # from here on, saves are logged
         self._start_autosave()
         self._start_home_market_autofetch()
         self._start_daily_fx_fetch()    # auto-store USD/EGP every day
@@ -6809,10 +6873,12 @@ class App(tk.Tk):
         self.tab_local_purchases_outer = ttk.Frame(self._contracts_nb)
         self.tab_slots_outer           = ttk.Frame(self._contracts_nb)
         self.tab_targets_outer         = ttk.Frame(self._contracts_nb)
+        self.tab_approvals_outer       = ttk.Frame(self._contracts_nb)
         self._contracts_nb.add(self.tab_contracts_outer,       text="Import Contracts")
         self._contracts_nb.add(self.tab_local_purchases_outer, text="Local Purchases")
         self._contracts_nb.add(self.tab_targets_outer,         text="CBOT Targets")
         self._contracts_nb.add(self.tab_slots_outer,           text="CBOT Slots")
+        self._contracts_nb.add(self.tab_approvals_outer,       text="Approvals & History")
 
         # ── Scrollable inner frames (existing builders keep their names) ─
         self.tab_contracts       = self._make_scrollable_tab(self.tab_contracts_outer, padding=10)
@@ -6827,6 +6893,7 @@ class App(tk.Tk):
         self.tab_local_purchases = self._make_scrollable_tab(self.tab_local_purchases_outer, padding=10)
         self.tab_slots           = self._make_scrollable_tab(self.tab_slots_outer, padding=10)
         self.tab_targets         = self._make_scrollable_tab(self.tab_targets_outer, padding=10)
+        self.tab_approvals       = self._make_scrollable_tab(self.tab_approvals_outer, padding=10)
         self.tab_setup           = self._make_scrollable_tab(self.tab_setup_outer, padding=10)
         self.tab_consumption     = self._make_scrollable_tab(self.tab_consumption_outer, padding=10)
         self.tab_analysis        = self._make_scrollable_tab(self.tab_analysis_outer, padding=10)
@@ -6874,6 +6941,10 @@ class App(tk.Tk):
             self._build_cbot_targets()
         except Exception as _e_tg:
             log_exception(_e_tg, "_build_cbot_targets")
+        try:
+            self._build_approvals_tab()
+        except Exception as _e_ap:
+            log_exception(_e_ap, "_build_approvals_tab")
         self._build_consumption()
         self._build_local_purchases()
         # Analysis builds its own sub-tabs, including Contract Performance,
@@ -30250,6 +30321,9 @@ class App(tk.Tk):
 
         # 9. Budget: forecast over budget, or the rest can't be bought on budget at today's price.
         alerts.extend(self._budget_alerts())
+
+        # 10. Approvals waiting, or terms edited after approval.
+        alerts.extend(self._approval_alerts())
         return alerts
 
     def refresh_risk_alerts(self):
@@ -33595,6 +33669,454 @@ class App(tk.Tk):
             log_exception(e, "_xl_import_apply:refresh")
         return done
 
+    # ══════════════════════════════════════════════════════════════════
+    # APPROVALS & CHANGE HISTORY
+    # ══════════════════════════════════════════════════════════════════
+    _APPR_LABEL = {"PENDING": "⏳ Waiting", "APPROVED": "✔ Approved", "REJECTED": "✘ Rejected",
+                   "WITHDRAWN": "— Withdrawn", "CHANGED": "⚠ Changed after request", "MISSING": "⚠ Record deleted"}
+    _HIST_ENTITY = {"contract": "Import contract", "local_purchase": "Local purchase", "local_price": "Local price",
+                    "budget": "Budget", "approval": "Approval", "all data": "All data"}
+
+    def _approvals(self):
+        a = self.state_obj.get("approvals")
+        if not isinstance(a, list):
+            a = []
+            self.state_obj["approvals"] = a
+        return a
+
+    def _appr_record(self, entity, key):
+        if entity == "contract":
+            return (self.state_obj.get("contracts", {}) or {}).get(key)
+        if entity == "local_purchase":
+            return next((r for r in self.state_obj.get("local_purchases", []) or []
+                         if str(r.get("id")) == str(key)), None)
+        return None
+
+    def _appr_label(self, entity, key, rec=None):
+        rec = rec if rec is not None else self._appr_record(entity, key)
+        if rec is None:
+            return f"{entity} {key} (deleted)"
+        if entity == "contract":
+            return f"{self._hd_ref(key, rec)} · {rec.get('supplier', '')} · {rec.get('commodity', '')}"
+        return (f"Local #{key} · {rec.get('date', '')} · {rec.get('supplier', '')} · "
+                f"{rec.get('commodity', '')}")
+
+    def _appr_terms(self, entity, key, rec=None):
+        """One-line economics shown to the approver: qty, price, saving vs local, vs budget."""
+        rec = rec if rec is not None else self._appr_record(entity, key)
+        if rec is None:
+            return ""
+        parts = []
+        try:
+            if entity == "contract":
+                e = self._contract_savings_economics(key, rec)
+                qty = self._hd_contract_qty(rec) or to_float(rec.get("qty_mt"), 0) or 0
+                parts.append(f"{qty:,.0f} MT")
+                if e.get("cif") is not None:
+                    parts.append(f"CIF {e['cif']:,.2f} $/MT")
+                if e.get("own_after") is not None:
+                    parts.append(f"landed {e['own_after']:,.0f} EGP/MT")
+                if e.get("sav_mt") is not None:
+                    parts.append(f"vs local {e['sav_mt']:+,.0f} EGP/MT")
+            else:
+                ev = self._lp_evaluate(rec)
+                parts.append(f"{ev['qty']:,.0f} MT at {ev.get('local_all_in') or 0:,.0f} EGP/MT all-in")
+                vi = ev.get("vs_import_egp_mt")
+                if vi is not None:
+                    parts.append(f"local − import {vi:+,.0f} EGP/MT")
+            base = (rec.get("commodity") or "").upper().split("-")[0]
+            d = self._budget_contract_date(rec)[0] if entity == "contract" else parse_date_flex(rec.get("date"))
+            year = _core_budget_year_of(d, self._budget_start_month())
+            if year is not None:
+                for r in self._budget_rows(year):
+                    if r["commodity"] != base or r["budget_price"] is None:
+                        continue
+                    line = next((l for l in r["lines"] if (entity == "contract" and l.get("cid") == key) or
+                                 (entity == "local_purchase" and l["source"] == "Local purchase"
+                                  and l["date"] == d and abs((l["qty_mt"] or 0) - (to_float(rec.get("qty_mt"), 0) or 0)) < 1e-6)),
+                                None)
+                    if line and line.get("cost_mt") is not None:
+                        vs = r["budget_price"] - line["cost_mt"]
+                        dp = 2 if r["unit"][0] == "USD" else 0
+                        parts.append(f"vs budget {vs:+,.{dp}f} {r['unit_label']}")
+        except Exception as ex:
+            log_exception(ex, "_appr_terms")
+        return " · ".join(parts)
+
+    def _approval_alerts(self):
+        out = []
+        try:
+            pend, changed = [], []
+            for a in self._approvals():
+                st = _core_approval_status(a, self._appr_record(a["entity"], a["key"]))
+                if st == "PENDING":
+                    pend.append(a)
+                elif st == "CHANGED" and str(a.get("status")).upper() == "APPROVED":
+                    changed.append(a)
+            if pend:
+                oldest = min(a.get("requested_ts", "") for a in pend)[:10]
+                out.append({"priority": "Medium",
+                            "issue": f"{len(pend)} purchase(s) waiting for approval (oldest requested {oldest}).",
+                            "action": "Contracts → Approvals & History: approve or reject."})
+            for a in changed:
+                out.append({"priority": "High",
+                            "issue": f"{self._appr_label(a['entity'], a['key'])} was changed after it was approved "
+                                     f"({', '.join(_core_approval_changed_terms(a['entity'], a.get('terms') or {}, self._appr_record(a['entity'], a['key'])))}).",
+                            "action": "Request approval again for the new terms."})
+        except Exception as e:
+            log_exception(e, "_approval_alerts")
+        return out
+
+    def _build_approvals_tab(self):
+        p = self.tab_approvals
+        p.columnconfigure(0, weight=1)
+        ttk.Label(p, text="✅  Approvals & Change History", font=("Segoe UI", 12, "bold")).grid(row=0, column=0,
+                                                                                            sticky="w")
+        ttk.Label(p, text="Ask for approval of a contract or local purchase; the approver sees the key terms, the "
+                          "saving vs local and vs budget. If the terms are edited after approval it is flagged. Every "
+                          "change to contracts, local purchases, local prices and budgets is logged below.",
+                  foreground="#475569", wraplength=1150).grid(row=1, column=0, sticky="w", pady=(2, 6))
+        who = ttk.Frame(p)
+        who.grid(row=2, column=0, sticky="w")
+        ttk.Label(who, text="Your name (shown in history and approvals)").pack(side="left")
+        self._ap_user_var = tk.StringVar(value=history_user(self.state_obj))
+        ttk.Entry(who, textvariable=self._ap_user_var, width=22).pack(side="left", padx=4)
+        ttk.Button(who, text="Save name", command=self._ap_save_user).pack(side="left", padx=(0, 14))
+        ttk.Button(who, text="🔒 Set approver PIN", command=self._ap_set_pin).pack(side="left", padx=(0, 6))
+        self._ap_pin_var = tk.StringVar()
+        ttk.Label(who, textvariable=self._ap_pin_var, foreground="#64748b").pack(side="left")
+
+        rq = ttk.LabelFrame(p, text="Request approval", padding=6)
+        rq.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        ttk.Label(rq, text="Type").grid(row=0, column=0, sticky="w")
+        self._ap_type_var = tk.StringVar(value="Import contract")
+        cb = ttk.Combobox(rq, textvariable=self._ap_type_var, values=["Import contract", "Local purchase"],
+                          width=15, state="readonly")
+        cb.grid(row=0, column=1, sticky="w", padx=(4, 10))
+        cb.bind("<<ComboboxSelected>>", lambda e: self._ap_fill_records())
+        ttk.Label(rq, text="Record").grid(row=0, column=2, sticky="w")
+        self._ap_rec_var = tk.StringVar()
+        self._ap_rec_cb = ttk.Combobox(rq, textvariable=self._ap_rec_var, width=60, state="readonly")
+        self._ap_rec_cb.grid(row=0, column=3, sticky="w", padx=(4, 10))
+        self._ap_rec_cb.bind("<<ComboboxSelected>>", lambda e: self._ap_preview())
+        ttk.Label(rq, text="Note").grid(row=0, column=4, sticky="w")
+        self._ap_note_var = tk.StringVar()
+        ttk.Entry(rq, textvariable=self._ap_note_var, width=30).grid(row=0, column=5, sticky="w", padx=(4, 10))
+        ttk.Button(rq, text="📨 Request approval", command=self._ap_request).grid(row=0, column=6)
+        self._ap_preview_var = tk.StringVar()
+        ttk.Label(rq, textvariable=self._ap_preview_var, foreground="#1a4fa0", wraplength=1150
+                  ).grid(row=1, column=0, columnspan=7, sticky="w", pady=(4, 0))
+
+        qf = ttk.LabelFrame(p, text="Approvals", padding=6)
+        qf.grid(row=4, column=0, sticky="ew", pady=(8, 0))
+        qf.columnconfigure(0, weight=1)
+        cols = [("#", 40), ("Status", 190), ("Record", 290), ("Key terms at request", 420), ("Requested", 125),
+                ("By", 90), ("Decided", 125), ("Approver", 90), ("Comment", 220)]
+        self._ap_tree = ttk.Treeview(qf, columns=[c for c, _ in cols], show="headings", height=7)
+        for c, w in cols:
+            self._ap_tree.heading(c, text=c)
+            self._ap_tree.column(c, width=w, anchor="w")
+        self._ap_tree.grid(row=0, column=0, sticky="ew")
+        for tag, fg in (("PENDING", "#b36000"), ("APPROVED", "#1a7a1a"), ("REJECTED", "#b00020"),
+                        ("CHANGED", "#b00020"), ("MISSING", "#94a3b8"), ("WITHDRAWN", "#94a3b8")):
+            self._ap_tree.tag_configure(tag, foreground=fg)
+        self._ap_tree.bind("<Double-1>", lambda e: self._ap_details())
+        bb = ttk.Frame(qf)
+        bb.grid(row=1, column=0, sticky="w", pady=(4, 0))
+        self._ap_show_all_var = tk.BooleanVar(value=False)
+        ttk.Button(bb, text="✔ Approve", command=lambda: self._ap_decide("APPROVED")).pack(side="left", padx=(0, 6))
+        ttk.Button(bb, text="✘ Reject", command=lambda: self._ap_decide("REJECTED")).pack(side="left", padx=(0, 6))
+        ttk.Button(bb, text="Withdraw", command=lambda: self._ap_decide("WITHDRAWN")).pack(side="left", padx=(0, 14))
+        ttk.Checkbutton(bb, text="Show closed (approved / rejected / withdrawn)", variable=self._ap_show_all_var,
+                        command=self.refresh_approvals).pack(side="left")
+        ttk.Label(bb, text="   Double-click for details.", foreground="#64748b").pack(side="left")
+
+        hf = ttk.LabelFrame(p, text="Change history", padding=6)
+        hf.grid(row=5, column=0, sticky="ew", pady=(8, 0))
+        hf.columnconfigure(0, weight=1)
+        fb = ttk.Frame(hf)
+        fb.grid(row=0, column=0, sticky="w")
+        ttk.Label(fb, text="Show").pack(side="left")
+        self._hi_ent_var = tk.StringVar(value="All")
+        c2 = ttk.Combobox(fb, textvariable=self._hi_ent_var, width=16, state="readonly",
+                          values=["All"] + list(self._HIST_ENTITY.values()))
+        c2.pack(side="left", padx=(4, 10))
+        c2.bind("<<ComboboxSelected>>", lambda e: self.refresh_history())
+        ttk.Label(fb, text="Search").pack(side="left")
+        self._hi_q_var = tk.StringVar()
+        en = ttk.Entry(fb, textvariable=self._hi_q_var, width=24)
+        en.pack(side="left", padx=(4, 10))
+        en.bind("<Return>", lambda e: self.refresh_history())
+        ttk.Button(fb, text="Filter", command=self.refresh_history).pack(side="left", padx=(0, 6))
+        ttk.Button(fb, text="⬇ Export to Excel", command=self._history_export).pack(side="left")
+        self._hi_count_var = tk.StringVar()
+        ttk.Label(fb, textvariable=self._hi_count_var, foreground="#64748b").pack(side="left", padx=10)
+        hcols = [("When", 130), ("User", 90), ("Type", 110), ("Record", 260), ("Action", 80), ("Field", 130),
+                 ("Old", 180), ("New", 180)]
+        self._hi_tree = ttk.Treeview(hf, columns=[c for c, _ in hcols], show="headings", height=12)
+        for c, w in hcols:
+            self._hi_tree.heading(c, text=c)
+            self._hi_tree.column(c, width=w, anchor="w")
+        self._hi_tree.grid(row=1, column=0, sticky="ew", pady=(4, 0))
+        for tag, fg in (("ADDED", "#1a7a1a"), ("DELETED", "#b00020"), ("APPROVED", "#1a7a1a"),
+                        ("REJECTED", "#b00020")):
+            self._hi_tree.tag_configure(tag, foreground=fg)
+        self._ap_fill_records()
+        self.refresh_approvals()
+
+    # ── actions ─────────────────────────────────────────────────────────
+    def _ap_save_user(self):
+        self.state_obj.setdefault("ui", {})["user_name"] = (self._ap_user_var.get() or "").strip()
+        save_state(self.state_obj)
+        self.refresh_approvals()
+
+    def _ap_set_pin(self):
+        ui = self.state_obj.setdefault("ui", {})
+        if ui.get("approver_pin_hash"):
+            old = simpledialog.askstring(APP_NAME, "Current approver PIN:", show="•", parent=self)
+            if old is None:
+                return
+            if _core_hash_pin(old, ui.get("approver_pin_salt", "")) != ui["approver_pin_hash"]:
+                messagebox.showerror(APP_NAME, "Wrong PIN.")
+                return
+        pin = simpledialog.askstring(APP_NAME, "New approver PIN (4+ characters; empty = remove the PIN):",
+                                     show="•", parent=self)
+        if pin is None:
+            return
+        if pin and len(pin) < 4:
+            messagebox.showerror(APP_NAME, "Use at least 4 characters.")
+            return
+        if pin:
+            again = simpledialog.askstring(APP_NAME, "Type the PIN again:", show="•", parent=self)
+            if again != pin:
+                messagebox.showerror(APP_NAME, "The two PINs are different.")
+                return
+            salt = os.urandom(8).hex()
+            ui.update({"approver_pin_salt": salt, "approver_pin_hash": _core_hash_pin(pin, salt)})
+        else:
+            ui.pop("approver_pin_hash", None)
+            ui.pop("approver_pin_salt", None)
+        save_state(self.state_obj)
+        self.refresh_approvals()
+
+    def _ap_entity(self):
+        return "contract" if self._ap_type_var.get() == "Import contract" else "local_purchase"
+
+    def _ap_fill_records(self):
+        ent = self._ap_entity()
+        vals = []
+        if ent == "contract":
+            for cid, c in self._sorted_contract_items():
+                vals.append(f"{cid} | {self._appr_label('contract', cid, c)}"
+                            + ("" if self._contract_is_open(c) else " · closed"))
+        else:
+            for r in sorted(self.state_obj.get("local_purchases", []) or [], key=lambda r: str(r.get("date")),
+                            reverse=True):
+                vals.append(f"{r.get('id')} | {self._appr_label('local_purchase', r.get('id'), r)}")
+        self._ap_rec_cb["values"] = vals
+        self._ap_rec_var.set("")
+        self._ap_preview_var.set("")
+
+    def _ap_selected_key(self):
+        v = self._ap_rec_var.get()
+        return v.split(" | ", 1)[0].strip() if v else ""
+
+    def _ap_preview(self):
+        key = self._ap_selected_key()
+        self._ap_preview_var.set(self._appr_terms(self._ap_entity(), key) if key else "")
+
+    def _ap_request(self):
+        ent, key = self._ap_entity(), self._ap_selected_key()
+        rec = self._appr_record(ent, key) if key else None
+        if rec is None:
+            messagebox.showinfo(APP_NAME, "Choose the contract or local purchase to approve.")
+            return
+        for a in self._approvals():
+            if a["entity"] == ent and str(a["key"]) == str(key) and \
+                    _core_approval_status(a, rec) in ("PENDING", "APPROVED"):
+                messagebox.showinfo(APP_NAME, "This record already has an approval request with the same terms "
+                                              f"({self._APPR_LABEL[_core_approval_status(a, rec)]}).")
+                return
+        al = self._approvals()
+        nid = max([int(a.get("id", 0)) for a in al] + [0]) + 1
+        a = {"id": nid, "entity": ent, "key": str(key), "label": self._appr_label(ent, key, rec),
+             "terms_text": self._appr_terms(ent, key, rec), "note": self._ap_note_var.get().strip(),
+             "terms": {f: rec.get(f) for f in _core_APPROVAL_FIELDS[ent]},
+             "fingerprint": _core_approval_fingerprint(ent, rec), "status": "PENDING",
+             "requested_by": history_user(self.state_obj), "requested_ts": now_ts()}
+        al.append(a)
+        self._ap_log(a, "REQUESTED", a["note"])
+        save_state(self.state_obj)
+        self._ap_note_var.set("")
+        self.refresh_approvals()
+
+    def _ap_log(self, a, action, comment=""):
+        self.state_obj.setdefault("change_history", []).append({
+            "ts": now_ts(), "user": history_user(self.state_obj), "entity": "approval",
+            "key": f"{a['entity']}:{a['key']}", "action": action, "field": a.get("label", ""),
+            "old": "", "new": comment or ""})
+
+    def _ap_decide(self, decision):
+        sel = self._ap_tree.selection()
+        if not sel:
+            messagebox.showinfo(APP_NAME, "Select an approval request first.")
+            return
+        a = next((x for x in self._approvals() if str(x.get("id")) == sel[0]), None)
+        if a is None:
+            return
+        rec = self._appr_record(a["entity"], a["key"])
+        st = _core_approval_status(a, rec)
+        if decision in ("APPROVED", "REJECTED"):
+            if st != "PENDING":
+                messagebox.showinfo(APP_NAME, f"Only waiting requests can be decided (this one is: "
+                                              f"{self._APPR_LABEL.get(st, st)}). If the terms changed, request "
+                                              "approval again.")
+                return
+            ui = self.state_obj.get("ui", {}) or {}
+            if ui.get("approver_pin_hash"):
+                pin = simpledialog.askstring(APP_NAME, "Approver PIN:", show="•", parent=self)
+                if pin is None:
+                    return
+                if _core_hash_pin(pin, ui.get("approver_pin_salt", "")) != ui["approver_pin_hash"]:
+                    messagebox.showerror(APP_NAME, "Wrong PIN — not recorded.")
+                    return
+            comment = simpledialog.askstring(APP_NAME, f"{'Approve' if decision == 'APPROVED' else 'Reject'}: "
+                                                       f"{a['label']}\n\nComment (optional):", parent=self)
+            if comment is None:
+                return
+        else:
+            if st not in ("PENDING", "CHANGED", "MISSING"):
+                return
+            comment = ""
+        a.update({"status": decision, "decided_by": history_user(self.state_obj), "decided_ts": now_ts(),
+                  "comment": comment or ""})
+        self._ap_log(a, decision, comment)
+        save_state(self.state_obj)
+        self.refresh_approvals()
+        if hasattr(self, "refresh_risk_alerts"):
+            self.refresh_risk_alerts()
+
+    def _ap_details(self):
+        sel = self._ap_tree.selection()
+        a = next((x for x in self._approvals() if str(x.get("id")) == (sel[0] if sel else "")), None)
+        if not a:
+            return
+        rec = self._appr_record(a["entity"], a["key"])
+        st = _core_approval_status(a, rec)
+        txt = [f"{a['label']}", f"Status: {self._APPR_LABEL.get(st, st)}",
+               f"Requested {a.get('requested_ts', '')} by {a.get('requested_by', '')}"
+               + (f" — note: {a['note']}" if a.get("note") else ""),
+               f"Terms at request: {a.get('terms_text', '')}"]
+        if a.get("decided_ts"):
+            txt.append(f"Decided {a['decided_ts']} by {a.get('decided_by', '')}"
+                       + (f" — {a['comment']}" if a.get("comment") else ""))
+        if st == "CHANGED":
+            ch = _core_approval_changed_terms(a["entity"], a.get("terms") or {}, rec)
+            txt.append("Changed since request: " + ", ".join(
+                f"{f} {(a.get('terms') or {}).get(f)} → {rec.get(f)}" for f in ch))
+            txt.append(f"Terms now: {self._appr_terms(a['entity'], a['key'], rec)}")
+        messagebox.showinfo(APP_NAME, "\n\n".join(txt))
+
+    # ── refresh ─────────────────────────────────────────────────────────
+    def refresh_approvals(self):
+        if not hasattr(self, "_ap_tree"):
+            return
+        try:
+            ui = self.state_obj.get("ui", {}) or {}
+            self._ap_pin_var.set("PIN set — approving needs it" if ui.get("approver_pin_hash")
+                                 else "No PIN — anyone using this PC can approve")
+            tv = self._ap_tree
+            tv.delete(*tv.get_children())
+            show_all = self._ap_show_all_var.get()
+            order = {"CHANGED": 0, "PENDING": 1, "MISSING": 2, "APPROVED": 3, "REJECTED": 4, "WITHDRAWN": 5}
+            rows = []
+            for a in self._approvals():
+                rec = self._appr_record(a["entity"], a["key"])
+                st = _core_approval_status(a, rec)
+                if not show_all and st in ("APPROVED", "REJECTED", "WITHDRAWN"):
+                    continue
+                rows.append((order.get(st, 9), a.get("requested_ts", ""), a, st))
+            for _o, _t, a, st in sorted(rows, key=lambda r: (r[0], r[1])):
+                tv.insert("", "end", iid=str(a["id"]), tags=(st,), values=(
+                    a["id"], self._APPR_LABEL.get(st, st), a.get("label", ""), a.get("terms_text", ""),
+                    a.get("requested_ts", "")[:16], a.get("requested_by", ""), (a.get("decided_ts") or "")[:16],
+                    a.get("decided_by", ""), a.get("comment") or a.get("note", "")))
+            self.refresh_history()
+        except Exception as e:
+            self._surface_error("refresh_approvals", e)
+
+    def _history_rows(self, entity_label="All", query=""):
+        inv = {v: k for k, v in self._HIST_ENTITY.items()}
+        ent = inv.get(entity_label)
+        q = (query or "").strip().lower()
+        contracts = self.state_obj.get("contracts", {}) or {}
+        out = []
+        for h in reversed(self.state_obj.get("change_history", []) or []):
+            if ent and h.get("entity") != ent:
+                continue
+            rec_txt = h.get("key", "")
+            if h.get("entity") == "contract" and h.get("key") in contracts:
+                c = contracts[h["key"]]
+                rec_txt = f"{h['key']} · {self._hd_ref(h['key'], c)} · {c.get('commodity', '')}"
+            elif h.get("entity") == "approval":
+                rec_txt = h.get("field", "") or rec_txt
+            row = {"ts": h.get("ts", ""), "user": h.get("user", ""),
+                   "type": self._HIST_ENTITY.get(h.get("entity"), h.get("entity", "")), "record": rec_txt,
+                   "action": h.get("action", ""), "field": "" if h.get("entity") == "approval" else h.get("field", ""),
+                   "old": h.get("old", ""), "new": h.get("new", "")}
+            if q and q not in " ".join(str(v) for v in row.values()).lower():
+                continue
+            out.append(row)
+        return out
+
+    def refresh_history(self):
+        if not hasattr(self, "_hi_tree"):
+            return
+        tv = self._hi_tree
+        tv.delete(*tv.get_children())
+        rows = self._history_rows(self._hi_ent_var.get(), self._hi_q_var.get())
+        for i, r in enumerate(rows[:1000]):
+            tv.insert("", "end", iid=str(i), tags=(r["action"],), values=(
+                r["ts"][:16], r["user"], r["type"], r["record"], r["action"], r["field"], r["old"], r["new"]))
+        self._hi_count_var.set(f"{len(rows):,} change(s)" + (" — showing the latest 1,000" if len(rows) > 1000 else ""))
+
+    def _history_export(self):
+        if not _need_openpyxl():
+            return
+        try:
+            fp = filedialog.asksaveasfilename(
+                initialdir=get_default_export_dir(), initialfile=f"Change_History_{dt.date.today().isoformat()}.xlsx",
+                defaultextension=".xlsx", filetypes=[("Excel", "*.xlsx")], title="Export change history")
+            if not fp:
+                return
+            from openpyxl import Workbook
+            kit = _XlKit()
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Change history"
+            kit.title(ws, "Change history", f"Exported {now_ts()} · newest first · filter: "
+                                            f"{self._hi_ent_var.get()} {self._hi_q_var.get()}".strip(), 8)
+            kit.header(ws, 4, [("When", 18), ("User", 14), ("Type", 16), ("Record", 40), ("Action", 12),
+                               ("Field", 20), ("Old", 30), ("New", 30)])
+            for i, r in enumerate(self._history_rows(self._hi_ent_var.get(), self._hi_q_var.get()), start=5):
+                for j, k in enumerate(("ts", "user", "type", "record", "action", "field", "old", "new"), start=1):
+                    kit.put(ws, i, j, r[k], kind="text")
+            ws.freeze_panes = "A5"
+            ws2 = wb.create_sheet("Approvals")
+            kit.header(ws2, 1, [("#", 6), ("Status", 22), ("Record", 40), ("Key terms at request", 60),
+                                ("Requested", 18), ("By", 14), ("Decided", 18), ("Approver", 14), ("Comment", 40)])
+            for i, a in enumerate(self._approvals(), start=2):
+                st = _core_approval_status(a, self._appr_record(a["entity"], a["key"]))
+                for j, v in enumerate((a["id"], self._APPR_LABEL.get(st, st), a.get("label", ""),
+                                       a.get("terms_text", ""), a.get("requested_ts", ""), a.get("requested_by", ""),
+                                       a.get("decided_ts", ""), a.get("decided_by", ""),
+                                       a.get("comment") or a.get("note", "")), start=1):
+                    kit.put(ws2, i, j, v, kind="text")
+            wb.save(fp)
+            messagebox.showinfo(APP_NAME, f"Change history exported.\n\n{fp}")
+        except Exception as e:
+            self._surface_error("_history_export", e, show=True)
+
     def _read_csv_rows(self, title="Import CSV"):
         fp = filedialog.askopenfilename(filetypes=[("CSV", "*.csv")], title=title)
         if not fp:
@@ -33947,6 +34469,7 @@ class App(tk.Tk):
 
             # reset to clean defaults and persist
             self.state_obj = default_state()
+            history_prime(self.state_obj)
             save_state(self.state_obj)
 
             # refresh UI
@@ -33964,6 +34487,10 @@ class App(tk.Tk):
             with open(fp,"r",encoding="utf-8") as f:
                 s=json.load(f)
             self.state_obj = s
+            history_prime(self.state_obj)
+            self.state_obj.setdefault("change_history", []).append({
+                "ts": now_ts(), "user": history_user(self.state_obj), "entity": "all data", "key": "",
+                "action": "RESTORED", "field": "", "old": "", "new": os.path.basename(fp)})
             save_state(self.state_obj)
             self.refresh_all()
             self.status_var.set(f"Loaded: {fp}")
@@ -34181,6 +34708,10 @@ class App(tk.Tk):
             self.refresh_budget()
         except Exception as e:
             log_exception(e, "refresh_all→refresh_budget")
+        try:
+            self.refresh_approvals()
+        except Exception as e:
+            log_exception(e, "refresh_all→refresh_approvals")
         try:
             self.refresh_local_purchases()
         except Exception:

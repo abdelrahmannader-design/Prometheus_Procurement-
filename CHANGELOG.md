@@ -1,3 +1,11 @@
+# 2026-09-27 (m) — Approvals & Change History
+
+- New Contracts → Approvals & History tab.
+- **Approvals**: request approval for an import contract or a local purchase. The request freezes the key terms and shows the approver quantity, CIF / landed cost, saving vs local and vs budget. Approve / Reject (with comment) / Withdraw. Optional approver PIN (stored hashed). If a key term (qty, CIF, premium, supplier, dates, FX, fees / price) is edited after the request, it shows "⚠ Changed after request" and raises a High alert; waiting requests raise a Medium alert.
+- **Change history**: every save logs field-level changes to contracts, local purchases, local prices and budgets — when, who, record, field, old → new — plus approval requests/decisions and data restores. Filter, search and export to Excel. The app's own start-up clean-ups are not logged as user edits.
+- "Your name" setting (defaults to the Windows user name) is used in history and approvals.
+- Engine: `prometheus_core/history.py`, tests in `tests/test_history.py`.
+
 # 2026-09-27 (l) — Excel Import Center
 
 - Setup & Data → Imports: **Download import template** (one workbook, a sheet each for Contracts, Local Purchases, Local Prices, Budgets, FX History, CBOT History; required columns marked *, drop-down lists for choices, help + example in row 2).
