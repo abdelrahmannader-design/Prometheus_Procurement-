@@ -1,3 +1,10 @@
+# 2026-09-27 (l) — Excel Import Center
+
+- Setup & Data → Imports: **Download import template** (one workbook, a sheet each for Contracts, Local Purchases, Local Prices, Budgets, FX History, CBOT History; required columns marked *, drop-down lists for choices, help + example in row 2).
+- **Import from Excel…**: every row is checked and shown first — NEW / UPDATE (with the changed fields) / SAME (already saved) / ERROR (with the reason) / DUPLICATE — nothing is saved until you press Import. A backup is made first; each import is written to the audit log.
+- Matching: contracts by contract_id, else name + supplier + commodity (only filled cells are changed); local purchases by date + commodity + supplier + qty + price; local prices by date + commodity; budgets by commodity + year; FX by date; CBOT by date + commodity. Dates accept YYYY-MM-DD, DD/MM/YYYY or Excel dates.
+- Engine: `prometheus_core/importer.py`, tests in `tests/test_importer.py`.
+
 # 2026-09-27 (k) — Budget vs Actual in USD/MT (CIF or delivered)
 
 - Each budget line now has a **currency (USD / EGP)** and a **basis (CIF / DELIVERED)**; default USD CIF. Budgets saved earlier stay EGP delivered.

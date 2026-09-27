@@ -90,6 +90,13 @@ from prometheus_core.budget import (
     budget_year_range as _core_budget_year_range,
     budget_vs_actual as _core_budget_vs_actual,
 )
+from prometheus_core.importer import (
+    IMPORT_SHEETS as _core_IMPORT_SHEETS,
+    EXAMPLES as _core_IMPORT_EXAMPLES,
+    match_sheet as _core_match_import_sheet,
+    parse_sheet as _core_parse_import_sheet,
+    plan_import as _core_plan_import,
+)
 
 # ══════════════════════════════════════════════════════════════════════
 # V8 DESIGN TOKENS — single source of truth for typography & palette.
@@ -14420,14 +14427,23 @@ class App(tk.Tk):
 
         imports = ttk.LabelFrame(p, text="Imports — reduce manual daily feeding", padding=10)
         imports.grid(row=2, column=0, sticky="ew", pady=(0, 10))
+        ttk.Button(imports, text="⬇ Download import template (Excel)",
+                   command=self._xl_import_template).grid(row=0, column=0, padx=(0, 8), sticky="w")
+        ttk.Button(imports, text="⬆ Import from Excel… (contracts, local purchases & prices, budgets, FX, CBOT)",
+                   command=self._xl_import).grid(row=0, column=1, columnspan=2, padx=(0, 8), sticky="w")
+        ttk.Label(imports,
+                  text="One template with a sheet per data type. You see every row first (new / update / "
+                       "already saved / error); nothing is saved until you press Import, and a backup is made first.",
+                  foreground=CLR["muted"], wraplength=1150).grid(row=2, column=0, columnspan=3, sticky="w",
+                                                                  pady=(4, 6))
         ttk.Button(imports, text="Import Local Prices (Excel / CSV)…",
-                   command=self.import_local_prices_file).grid(row=0, column=0, padx=(0, 8), sticky="w")
+                   command=self.import_local_prices_file).grid(row=3, column=0, padx=(0, 8), sticky="w")
         ttk.Button(imports, text="Import Contracts CSV…",
-                   command=self.import_contracts_csv).grid(row=0, column=1, padx=(0, 8), sticky="w")
+                   command=self.import_contracts_csv).grid(row=3, column=1, padx=(0, 8), sticky="w")
         ttk.Label(imports,
                   text="Expected CSV headers: local prices = date, commodity, price_egp_mt, transport_egp_mt; "
                        "contracts = name, supplier, commodity, origin, status, qty_mt, cif_usd_mt, delivery_fx, delivery_date.",
-                  foreground=CLR["muted"]).grid(row=1, column=0, columnspan=3,
+                  foreground=CLR["muted"]).grid(row=4, column=0, columnspan=3,
                                                 sticky="w", pady=(4, 0))
 
         bk = ttk.LabelFrame(p, text="Backup & Restore", padding=10)
@@ -33283,6 +33299,301 @@ class App(tk.Tk):
         except Exception:
             messagebox.showwarning(APP_NAME, "Enter a valid non-negative number for marginal threshold.")
 
+
+    # ══════════════════════════════════════════════════════════════════
+    # EXCEL IMPORT CENTER — one template, one sheet per data type, a
+    # preview of every row (NEW / UPDATE / SAME / ERROR) before saving.
+    # ══════════════════════════════════════════════════════════════════
+    def _xl_import_template(self):
+        if not _need_openpyxl():
+            return
+        try:
+            fp = filedialog.asksaveasfilename(
+                initialdir=get_default_export_dir(), initialfile="Prometheus_Import_Template.xlsx",
+                defaultextension=".xlsx", filetypes=[("Excel", "*.xlsx")], title="Save import template")
+            if not fp:
+                return
+            self._build_import_template().save(fp)
+            messagebox.showinfo(APP_NAME, f"Template saved.\n\n{fp}\n\nFill the sheets you need (delete the example "
+                                          "rows), save, then use 'Import from Excel'.")
+        except Exception as e:
+            self._surface_error("_xl_import_template", e, show=True)
+
+    def _build_import_template(self):
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment
+        from openpyxl.worksheet.datavalidation import DataValidation
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "How to use"
+        lines = [
+            "Prometheus — Excel import template",
+            "",
+            "1. Fill only the sheets you need. Leave the others empty (or delete them).",
+            "2. Keep the header row (row 3). Columns marked * are required. Type your data from row 4 down;",
+            "   row 2 shows what each column means and an example (it is never imported).",
+            "3. Dates: YYYY-MM-DD (e.g. 2026-09-20) or real Excel dates. Numbers without currency signs.",
+            "4. In the app: Setup & Data → Imports → 'Import from Excel…'. You see every row first:",
+            "   NEW = will be added · UPDATE = will change a saved record · SAME = already saved · ERROR = fix and retry.",
+            "5. Existing records are matched on: Contracts = contract_id, else name + supplier + commodity;",
+            "   Local Purchases = date + commodity + supplier + qty + price; Local Prices = date + commodity;",
+            "   Budgets = commodity + year; FX History = date; CBOT History = date + commodity.",
+            "6. Updating a contract only changes the cells you filled — empty cells never erase saved data.",
+            "7. A backup of your data is saved automatically before every import.",
+        ]
+        for i, t in enumerate(lines, start=1):
+            ws.cell(i, 1, t).font = Font(bold=(i == 1), size=13 if i == 1 else 10)
+        ws.column_dimensions["A"].width = 110
+        hdr_fill = PatternFill("solid", fgColor="1A2D40")
+        req_fill = PatternFill("solid", fgColor="7A1F1F")
+        comms = ",".join(self._budget_commodities()[:12])
+        for sheet, spec in _core_IMPORT_SHEETS.items():
+            sh = wb.create_sheet(sheet)
+            sh.cell(1, 1, f"{sheet} — header in row 3, your data from row 4. * = required. "
+                          "Row 2 = help and an example (not imported).").font = Font(italic=True, color="475569")
+            examples = _core_IMPORT_EXAMPLES.get(sheet, [])
+            for j, (f, req, kind, hlp) in enumerate(spec, start=1):
+                c = sh.cell(3, j, f + (" *" if req else ""))
+                c.font = Font(bold=True, color="FFFFFF")
+                c.fill = req_fill if req else hdr_fill
+                c.alignment = Alignment(horizontal="center")
+                ex = examples[j - 1] if j - 1 < len(examples) else ""
+                ex = "" if ex in ("", None) or "example" in str(ex) else f"e.g. {ex}"
+                sh.cell(2, j, " · ".join(t for t in (hlp, ex) if t)).font = Font(size=8, italic=True, color="64748B")
+                sh.cell(2, j).alignment = Alignment(wrap_text=True, vertical="top")
+                sh.column_dimensions[c.column_letter].width = max(14, min(30, len(f) + 6))
+                if kind.startswith("choice:"):
+                    dv = DataValidation(type="list", formula1='"' + kind.split(":", 1)[1].replace("|", ",") + '"',
+                                        allow_blank=True)
+                    sh.add_data_validation(dv)
+                    dv.add(f"{c.column_letter}4:{c.column_letter}2000")
+                elif f == "commodity" and comms:
+                    dv = DataValidation(type="list", formula1=f'"{comms}"', allow_blank=True, showErrorMessage=False)
+                    sh.add_data_validation(dv)
+                    dv.add(f"{c.column_letter}4:{c.column_letter}2000")
+            sh.row_dimensions[2].height = 42
+            sh.freeze_panes = "A4"
+        return wb
+
+    def _xl_import(self):
+        if not _need_openpyxl():
+            return
+        fp = filedialog.askopenfilename(title="Import from Excel", filetypes=[("Excel", "*.xlsx *.xlsm")])
+        if not fp:
+            return
+        try:
+            result = self._xl_import_plan(fp)
+        except Exception as e:
+            self._surface_error("_xl_import", e, show=True)
+            return
+        if not result["sheets"]:
+            messagebox.showerror(APP_NAME, "No known sheet found. Sheet names must be: "
+                                 + ", ".join(_core_IMPORT_SHEETS) + ".\n\nUse 'Download import template' to start.")
+            return
+        self._xl_import_preview(fp, result)
+
+    def _xl_import_plan(self, fp):
+        from openpyxl import load_workbook
+        wb = load_workbook(fp, data_only=True, read_only=True)
+        out = {"sheets": {}, "ignored": []}
+        for ws in wb.worksheets:
+            sheet = _core_match_import_sheet(ws.title)
+            if sheet is None:
+                if ws.title != "How to use":
+                    out["ignored"].append(ws.title)
+                continue
+            rows = [list(r) for r in ws.iter_rows(values_only=True)]
+            parsed = _core_parse_import_sheet(sheet, rows)
+            if not parsed["records"] and not parsed["errors"] and not parsed["missing_cols"]:
+                continue
+            parsed["plan"] = _core_plan_import(sheet, parsed["records"], self.state_obj)
+            out["sheets"][sheet] = parsed
+        wb.close()
+        return out
+
+    def _xl_import_preview(self, fp, result):
+        win = tk.Toplevel(self)
+        win.title("Import preview — nothing is saved until you press Import")
+        win.geometry("1100x560")
+        win.columnconfigure(0, weight=1)
+        win.rowconfigure(1, weight=1)
+        counts = {"NEW": 0, "UPDATE": 0, "SAME": 0, "DUPLICATE": 0}
+        n_err = 0
+        for p in result["sheets"].values():
+            for it in p["plan"]:
+                counts[it["action"]] = counts.get(it["action"], 0) + 1
+            n_err += len(p["errors"]) + (1 if p["missing_cols"] else 0)
+        head = (f"{os.path.basename(fp)}:  {counts['NEW']} new · {counts['UPDATE']} updates · {counts['SAME']} "
+                f"already saved · {n_err} with errors (skipped)")
+        if counts.get("DUPLICATE"):
+            head += f" · {counts['DUPLICATE']} duplicate rows (the last one is used)"
+        if result["ignored"]:
+            head += f"   ·   sheets ignored: {', '.join(result['ignored'])}"
+        ttk.Label(win, text=head, font=("Segoe UI", 10, "bold"), wraplength=1080,
+                  foreground="#b36000" if n_err else "#1a7a1a").grid(row=0, column=0, sticky="w", padx=10, pady=8)
+        nb = ttk.Notebook(win)
+        nb.grid(row=1, column=0, sticky="nsew", padx=10)
+        for sheet, p in result["sheets"].items():
+            fr = ttk.Frame(nb, padding=4)
+            fr.columnconfigure(0, weight=1)
+            fr.rowconfigure(0, weight=1)
+            n = sum(1 for it in p["plan"] if it["action"] in ("NEW", "UPDATE"))
+            nb.add(fr, text=f"{sheet} ({n}{' ⚠' if p['errors'] or p['missing_cols'] else ''})")
+            fields = (["contract_ref", "name", "supplier", "commodity", "qty_mt", "delivery_date", "premium_cents",
+                       "cif_usd_mt"] if sheet == "Contracts" else [f for f, *_ in _core_IMPORT_SHEETS[sheet]][:8])
+            cols = ["Row", "Action", "Details"] + fields
+            tv = ttk.Treeview(fr, columns=cols, show="headings")
+            for c in cols:
+                tv.heading(c, text=c)
+                tv.column(c, width={"Row": 45, "Action": 80, "Details": 380}.get(c, 90),
+                          anchor="w")
+            tv.bind("<Double-1>", lambda e, t=tv: (lambda sel: sel and messagebox.showinfo(
+                APP_NAME, "\n".join(f"{c}: {v}" for c, v in zip(t["columns"], t.item(sel[0])["values"]))
+            ))(t.selection()))
+            for tag, fg in (("NEW", "#1a7a1a"), ("UPDATE", "#1a4fa0"), ("SAME", "#94a3b8"), ("ERROR", "#b00020"),
+                            ("DUPLICATE", "#94a3b8")):
+                tv.tag_configure(tag, foreground=fg)
+            if p["missing_cols"]:
+                tv.insert("", "end", tags=("ERROR",), values=(
+                    "", "ERROR", "Missing required column(s): " + ", ".join(p["missing_cols"])))
+            for it in p["plan"]:
+                rec = it["rec"]
+                det = {"NEW": "will be added", "SAME": "already saved — no change",
+                       "DUPLICATE": "same key appears again later — skipped",
+                       "UPDATE": "changes: " + ", ".join(it["changes"])}[it["action"]]
+                if sheet == "Contracts" and it["target"]:
+                    det += f" (contract {it['target']})"
+                tv.insert("", "end", tags=(it["action"],), values=(
+                    rec.get("_row"), it["action"], det, *[rec.get(f, "") for f in fields]))
+            for e in p["errors"]:
+                tv.insert("", "end", tags=("ERROR",), values=(
+                    e["row"], "ERROR", "; ".join(e["errors"]),
+                    *["" if e["values"].get(f) is None else e["values"].get(f) for f in fields]))
+            tv.grid(row=0, column=0, sticky="nsew")
+            ys = ttk.Scrollbar(fr, orient="vertical", command=tv.yview)
+            tv.configure(yscrollcommand=ys.set)
+            ys.grid(row=0, column=1, sticky="ns")
+        bb = ttk.Frame(win)
+        bb.grid(row=2, column=0, sticky="w", padx=10, pady=8)
+        todo = counts["NEW"] + counts["UPDATE"]
+
+        def _go():
+            try:
+                done = self._xl_import_apply(fp, result)
+                win.destroy()
+                messagebox.showinfo(APP_NAME, "Import complete.\n\n" + "\n".join(
+                    f"{s}: {a} added, {u} updated" for s, (a, u) in done.items()))
+            except Exception as e:
+                self._surface_error("_xl_import_apply", e, show=True)
+
+        ttk.Button(bb, text=f"✔ Import {todo} row(s)", command=_go,
+                   state="normal" if todo else "disabled").pack(side="left", padx=(0, 8))
+        ttk.Button(bb, text="Cancel", command=win.destroy).pack(side="left")
+        ttk.Label(bb, text="   Double-click a row to read it in full. A backup is saved first. Rows with errors are "
+                           "skipped — fix them in Excel and import again (saved rows then show as SAME).",
+                  foreground="#64748b", wraplength=760).pack(side="left")
+        self._xl_last_preview = win
+        return win
+
+    def _xl_import_apply(self, fp, result):
+        try:
+            backup_state_file()
+        except Exception as e:
+            log_exception(e, "_xl_import_apply:backup")
+        s = self.state_obj
+        default_trans = get_default_local_transport_egp_mt(s)
+        prov = make_provenance(source="excel_import", confidence="user-supplied", note=os.path.basename(fp))
+        done = {}
+        for sheet, p in result["sheets"].items():
+            added = updated = 0
+            for it in p["plan"]:
+                if it["action"] not in ("NEW", "UPDATE"):
+                    continue
+                rec = {k: v for k, v in it["rec"].items() if not k.startswith("_")}
+                if sheet == "Contracts":
+                    rec.pop("contract_id", None)
+                    if "origin" in rec:
+                        rec["origin"] = normalize_origin(rec["origin"])
+                    contracts = s.setdefault("contracts", {})
+                    if it["action"] == "NEW":
+                        cid = (it["rec"].get("contract_id") or "").strip()
+                        if not cid or cid in contracts:
+                            cid = new_contract_id(s)
+                        rec.setdefault("status", "Open")
+                        rec.setdefault("origin", "OTHER")
+                        rec.update({"created_ts": now_ts(), "provenance": prov})
+                        contracts[cid] = rec
+                        added += 1
+                    else:
+                        cid = it["target"]
+                        contracts[cid].update({k: rec[k] for k in it["changes"]})
+                        updated += 1
+                    append_audit_event(s, f"excel_import_contract_{it['action'].lower()}", "contract", cid,
+                                       {"fields": it["changes"] or list(rec)})
+                elif sheet == "Local Purchases":
+                    lps = s.setdefault("local_purchases", [])
+                    rec.setdefault("transport_egp_mt", default_trans)
+                    if it["action"] == "NEW":
+                        ids = [r.get("id", 0) for r in lps if isinstance(r.get("id"), int)]
+                        rec.update({"id": (max(ids) + 1) if ids else 1, "ts": dt.datetime.now().isoformat(),
+                                    "supplier": rec.get("supplier", ""), "refs_source": "auto",
+                                    "provenance": prov})
+                        lps.append(rec)
+                        added += 1
+                    else:
+                        lps[it["target"]].update({k: rec[k] for k in it["changes"]})
+                        updated += 1
+                elif sheet == "Local Prices":
+                    lp = s.setdefault("local_prices", [])
+                    rec.setdefault("transport_egp_mt", default_trans)
+                    rec["provenance"] = prov
+                    if it["action"] == "NEW":
+                        lp.append(rec)
+                        added += 1
+                    else:
+                        lp[it["target"]].update(rec)
+                        updated += 1
+                elif sheet == "Budgets":
+                    bl = self._budgets()
+                    rec.update({"updated": now_ts()})
+                    if it["action"] == "NEW":
+                        bl.append(rec)
+                        added += 1
+                    else:
+                        bl[it["target"]].pop("price_egp_mt", None)
+                        bl[it["target"]].update(rec)
+                        updated += 1
+                elif sheet == "FX History":
+                    fx = s.setdefault("fx_history", [])
+                    if it["action"] == "NEW":
+                        fx.append({"date": rec["date"], "rate": rec["rate"], "source": "excel import"})
+                        added += 1
+                    else:
+                        fx[it["target"]].update({"rate": rec["rate"], "source": "excel import"})
+                        updated += 1
+                elif sheet == "CBOT History":
+                    ch = s.setdefault("cbot_history", [])
+                    if it["action"] == "NEW":
+                        ch.append({"date": rec["date"], "commodity": rec["commodity"], "price": rec["close"],
+                                   "close": rec["close"], "source": "excel import"})
+                        added += 1
+                    else:
+                        ch[it["target"]].update({"price": rec["close"], "close": rec["close"],
+                                                 "source": "excel import"})
+                        updated += 1
+            if added or updated:
+                done[sheet] = (added, updated)
+                append_audit_event(s, "excel_import", sheet, os.path.basename(fp),
+                                   {"added": added, "updated": updated, "errors": len(p["errors"])})
+        s.get("fx_history", []).sort(key=lambda x: x.get("date", ""))
+        s.get("cbot_history", []).sort(key=lambda x: (x.get("commodity", ""), x.get("date", "")))
+        save_state(s)
+        self._health_cache = None
+        try:
+            self.refresh_all()
+        except Exception as e:
+            log_exception(e, "_xl_import_apply:refresh")
+        return done
 
     def _read_csv_rows(self, title="Import CSV"):
         fp = filedialog.askopenfilename(filetypes=[("CSV", "*.csv")], title=title)
