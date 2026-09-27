@@ -1,3 +1,11 @@
+# 2026-09-27 (j) — Budget vs Actual
+
+- New Analysis → Budget vs Actual tab. Enter a budget EGP/MT (and optional budget MT) per commodity for this year and next; calendar or fiscal year ("Year starts in").
+- Per commodity: bought MT (actual + committed), average paid, vs budget per MT and in EGP, MT left to buy, the maximum EGP/MT the rest can cost to still land on budget, today's local price and the full-year forecast.
+- Detail list of every purchase counted (closed imports, open imports with unpriced MT at live market, local purchases) with its own vs-budget figure.
+- Alerts in the Action Centre, a table in the Monthly Report PDF, and a formula-based Excel export (also in the Export Center / CEO digest).
+- Engine: `prometheus_core/budget.py`, tests in `tests/test_budget.py`.
+
 # 2026-09-27 (i) — Market Signals: faster fetch with live progress
 
 - All sources (CFTC ×3, futures curve ×3, USDA) are now fetched in parallel, so the wait is the slowest source, not the sum.

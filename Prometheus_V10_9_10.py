@@ -14,6 +14,7 @@ from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
 from email import encoders
 import datetime as dt
+import calendar
 import math
 import traceback
 import tkinter as tk
@@ -82,6 +83,12 @@ from prometheus_core.market_signals import (
     seasonal_signal as _core_seasonal_signal,
     combine_signals as _core_combine_signals,
     report_calendar as _core_report_calendar,
+)
+from prometheus_core.budget import (
+    budget_year_of as _core_budget_year_of,
+    budget_year_label as _core_budget_year_label,
+    budget_year_range as _core_budget_year_range,
+    budget_vs_actual as _core_budget_vs_actual,
 )
 
 # ══════════════════════════════════════════════════════════════════════
@@ -15168,8 +15175,18 @@ class App(tk.Tk):
             "local_purchases": lp_rows, "lp_saving": lp_sav, "lp_poor": lp_poor,
             "alerts": alerts, "health": health, "summary": s,
             "buy_plans": self._buying_plan_rows(today=today),
+            "budget": self._monthly_budget_block(year, month),
             "generated": now_ts(),
         }
+
+    def _monthly_budget_block(self, year, month):
+        try:
+            sm = self._budget_start_month()
+            by = _core_budget_year_of(dt.date(int(year), int(month), 1), sm)
+            return {"label": _core_budget_year_label(by, sm), "rows": self._budget_rows(by)}
+        except Exception as e:
+            log_exception(e, "_monthly_budget_block")
+            return {}
 
     def _build_monthly_report_pdf(self, dest, year, month):
         from reportlab.lib import colors
@@ -15324,6 +15341,23 @@ class App(tk.Tk):
             story += [Paragraph("Stock cover and buying plan", h2),
                       table(rows, [2.6 * cm, 2.4 * cm, 2 * cm, 2.4 * cm, 2.8 * cm, 2.4 * cm, 2.6 * cm],
                             num_cols=(1, 2, 3, 6))]
+
+        # Budget vs actual (budget year containing the report month)
+        bg = d.get("budget") or {}
+        brows = [r for r in bg.get("rows") or [] if r["budget_price"] is not None]
+        if brows:
+            rows = [["Commodity", "Budget EGP/MT", "Bought MT", "Avg paid", "vs budget EGP", "Max for rest",
+                     "Forecast vs budget"]]
+            for r in brows:
+                rows.append([r["commodity"], f"{r['budget_price']:,.0f}", f"{r['bought_qty']:,.0f}",
+                             f"{r['bought_avg']:,.0f}" if r["bought_avg"] is not None else "—",
+                             money(r["vs_budget_total"]), f"{r['headroom_price']:,.0f}" if r["headroom_price"] else "—",
+                             money(r["forecast_vs_budget_total"])])
+            story += [Paragraph(f"Budget vs actual — {bg['label']}", h2),
+                      table(rows, [2.4 * cm, 2.4 * cm, 2.2 * cm, 2.2 * cm, 2.8 * cm, 2.4 * cm, 3 * cm],
+                            num_cols=range(1, 7), sign_cols=(4, 6)),
+                      Paragraph("vs budget = budget − actual: positive = cheaper than budget. Max for rest = highest "
+                                "EGP/MT the remaining budget MT can cost and still land on budget.", small)]
 
         # Local purchases
         if d["local_purchases"]:
@@ -15727,6 +15761,484 @@ class App(tk.Tk):
                     x += 1
         return wb
 
+    # ══════════════════════════════════════════════════════════════════
+    # BUDGET vs ACTUAL — budget EGP/MT (and MT) per commodity per year
+    # against what was actually paid (closed imports + local purchases)
+    # and committed (open imports, today's market for unpriced MT).
+    # ══════════════════════════════════════════════════════════════════
+    _BUDGET_DEFAULT_COMMS = ["CORN", "SBM", "SOYBEAN", "SFM", "DDGS"]
+    _BUDGET_STATUS = {"OVER": "✘ Over budget", "UNDER": "✔ Under budget", "ON_BUDGET": "✔ On budget",
+                      "NOTHING_BOUGHT": "○ Nothing bought yet", "NO_BUDGET": "— no budget"}
+
+    def _budget_start_month(self):
+        v = int(to_float((self.state_obj.get("ui", {}) or {}).get("budget_start_month"), 1) or 1)
+        return max(1, min(12, v))
+
+    def _budgets(self):
+        b = self.state_obj.get("budgets")
+        if not isinstance(b, list):
+            b = []
+            self.state_obj["budgets"] = b
+        return b
+
+    def _budget_commodities(self):
+        out = list(self._BUDGET_DEFAULT_COMMS)
+        for c in (self.state_obj.get("contracts", {}) or {}).values():
+            base = (c.get("commodity") or "").upper().split("-")[0]
+            if base and base not in out:
+                out.append(base)
+        for r in self.state_obj.get("local_purchases", []) or []:
+            base = (r.get("commodity") or "").upper().split("-")[0]
+            if base and base not in out:
+                out.append(base)
+        return out
+
+    def _budget_contract_date(self, c):
+        for key in ("storage_start", "delivery_date", "contract_date", "deal_date", "purchase_date",
+                    "pricing_date"):
+            d = parse_date_flex(c.get(key))
+            if d is not None:
+                return d, key
+        return None, ""
+
+    def _budget_lines(self, start_month=None):
+        """Every purchase as {base, year, date, kind, source, ref, qty_mt, cost_egp_mt, note}."""
+        sm = start_month or self._budget_start_month()
+        out = []
+        for cid, c in (self.state_obj.get("contracts", {}) or {}).items():
+            base = (c.get("commodity") or "").upper().split("-")[0]
+            d, dkey = self._budget_contract_date(c)
+            qty = self._hd_contract_qty(c) or to_float(c.get("qty_mt"), 0.0) or 0.0
+            try:
+                e = self._contract_savings_economics(cid, c)
+            except Exception as ex:
+                log_exception(ex, f"_budget_lines:{cid}")
+                e = {}
+            is_open = self._contract_is_open(c)
+            note = f"dated by {dkey.replace('_', ' ')}" if dkey else "no date — not counted in any year"
+            if is_open:
+                unp = self._contract_unpriced_mt(c)
+                note += (f" · {unp:,.0f} MT unpriced valued at live CBOT" if unp > 0 else " · fully priced")
+            out.append({"base": base, "year": _core_budget_year_of(d, sm), "date": d,
+                        "kind": "COMMITTED" if is_open else "ACTUAL",
+                        "source": "Import (open)" if is_open else "Import (closed)",
+                        "ref": self._hd_ref(cid, c), "cid": cid, "qty_mt": qty,
+                        "cost_egp_mt": e.get("own_after"), "note": note})
+        for rec in self.state_obj.get("local_purchases", []) or []:
+            base = (rec.get("commodity") or "").upper().split("-")[0]
+            d = parse_date_flex(rec.get("date"))
+            price = to_float(rec.get("price_egp_mt"), None)
+            trans = to_float(rec.get("transport_egp_mt"), None)
+            if trans is None:
+                trans = get_default_local_transport_egp_mt(self.state_obj)
+            out.append({"base": base, "year": _core_budget_year_of(d, sm), "date": d, "kind": "ACTUAL",
+                        "source": "Local purchase", "ref": str(rec.get("supplier") or "local"),
+                        "qty_mt": to_float(rec.get("qty_mt"), 0.0) or 0.0,
+                        "cost_egp_mt": (price + (trans or 0.0)) if price is not None else None,
+                        "note": "price + transport"})
+        return out
+
+    def _budget_market_price(self, base):
+        pairs = self._local_price_map(base)
+        return (pairs[-1][1], pairs[-1][0].isoformat()) if pairs else (None, "")
+
+    def _budget_rows(self, year, today=None):
+        """One row per commodity that has a budget or purchases in the year."""
+        today = today or dt.date.today()
+        sm = self._budget_start_month()
+        lines = [l for l in self._budget_lines(sm) if l["year"] == year]
+        budgets = {str(b.get("commodity") or "").upper(): b for b in self._budgets()
+                   if int(to_float(b.get("year"), 0) or 0) == int(year)}
+        bases = sorted(set(budgets) | {l["base"] for l in lines if l["base"]})
+        rows = []
+        for base in bases:
+            ls = [l for l in lines if l["base"] == base]
+            mkt, mkt_date = self._budget_market_price(base)
+            r = _core_budget_vs_actual(budgets.get(base), ls, mkt, today, sm, year)
+            r.update({"commodity": base, "year": year, "lines": ls, "market_date": mkt_date,
+                      "note": (budgets.get(base) or {}).get("note", "")})
+            rows.append(r)
+        return rows
+
+    def _budget_alerts(self, today=None):
+        out = []
+        try:
+            today = today or dt.date.today()
+            year = _core_budget_year_of(today, self._budget_start_month())
+            label = _core_budget_year_label(year, self._budget_start_month())
+            for r in self._budget_rows(year, today):
+                if r["budget_price"] is None:
+                    continue
+                if r["status"] == "OVER":
+                    pct = r["forecast_vs_budget_pct"] if r["forecast_vs_budget_pct"] is not None else r["vs_budget_pct"]
+                    what = "forecast" if r["forecast_vs_budget_pct"] is not None else "bought so far"
+                    out.append({"priority": "Medium",
+                                "issue": f"{r['commodity']} {label}: {what} is {abs(pct):.1f}% OVER budget "
+                                         f"({(r['forecast_avg'] if what == 'forecast' else r['bought_avg']):,.0f} vs "
+                                         f"{r['budget_price']:,.0f} EGP/MT).",
+                                "action": "Review Analysis → Budget vs Actual; use targets or cheaper sources "
+                                          "for the remaining quantity."})
+                hr, mkt = r.get("headroom_price"), r.get("market_price")
+                if hr is not None and mkt is not None and r.get("remaining_qty") and mkt > hr:
+                    out.append({"priority": "High" if hr < r["budget_price"] * 0.9 else "Medium",
+                                "issue": f"{r['commodity']} {label}: the remaining {r['remaining_qty']:,.0f} MT must "
+                                         f"cost ≤ {hr:,.0f} EGP/MT to land on budget, but today's local market is "
+                                         f"{mkt:,.0f}.",
+                                "action": "Buy the balance through import (CBOT targets) or tell management the "
+                                          "budget will be exceeded."})
+        except Exception as e:
+            log_exception(e, "_budget_alerts")
+        return out
+
+    def _build_budget_tab(self):
+        p = self.tab_budget
+        p.columnconfigure(0, weight=1)
+        ttk.Label(p, text="💰  Budget vs Actual — are we buying at or below the budgeted EGP/MT?",
+                  font=("Segoe UI", 12, "bold")).grid(row=0, column=0, sticky="w")
+        ttk.Label(p, text="Actual = closed import contracts (landed cost: CIF × FX + intake + clearance + freight) "
+                          "and local purchases (price + transport). Committed = open contracts at today's market "
+                          "for any unpriced MT. Purchases count in the year of their delivery / storage date.",
+                  foreground="#475569", wraplength=1150).grid(row=1, column=0, sticky="w", pady=(2, 6))
+        bar = ttk.Frame(p)
+        bar.grid(row=2, column=0, sticky="w")
+        ttk.Label(bar, text="Budget year").pack(side="left")
+        self._bg_year_var = tk.StringVar()
+        self._bg_year_cb = ttk.Combobox(bar, textvariable=self._bg_year_var, width=14, state="readonly")
+        self._bg_year_cb.pack(side="left", padx=(4, 14))
+        self._bg_year_cb.bind("<<ComboboxSelected>>", lambda e: self.refresh_budget())
+        ttk.Label(bar, text="Year starts in").pack(side="left")
+        self._bg_start_var = tk.StringVar(value=calendar.month_name[self._budget_start_month()])
+        cb = ttk.Combobox(bar, textvariable=self._bg_start_var, values=list(calendar.month_name)[1:], width=11,
+                          state="readonly")
+        cb.pack(side="left", padx=(4, 14))
+        cb.bind("<<ComboboxSelected>>", lambda e: self._budget_set_start())
+        ttk.Button(bar, text="⟳ Refresh", command=self.refresh_budget).pack(side="left", padx=(0, 6))
+        ttk.Button(bar, text="⬇ Export to Excel", command=self._budget_export).pack(side="left")
+
+        sf = ttk.LabelFrame(p, text="Summary per commodity", padding=6)
+        sf.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        sf.columnconfigure(0, weight=1)
+        cols = [("Commodity", 85), ("Status", 135), ("Budget /MT", 90), ("Budget MT", 90),
+                ("Bought MT", 90), ("% bought", 75), ("Avg paid /MT", 100), ("vs budget /MT", 105),
+                ("vs budget EGP", 125), ("Left to buy MT", 105), ("Max /MT for rest", 115),
+                ("Local today", 90), ("Forecast /MT", 95), ("Forecast vs budget", 135)]
+        self._bg_tree = ttk.Treeview(sf, columns=[c for c, _ in cols], show="headings", height=6)
+        for c, w in cols:
+            self._bg_tree.heading(c, text=c)
+            self._bg_tree.column(c, width=w, anchor="w" if c in ("Commodity", "Status") else "e")
+        self._bg_tree.grid(row=0, column=0, sticky="ew")
+        for tag, fg in (("OVER", "#b00020"), ("UNDER", "#1a7a1a"), ("ON_BUDGET", "#1a7a1a"),
+                        ("NOTHING_BOUGHT", "#475569"), ("NO_BUDGET", "#94a3b8")):
+            self._bg_tree.tag_configure(tag, foreground=fg)
+        self._bg_tree.bind("<<TreeviewSelect>>", lambda e: self._budget_show_detail())
+        self._bg_note_var = tk.StringVar(value="")
+        ttk.Label(sf, textvariable=self._bg_note_var, foreground="#1a4fa0", wraplength=1150,
+                  font=("Segoe UI", 9, "bold")).grid(row=1, column=0, sticky="w", pady=(4, 0))
+        ttk.Label(sf, text="vs budget = budget − actual: positive (green) = cheaper than budget, negative (red) = "
+                           "over budget.  Max price for rest = the most the remaining MT can cost and still land "
+                           "on budget.  Forecast = bought + remaining MT at today's local price.",
+                  foreground="#64748b", wraplength=1150).grid(row=2, column=0, sticky="w")
+
+        df = ttk.LabelFrame(p, text="Purchases in the year (select a commodity above)", padding=6)
+        df.grid(row=4, column=0, sticky="ew", pady=(8, 0))
+        df.columnconfigure(0, weight=1)
+        dcols = [("Date", 90), ("Source", 115), ("Reference", 170), ("MT", 85), ("Cost EGP/MT", 100),
+                 ("vs budget /MT", 100), ("vs budget EGP", 120), ("Note", 420)]
+        self._bg_detail = ttk.Treeview(df, columns=[c for c, _ in dcols], show="headings", height=8)
+        for c, w in dcols:
+            self._bg_detail.heading(c, text=c)
+            self._bg_detail.column(c, width=w, anchor="w" if c in ("Date", "Source", "Reference", "Note") else "e")
+        self._bg_detail.grid(row=0, column=0, sticky="ew")
+        self._bg_detail.tag_configure("over", foreground="#b00020")
+        self._bg_detail.tag_configure("under", foreground="#1a7a1a")
+        self._bg_detail.tag_configure("open", background="#f3f6fb")
+
+        ef = ttk.LabelFrame(p, text="Budgets — one line per commodity per year (EGP/MT delivered, all-in)", padding=6)
+        ef.grid(row=5, column=0, sticky="ew", pady=(8, 0))
+        self._bg_vars = {k: tk.StringVar() for k in ("commodity", "year", "price", "qty", "note")}
+        fields = (("commodity", "Commodity", 10), ("year", "Year", 7), ("price", "Budget EGP/MT", 10),
+                  ("qty", "Budget MT (optional)", 10), ("note", "Note", 26))
+        for j, (k, lab, w) in enumerate(fields):
+            ttk.Label(ef, text=lab).grid(row=0, column=2 * j, sticky="w")
+            if k == "commodity":
+                self._bg_comm_cb = ttk.Combobox(ef, textvariable=self._bg_vars[k], width=w,
+                                                values=self._budget_commodities())
+                self._bg_comm_cb.grid(row=0, column=1, sticky="w", padx=(4, 10))
+            else:
+                ttk.Entry(ef, textvariable=self._bg_vars[k], width=w).grid(row=0, column=2 * j + 1, sticky="w",
+                                                                         padx=(4, 10))
+        ttk.Button(ef, text="💾 Save budget", command=self._budget_save).grid(row=0, column=10, padx=(0, 6))
+        ttk.Button(ef, text="🗑 Delete", command=self._budget_delete).grid(row=0, column=11)
+        bcols = [("Year", 110), ("Commodity", 90), ("Budget EGP/MT", 110), ("Budget MT", 100),
+                 ("Budget value EGP", 140), ("Note", 380)]
+        self._bg_list = ttk.Treeview(ef, columns=[c for c, _ in bcols], show="headings", height=6)
+        for c, w in bcols:
+            self._bg_list.heading(c, text=c)
+            self._bg_list.column(c, width=w, anchor="w" if c in ("Year", "Commodity", "Note") else "e")
+        self._bg_list.grid(row=1, column=0, columnspan=12, sticky="ew", pady=(6, 0))
+        self._bg_list.bind("<<TreeviewSelect>>", lambda e: self._budget_pick())
+        ttk.Label(ef, text="Year = the year the budget year STARTS in (e.g. 2026 = FY 2026/27 when the year starts "
+                           "in July). Enter this year's and next year's budget for each commodity.",
+                  foreground="#64748b", wraplength=1150).grid(row=2, column=0, columnspan=12, sticky="w",
+                                                              pady=(4, 0))
+        self._bg_rows = {}
+        self.refresh_budget()
+
+    def _budget_set_start(self):
+        try:
+            m = list(calendar.month_name).index(self._bg_start_var.get())
+        except ValueError:
+            m = 1
+        self.state_obj.setdefault("ui", {})["budget_start_month"] = m
+        save_state(self.state_obj)
+        self._bg_year_var.set("")
+        self.refresh_budget()
+
+    def _budget_year_options(self):
+        sm = self._budget_start_month()
+        cur = _core_budget_year_of(dt.date.today(), sm)
+        years = {cur, cur + 1}
+        years |= {int(to_float(b.get("year"), 0) or 0) for b in self._budgets() if to_float(b.get("year"), 0)}
+        return [(y, _core_budget_year_label(y, sm)) for y in sorted(years, reverse=True)]
+
+    def _budget_selected_year(self):
+        opts = self._budget_year_options()
+        lab = self._bg_year_var.get()
+        for y, l in opts:
+            if l == lab:
+                return y
+        return _core_budget_year_of(dt.date.today(), self._budget_start_month())
+
+    def _budget_save(self):
+        v = {k: (x.get() or "").strip() for k, x in self._bg_vars.items()}
+        comm = v["commodity"].upper().split("-")[0]
+        year = to_float(v["year"], None)
+        price = to_float(v["price"].replace(",", ""), None)
+        qty = to_float(v["qty"].replace(",", ""), None) if v["qty"] else None
+        if not comm or year is None or not (1990 <= year <= 2100) or price is None or price <= 0:
+            messagebox.showerror(APP_NAME, "Enter a commodity, a year (e.g. 2026) and a budget price in EGP/MT.")
+            return
+        if v["qty"] and (qty is None or qty < 0):
+            messagebox.showerror(APP_NAME, "Budget MT must be a number (or leave it empty).")
+            return
+        bl = self._budgets()
+        bl[:] = [b for b in bl if not (str(b.get("commodity")).upper() == comm and
+                                       int(to_float(b.get("year"), 0) or 0) == int(year))]
+        bl.append({"commodity": comm, "year": int(year), "price_egp_mt": price, "qty_mt": qty,
+                   "note": v["note"], "updated": now_ts()})
+        save_state(self.state_obj)
+        self.refresh_budget()
+
+    def _budget_delete(self):
+        sel = self._bg_list.selection()
+        if not sel:
+            return
+        comm, year = sel[0].split("|")
+        bl = self._budgets()
+        bl[:] = [b for b in bl if not (str(b.get("commodity")).upper() == comm and
+                                       str(int(to_float(b.get("year"), 0) or 0)) == year)]
+        save_state(self.state_obj)
+        self.refresh_budget()
+
+    def _budget_pick(self):
+        sel = self._bg_list.selection()
+        if not sel:
+            return
+        comm, year = sel[0].split("|")
+        b = next((b for b in self._budgets() if str(b.get("commodity")).upper() == comm
+                  and str(int(to_float(b.get("year"), 0) or 0)) == year), None)
+        if b:
+            self._bg_vars["commodity"].set(comm)
+            self._bg_vars["year"].set(year)
+            self._bg_vars["price"].set(f"{to_float(b.get('price_egp_mt'), 0):g}")
+            q = to_float(b.get("qty_mt"), None)
+            self._bg_vars["qty"].set("" if q is None else f"{q:g}")
+            self._bg_vars["note"].set(b.get("note", ""))
+
+    def refresh_budget(self):
+        if not hasattr(self, "_bg_tree"):
+            return
+        try:
+            sm = self._budget_start_month()
+            opts = self._budget_year_options()
+            self._bg_year_cb["values"] = [l for _y, l in opts]
+            if self._bg_year_var.get() not in self._bg_year_cb["values"]:
+                self._bg_year_var.set(_core_budget_year_label(_core_budget_year_of(dt.date.today(), sm), sm))
+            self._bg_comm_cb["values"] = self._budget_commodities()
+            year = self._budget_selected_year()
+            if not self._bg_vars["year"].get():
+                self._bg_vars["year"].set(str(year))
+            rows = self._budget_rows(year)
+            self._bg_rows = {r["commodity"]: r for r in rows}
+            prev = self._bg_tree.selection()
+            tv = self._bg_tree
+            tv.delete(*tv.get_children())
+
+            def n(v, f="{:,.0f}"):
+                return "—" if v is None else f.format(v)
+            for r in rows:
+                tv.insert("", "end", iid=r["commodity"], tags=(r["status"],), values=(
+                    r["commodity"], self._BUDGET_STATUS.get(r["status"], r["status"]), n(r["budget_price"]),
+                    n(r["budget_qty"]), n(r["bought_qty"]), n(r["pct_bought"], "{:.0f}%"), n(r["bought_avg"]),
+                    n(r["vs_budget_mt"], "{:+,.0f}"), n(r["vs_budget_total"], "{:+,.0f}"),
+                    n(r["remaining_qty"]), n(r["headroom_price"]), n(r["market_price"]), n(r["forecast_avg"]),
+                    n(r["forecast_vs_budget_total"], "{:+,.0f}")))
+            if prev and prev[0] in self._bg_rows:
+                tv.selection_set(prev[0])
+            elif rows:
+                tv.selection_set(rows[0]["commodity"])
+            tot_b = sum(r["vs_budget_total"] or 0.0 for r in rows)
+            tot_f = sum(r["forecast_vs_budget_total"] or 0.0 for r in rows)
+            label = _core_budget_year_label(year, sm)
+            s, e = _core_budget_year_range(year, sm)
+            if not any(r["budget_price"] is not None for r in rows):
+                self._bg_note_var.set(f"{label}: no budget entered yet — add one per commodity below.")
+            else:
+                el = rows[0].get("pct_year_elapsed")
+                self._bg_note_var.set(
+                    f"{label} ({s:%d %b %Y} – {e:%d %b %Y}{f', {el:.0f}% elapsed' if el is not None else ''}): "
+                    f"bought so far is {'UNDER' if tot_b >= 0 else 'OVER'} budget by EGP {abs(tot_b):,.0f}"
+                    + (f"; full-year forecast {'UNDER' if tot_f >= 0 else 'OVER'} by EGP {abs(tot_f):,.0f}."
+                       if any(r["forecast_vs_budget_total"] is not None for r in rows) else "."))
+            gaps = [f"{r['commodity']} {r['no_cost_qty']:,.0f} MT" for r in rows if r.get("no_cost_qty")]
+            if gaps:
+                self._bg_note_var.set(self._bg_note_var.get() + "   ⚠ Not counted (no cost yet — check CIF / FX / "
+                                      "fees on the contract): " + ", ".join(gaps) + ".")
+            self._budget_show_detail()
+            bl = self._bg_list
+            bl.delete(*bl.get_children())
+            for b in sorted(self._budgets(), key=lambda b: (-int(to_float(b.get("year"), 0) or 0),
+                                                              str(b.get("commodity")))):
+                y = int(to_float(b.get("year"), 0) or 0)
+                pr, q = to_float(b.get("price_egp_mt"), None), to_float(b.get("qty_mt"), None)
+                bl.insert("", "end", iid=f"{str(b.get('commodity')).upper()}|{y}", values=(
+                    _core_budget_year_label(y, sm), b.get("commodity"), n(pr), n(q),
+                    n(pr * q if (pr is not None and q) else None), b.get("note", "")))
+        except Exception as e:
+            self._surface_error("refresh_budget", e)
+
+    def _budget_show_detail(self):
+        tv = self._bg_detail
+        tv.delete(*tv.get_children())
+        sel = self._bg_tree.selection()
+        r = self._bg_rows.get(sel[0]) if sel else None
+        if not r:
+            return
+        bp = r["budget_price"]
+        for i, l in enumerate(sorted(r["lines"], key=lambda l: (l["date"] or dt.date.min))):
+            cost = l["cost_egp_mt"]
+            vs = (bp - cost) if (bp is not None and cost is not None) else None
+            tags = []
+            if vs is not None:
+                tags.append("under" if vs >= 0 else "over")
+            if l["kind"] == "COMMITTED":
+                tags.append("open")
+            tv.insert("", "end", iid=str(i), tags=tuple(tags), values=(
+                l["date"].isoformat() if l["date"] else "—", l["source"], l["ref"], f"{l['qty_mt']:,.0f}",
+                f"{cost:,.0f}" if cost is not None else "no cost yet",
+                f"{vs:+,.0f}" if vs is not None else "—",
+                f"{vs * l['qty_mt']:+,.0f}" if vs is not None else "—", l["note"]))
+
+    def _budget_export(self):
+        if not _need_openpyxl():
+            return
+        try:
+            year = self._budget_selected_year()
+            label = _core_budget_year_label(year, self._budget_start_month()).replace(" ", "_").replace("/", "-")
+            fp = filedialog.asksaveasfilename(
+                initialdir=get_default_export_dir(), initialfile=f"Budget_vs_Actual_{label}.xlsx",
+                defaultextension=".xlsx", filetypes=[("Excel", "*.xlsx")], title="Export Budget vs Actual")
+            if not fp:
+                return
+            self._build_budget_workbook(year).save(fp)
+            messagebox.showinfo(APP_NAME, f"Budget vs Actual exported.\n\n{fp}")
+        except Exception as e:
+            self._surface_error("_budget_export", e, show=True)
+
+    def _build_budget_workbook(self, year, today=None):
+        """Formula-based: every total, average and variance recalculates if you
+        edit a budget, a quantity, a cost or today's market price."""
+        from openpyxl import Workbook
+        kit = _XlKit()
+        sm = self._budget_start_month()
+        label = _core_budget_year_label(year, sm)
+        rows = self._budget_rows(year, today)
+        wb = Workbook()
+        wb.calculation.calcOnSave = True
+        wb.calculation.fullCalcOnLoad = True
+        ws = wb.active
+        ws.title = "Budget vs Actual"
+        wd = wb.create_sheet("Purchases")
+        kit.title(wd, f"Purchases counted in {label}", "Yellow = input (edit to test). vs budget = budget − cost "
+                                                      "(positive = cheaper than budget).", 10)
+        kit.header(wd, 4, [("Commodity", 11), ("Date", 11), ("Type", 10), ("Source", 15), ("Reference", 22),
+                           ("MT", 10), ("Cost EGP/MT", 12), ("Value EGP", 15), ("vs budget /MT", 13),
+                           ("Note", 50)])
+        x = 5
+        first_line = x
+        for r in rows:
+            for l in sorted(r["lines"], key=lambda l: (l["date"] or dt.date.min)):
+                kit.put(wd, x, 1, r["commodity"], kind="text", bold=True)
+                kit.put(wd, x, 2, l["date"], "yyyy-mm-dd", kind="text")
+                kit.put(wd, x, 3, l["kind"], kind="text")
+                kit.put(wd, x, 4, l["source"], kind="text")
+                kit.put(wd, x, 5, l["ref"], kind="text")
+                kit.put(wd, x, 6, l["qty_mt"], "#,##0", kind="input")
+                kit.put(wd, x, 7, l["cost_egp_mt"], "#,##0", kind="input")
+                kit.put(wd, x, 8, f'=IF(ISNUMBER(G{x}),F{x}*G{x},"")', "#,##0")
+                kit.put(wd, x, 9, f"=IF(ISNUMBER(G{x}),IFERROR(INDEX('Budget vs Actual'!$B:$B,"
+                                  f"MATCH(A{x},'Budget vs Actual'!$A:$A,0))-G{x},\"\"),\"\")", "+#,##0;-#,##0")
+                kit.put(wd, x, 10, l["note"], kind="note")
+                x += 1
+        last_line = max(first_line, x - 1)
+        kit.sign_colours(wd, f"I{first_line}:I{last_line}")
+
+        kit.title(ws, f"Budget vs Actual — {label}",
+                  "Actual = closed imports (landed CIF×FX+fees) + local purchases (price+transport). Committed = "
+                  "open imports at today's market. vs budget = budget − actual (positive = under budget).", 16)
+        kit.header(ws, 4, [("Commodity", 11), ("Budget EGP/MT", 12), ("Budget MT", 11), ("Budget value", 15),
+                           ("Actual MT", 11), ("Committed MT", 12), ("Bought MT", 11), ("Bought value", 15),
+                           ("Avg paid EGP/MT", 13), ("vs budget /MT", 12), ("vs budget EGP", 15),
+                           ("Remaining MT", 12), ("Max price for rest", 14), ("Today's local EGP/MT", 14),
+                           ("Forecast avg", 12), ("Forecast vs budget EGP", 17)])
+        rng = lambda col: f"Purchases!${col}${first_line}:${col}${last_line}"
+        y = 5
+        for r in rows:
+            kit.put(ws, y, 1, r["commodity"], kind="text", bold=True)
+            kit.put(ws, y, 2, r["budget_price"], "#,##0", kind="input")
+            kit.put(ws, y, 3, r["budget_qty"], "#,##0", kind="input")
+            kit.put(ws, y, 4, f'=IF(AND(ISNUMBER(B{y}),ISNUMBER(C{y})),B{y}*C{y},"")', "#,##0")
+            kit.put(ws, y, 5, f'=SUMIFS({rng("F")},{rng("A")},A{y},{rng("C")},"ACTUAL",{rng("G")},"<>")', "#,##0")
+            kit.put(ws, y, 6, f'=SUMIFS({rng("F")},{rng("A")},A{y},{rng("C")},"COMMITTED",{rng("G")},"<>")', "#,##0")
+            kit.put(ws, y, 7, f"=E{y}+F{y}", "#,##0")
+            kit.put(ws, y, 8, f'=SUMIFS({rng("H")},{rng("A")},A{y})', "#,##0")
+            kit.put(ws, y, 9, f'=IF(G{y}>0,H{y}/G{y},"")', "#,##0")
+            kit.put(ws, y, 10, f'=IF(AND(ISNUMBER(B{y}),ISNUMBER(I{y})),B{y}-I{y},"")', "+#,##0;-#,##0")
+            kit.put(ws, y, 11, f'=IF(ISNUMBER(J{y}),J{y}*G{y},"")', "+#,##0;-#,##0")
+            kit.put(ws, y, 12, f'=IF(ISNUMBER(C{y}),MAX(0,C{y}-G{y}),"")', "#,##0")
+            kit.put(ws, y, 13, f'=IF(AND(ISNUMBER(L{y}),L{y}>0,ISNUMBER(B{y})),(B{y}*C{y}-H{y})/L{y},"")', "#,##0")
+            kit.put(ws, y, 14, r["market_price"], "#,##0", kind="input")
+            kit.put(ws, y, 15, f'=IF(AND(ISNUMBER(L{y}),ISNUMBER(N{y})),IF(G{y}+L{y}>0,(H{y}+L{y}*N{y})/(G{y}+L{y}),""),"")',
+                    "#,##0")
+            kit.put(ws, y, 16, f'=IF(AND(ISNUMBER(O{y}),ISNUMBER(B{y})),(B{y}-O{y})*(G{y}+L{y}),"")',
+                    "+#,##0;-#,##0")
+            y += 1
+        if rows:
+            kit.put(ws, y, 1, "TOTAL", kind="text", bold=True)
+            for col in "DEFGHKP":
+                kit.put(ws, y, "ABCDEFGHIJKLMNOP".index(col) + 1, f"=SUM({col}5:{col}{y - 1})",
+                        "+#,##0;-#,##0" if col in "KP" else "#,##0", bold=True)
+            kit.sign_colours(ws, f"J5:K{y}")
+            kit.sign_colours(ws, f"P5:P{y}")
+        kit.notes(ws, y + 2, [
+            "How to read: vs budget = budget − average paid. Green (positive) = bought cheaper than budget; red = over.",
+            "Max price for rest = (budget value − value already bought) ÷ remaining MT: the most the rest can cost "
+            "and still land on budget.",
+            "Forecast = bought value + remaining MT × today's local price. Edit the yellow cells to test other prices.",
+            f"Budget year {label}: purchases are counted by delivery / storage date (local purchases by purchase date).",
+        ], 16)
+        return wb
+
     def _ceo_digest_export_catalog(self):
         """One selectable catalogue for the meaningful exports already available in Prometheus."""
         return [
@@ -15735,6 +16247,7 @@ class App(tk.Tk):
             ('fifo','FIFO Inventory — Formula Workbook','xlsx','_export_fifo_inventory_excel',('ALL',)),
             ('scenario','Scenario Lab — Formula Workbook','xlsx','_scenario_export_excel',()),
             ('buying_plan','Stock Cover & Buying Plan','xlsx','_buying_plan_export',()),
+            ('budget','Budget vs Actual (this budget year)','xlsx','_budget_export',()),
             ('inventory_market','Inventory vs Market','xlsx','export_inventory_market_excel',()),
             ('local_purchases','Local Purchases + CBOT Parity','xlsx','_lp_export_excel',()),
             ('contracts','Contracts — All','xlsx','_export_contracts_excel',('all',)),
@@ -15862,9 +16375,9 @@ class App(tk.Tk):
         self._an_nb=ttk.Notebook(p); self._an_nb.grid(row=1,column=0,sticky='nsew')
         self.tab_performance=ttk.Frame(self._an_nb,padding=10); self.tab_an_contract=ttk.Frame(self._an_nb,padding=6); self.tab_an_supplier=ttk.Frame(self._an_nb,padding=6); self.tab_an_season=ttk.Frame(self._an_nb,padding=6)
         self.tab_origin_cmp_outer=ttk.Frame(self._an_nb); self.tab_savings_outer=ttk.Frame(self._an_nb); self.tab_origin_cmp=self._make_scrollable_tab(self.tab_origin_cmp_outer,padding=10); self.tab_savings=self._make_scrollable_tab(self.tab_savings_outer,padding=10)
-        self.tab_basis=ttk.Frame(self._an_nb,padding=10); self.tab_exposure=ttk.Frame(self._an_nb,padding=10); self.tab_inventory_market=ttk.Frame(self._an_nb,padding=10); self.tab_scenario=ttk.Frame(self._an_nb,padding=10); self.tab_buying_plan=ttk.Frame(self._an_nb,padding=10); self.tab_market_signals=ttk.Frame(self._an_nb,padding=10); self.tab_ceo_digest=ttk.Frame(self._an_nb,padding=10)
-        for tab,label in [(self.tab_performance,'Contract Performance'),(self.tab_an_contract,'Contract Detail'),(self.tab_an_supplier,'Supplier Scorecard'),(self.tab_an_season,'Seasonality'),(self.tab_origin_cmp_outer,'Origin Compare'),(self.tab_savings_outer,'Savings Tracker'),(self.tab_basis,'Basis Tracker'),(self.tab_exposure,'Exposure & Risk'),(self.tab_inventory_market,'Inventory vs Market'),(self.tab_scenario,'Scenario Lab'),(self.tab_buying_plan,'Stock Cover & Buying Plan'),(self.tab_market_signals,'Market Signals'),(self.tab_ceo_digest,'CEO Email Digest')]: self._an_nb.add(tab,text=label)
-        self._build_performance(); self._build_an_contract_subtab(); self._build_an_supplier_subtab(); self._build_an_season_subtab(); self._build_origin_compare(); self._build_savings_tracker(); self._build_basis_tracker(); self._build_exposure_risk(); self._build_inventory_market(); self._build_scenario_lab(); self._build_buying_plan(); self._build_market_signals(); self._build_ceo_digest_tab()
+        self.tab_basis=ttk.Frame(self._an_nb,padding=10); self.tab_exposure=ttk.Frame(self._an_nb,padding=10); self.tab_inventory_market=ttk.Frame(self._an_nb,padding=10); self.tab_scenario=ttk.Frame(self._an_nb,padding=10); self.tab_buying_plan=ttk.Frame(self._an_nb,padding=10); self.tab_market_signals=ttk.Frame(self._an_nb,padding=10); self.tab_budget_outer=ttk.Frame(self._an_nb); self.tab_budget=self._make_scrollable_tab(self.tab_budget_outer,padding=10); self.tab_ceo_digest=ttk.Frame(self._an_nb,padding=10)
+        for tab,label in [(self.tab_performance,'Contract Performance'),(self.tab_an_contract,'Contract Detail'),(self.tab_an_supplier,'Supplier Scorecard'),(self.tab_an_season,'Seasonality'),(self.tab_origin_cmp_outer,'Origin Compare'),(self.tab_savings_outer,'Savings Tracker'),(self.tab_basis,'Basis Tracker'),(self.tab_exposure,'Exposure & Risk'),(self.tab_inventory_market,'Inventory vs Market'),(self.tab_scenario,'Scenario Lab'),(self.tab_buying_plan,'Stock Cover & Buying Plan'),(self.tab_market_signals,'Market Signals'),(self.tab_budget_outer,'Budget vs Actual'),(self.tab_ceo_digest,'CEO Email Digest')]: self._an_nb.add(tab,text=label)
+        self._build_performance(); self._build_an_contract_subtab(); self._build_an_supplier_subtab(); self._build_an_season_subtab(); self._build_origin_compare(); self._build_savings_tracker(); self._build_basis_tracker(); self._build_exposure_risk(); self._build_inventory_market(); self._build_scenario_lab(); self._build_buying_plan(); self._build_market_signals(); self._build_budget_tab(); self._build_ceo_digest_tab()
 
     def _inventory_market_rows(self, commodity="ALL", status="ALL"):
         """Build auditable remaining FIFO inventory vs today's local/CBOT.
@@ -29596,6 +30109,9 @@ class App(tk.Tk):
 
         # 8. Big USDA/CFTC report tomorrow + a strong UP bias, while MT is unpriced.
         alerts.extend(self._market_signal_alerts())
+
+        # 9. Budget: forecast over budget, or the rest can't be bought on budget at today's price.
+        alerts.extend(self._budget_alerts())
         return alerts
 
     def refresh_risk_alerts(self):
@@ -33228,6 +33744,10 @@ class App(tk.Tk):
             self.refresh_market_signals()
         except Exception as e:
             log_exception(e, "refresh_all→refresh_market_signals")
+        try:
+            self.refresh_budget()
+        except Exception as e:
+            log_exception(e, "refresh_all→refresh_budget")
         try:
             self.refresh_local_purchases()
         except Exception:

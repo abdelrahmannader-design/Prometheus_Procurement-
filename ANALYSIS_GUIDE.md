@@ -139,6 +139,14 @@ Down-risk is the mirror image. **Use this bias in the stress test** sets the Cal
 **Report calendar** lists the next 60 days of USDA/CFTC reports (WASDE dates are estimates around the 10th; the others follow fixed rules) plus your own events. The day before a High-impact report — and whenever the bias is UP — the Action Centre warns if you still have unpriced MT.
 **CBOT seasonality** shows the average month-over-month change of the month-end CBOT close by calendar month.
 
+### Budget vs Actual — are we buying at or below budget?
+- **Budgets**: one line per commodity per year — budget EGP/MT (delivered, all-in) and, optionally, budget MT. "Year starts in" supports a fiscal year (e.g. July → FY 2026/27).
+- **Actual** = closed import contracts at landed cost (CIF × FX + intake + clearance + freight — the same engine as Savings) + local purchases (price + transport). **Committed** = open contracts, with any unpriced MT valued at live CBOT/FX. Contracts count in the year of their storage/delivery date; local purchases by purchase date. Contracts with no cost yet are listed but not averaged.
+- **vs budget** = budget − average paid (positive = cheaper than budget).
+- **Max /MT for rest** = (budget price × budget MT − value already bought) ÷ MT left to buy — the most the rest can cost and still land on budget.
+- **Forecast** = bought value + MT left × today's local price.
+- Alerts: forecast > 2 % over budget, or today's local price is above the "max for rest". The Monthly Report has a budget table; the Excel export is formula-based.
+
 ### 11. CEO Email Digest
 Not a calculation. It bundles the exports you select (PDF/Excel) and emails them over SMTP on demand or on a schedule. The numbers come from the tabs above.
 
