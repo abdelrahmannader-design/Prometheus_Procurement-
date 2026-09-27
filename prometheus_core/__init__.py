@@ -49,3 +49,5 @@ from .inventory import (
 from .local_purchase import (
     LOCAL_EVAL_VERSION, import_parity_egp_mt, evaluate_local_purchase,
 )
+
+from .offers import OFFERS_ENGINE_VERSION, compare_offers

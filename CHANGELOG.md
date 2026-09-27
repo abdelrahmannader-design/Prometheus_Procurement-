@@ -1,3 +1,10 @@
+# 2026-09-27 (d) — Supplier Offer Comparison
+
+- New tab Calculate → Offer Comparison: up to 6 offers (CBOT + premium or flat CIF), each with its own freight, intake, clearance, payment days, quality adjustment and quantity, priced on one shared CBOT / FX / interest rate / local price (⟳ fills them from the market).
+- Ranked by landed cost = (CIF + finance carry) × FX + fees + quality adj., with saving vs local, gap vs the best offer, the price to negotiate to match the best offer, and the highest price that still beats local.
+- Picking a supplier fills its intake (Setup → Suppliers) and the commodity freight default; offers are remembered.
+- Formula-based Excel export (RANK, gaps and break-even prices are live formulas).
+
 # 2026-09-27 (c) — Procurement Monthly Report (PDF)
 
 - New one-click management report (Home → "Monthly Report (PDF)", Export Center, CEO email digest; included in the Executive Pack). Choose any of the last 24 months.

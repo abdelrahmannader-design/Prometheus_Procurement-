@@ -63,6 +63,7 @@ from prometheus_core import (
 from prometheus_core import (
     import_parity_egp_mt as _core_import_parity_egp_mt,
     evaluate_local_purchase as _core_evaluate_local_purchase,
+    compare_offers as _core_compare_offers,
 )
 
 # ══════════════════════════════════════════════════════════════════════
@@ -6760,10 +6761,13 @@ class App(tk.Tk):
         # every other workflow tab.
         self.tab_single_page = ttk.Frame(_calc_nb)
         self.tab_future_page = ttk.Frame(_calc_nb)
+        self.tab_offers_page = ttk.Frame(_calc_nb)
         _calc_nb.add(self.tab_single_page, text="Deal Evaluator")
+        _calc_nb.add(self.tab_offers_page, text="Offer Comparison")
         _calc_nb.add(self.tab_future_page, text="Scenario / What-If")
         self.tab_single = self._make_scrollable_tab(self.tab_single_page, padding=10)
         self.tab_future = self._make_scrollable_tab(self.tab_future_page, padding=10)
+        self.tab_offers = self._make_scrollable_tab(self.tab_offers_page, padding=10)
 
         # Legacy alias kept for backward compatibility
         self.tab_dashboard = self.tab_home
@@ -6772,6 +6776,10 @@ class App(tk.Tk):
         self._build_contracts_history()
         self._build_single_deal()
         self._build_future_snapshot()
+        try:
+            self._build_offer_compare()
+        except Exception as _e_offers:
+            log_exception(_e_offers, "_build_offer_compare")
         self._build_setup_tab()
         self._build_slots()
         self._build_consumption()
@@ -22421,6 +22429,313 @@ class App(tk.Tk):
                 "The last two columns combine the CBOT scenario with the largest FX shock on the Assumptions sheet.",
             ], 8)
         return wb
+
+    # ══════════════════════════════════════════════════════════════════
+    #  OFFER COMPARISON (Calculate tab) — rank supplier offers by true
+    #  landed cost on one shared market (prometheus_core.compare_offers).
+    # ══════════════════════════════════════════════════════════════════
+    _OFFER_FIELDS = (
+        # key, header, width, kind
+        ("name", "Offer / ref", 14, "text"),
+        ("supplier", "Supplier", 16, "supplier"),
+        ("origin", "Origin", 10, "text"),
+        ("price_type", "Price type", 8, "type"),
+        ("premium", "Premium\n(CBOT unit)", 8, "num"),
+        ("flat_cif", "Flat CIF\n$/MT", 8, "num"),
+        ("freight_egp_mt", "Freight\nEGP/MT", 8, "num"),
+        ("intake_egp_mt", "Intake\nEGP/MT", 8, "num"),
+        ("clearance_egp_mt", "Clearance\nEGP/MT", 8, "num"),
+        ("payment_days", "Payment /\nfinance days", 8, "num"),
+        ("quality_adj_egp_mt", "Quality adj.\nEGP/MT (+cost)", 9, "num"),
+        ("qty_mt", "Qty MT", 8, "num"),
+    )
+    _OFFER_ROWS = 6
+
+    def _build_offer_compare(self):
+        p = self.tab_offers
+        p.columnconfigure(0, weight=1)
+        ui = self.state_obj.setdefault("ui", {})
+        saved = ui.get("offer_compare") or {}
+
+        ttk.Label(p, text="Supplier Offer Comparison — rank offers by true landed cost",
+                  font=("Segoe UI", 12, "bold")).grid(row=0, column=0, sticky="w")
+        ttk.Label(p, text="All offers are priced on the same CBOT, FX and interest rate, so the ranking "
+                          "shows only what really differs: premium or flat price, freight, intake, "
+                          "clearance, payment terms and quality.",
+                  foreground="#475569", wraplength=1100).grid(row=1, column=0, sticky="w", pady=(2, 8))
+
+        sh = ttk.LabelFrame(p, text="Shared market", padding=8)
+        sh.grid(row=2, column=0, sticky="ew")
+        self._oc2_vars = {}
+        shared_fields = (("commodity", "Commodity", 10), ("cbot", "CBOT (¢/bu, SBM $/st)", 9),
+                         ("fx", "FX EGP/USD", 9), ("interest_rate_pct", "Interest % / year", 7),
+                         ("local_egp_mt", "Local all-in EGP/MT", 10))
+        for j, (key, label, w) in enumerate(shared_fields):
+            ttk.Label(sh, text=label).grid(row=0, column=2 * j, sticky="w", padx=(0, 4))
+            var = tk.StringVar(value=str((saved.get("shared") or {}).get(key, "")))
+            self._oc2_vars[key] = var
+            if key == "commodity":
+                cb = ttk.Combobox(sh, textvariable=var, width=w, state="readonly",
+                                  values=["CORN", "SOYBEAN", "WHEAT", "SBM", "SFM", "DDGS"])
+                cb.grid(row=0, column=2 * j + 1, sticky="w", padx=(0, 14))
+                cb.bind("<<ComboboxSelected>>", lambda e: self._offers_fill_market())
+                if not var.get():
+                    var.set("CORN")
+            else:
+                ttk.Entry(sh, textvariable=var, width=w).grid(row=0, column=2 * j + 1, sticky="w", padx=(0, 14))
+        ttk.Button(sh, text="⟳ Fill from market", command=self._offers_fill_market
+                   ).grid(row=0, column=10, padx=(4, 0))
+
+        grid = ttk.LabelFrame(p, text="Offers — leave a row empty to skip it. Price type CBOT uses the "
+                                      "premium; FLAT uses the flat CIF.", padding=8)
+        grid.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        for j, (_k, header, w, _kind) in enumerate(self._OFFER_FIELDS):
+            ttk.Label(grid, text=header, font=("Segoe UI", 8, "bold"), justify="center"
+                      ).grid(row=0, column=j, padx=2, sticky="w")
+        suppliers = sorted((self.state_obj.get("suppliers", {}) or {}).keys())
+        saved_rows = saved.get("offers") or []
+        self._oc2_rows = []
+        for i in range(self._OFFER_ROWS):
+            rv = {}
+            srow = saved_rows[i] if i < len(saved_rows) else {}
+            for j, (key, _h, w, kind) in enumerate(self._OFFER_FIELDS):
+                var = tk.StringVar(value=str(srow.get(key, "") if srow.get(key) is not None else ""))
+                rv[key] = var
+                if kind == "supplier":
+                    cb = ttk.Combobox(grid, textvariable=var, values=suppliers, width=w)
+                    cb.grid(row=i + 1, column=j, padx=2, pady=1)
+                    cb.bind("<<ComboboxSelected>>", lambda e, r=rv: self._offers_supplier_defaults(r))
+                elif kind == "type":
+                    if not var.get():
+                        var.set("CBOT")
+                    ttk.Combobox(grid, textvariable=var, values=["CBOT", "FLAT"], width=w,
+                                 state="readonly").grid(row=i + 1, column=j, padx=2, pady=1)
+                else:
+                    ttk.Entry(grid, textvariable=var, width=w).grid(row=i + 1, column=j, padx=2, pady=1)
+            self._oc2_rows.append(rv)
+
+        bb = ttk.Frame(p)
+        bb.grid(row=4, column=0, sticky="w", pady=(8, 4))
+        ttk.Button(bb, text="▶ Compare offers", command=self._offers_compare).pack(side="left", padx=(0, 8))
+        ttk.Button(bb, text="⬇ Export to Excel", command=self._offers_export_excel).pack(side="left", padx=(0, 8))
+        ttk.Button(bb, text="Clear offers", command=self._offers_clear).pack(side="left")
+
+        self._oc2_verdict_var = tk.StringVar(value="")
+        ttk.Label(p, textvariable=self._oc2_verdict_var, font=("Segoe UI", 10, "bold"),
+                  foreground="#1a4fa0", wraplength=1150, justify="left").grid(row=5, column=0, sticky="w", pady=(4, 4))
+
+        cols = [("Rank", 45), ("Offer", 120), ("Supplier", 120), ("CIF $/MT", 75), ("Carry $/MT", 75),
+                ("Landed EGP/MT", 100), ("vs Local /MT", 90), ("vs Local total", 110),
+                ("Gap vs best /MT", 100), ("Gap vs best total", 115),
+                ("Price to match best", 120), ("Max price to beat local", 135)]
+        tf = ttk.Frame(p)
+        tf.grid(row=6, column=0, sticky="ew")
+        tf.columnconfigure(0, weight=1)
+        self._oc2_tree = ttk.Treeview(tf, columns=[c for c, _ in cols], show="headings", height=7)
+        for c, w in cols:
+            self._oc2_tree.heading(c, text=c)
+            self._oc2_tree.column(c, width=w, anchor="w" if c in ("Offer", "Supplier") else "e")
+        self._oc2_tree.grid(row=0, column=0, sticky="ew")
+        self._oc2_tree.tag_configure("best", background="#e6f4ea", font=("Segoe UI", 9, "bold"))
+        self._oc2_tree.tag_configure("bad", foreground="#999999")
+        ttk.Label(p, text="Price to match best = the premium (or flat CIF) at which this offer would cost the "
+                          "same as the best one — use it as your negotiation target.  Max price to beat local = "
+                          "the highest premium (or flat CIF) at which importing is still cheaper than buying locally.",
+                  foreground="#475569", wraplength=1150).grid(row=7, column=0, sticky="w", pady=(4, 0))
+        self._oc2_last = None
+        if not (saved.get("shared") or {}).get("cbot"):
+            self._offers_fill_market(only_empty=True)
+
+    def _offers_fill_market(self, only_empty=False):
+        """CBOT, FX and latest local price for the chosen commodity."""
+        try:
+            comm = (self._oc2_vars["commodity"].get() or "CORN").upper()
+            price, _src, _asof, _unit = self._hd_live_quote_details(comm)
+            fx = to_float((self.state_obj.get("market_data", {}).get("fx", {}) or {}).get("price"), None)
+            local, _d = self._latest_local_price_for_commodity(comm)
+            for key, val, fmt in (("cbot", price, "{:.2f}"), ("fx", fx, "{:.4f}"),
+                                  ("local_egp_mt", local, "{:.0f}")):
+                if val is not None and (not only_empty or not self._oc2_vars[key].get().strip()):
+                    self._oc2_vars[key].set(fmt.format(val))
+            if not self._oc2_vars["interest_rate_pct"].get().strip():
+                self._oc2_vars["interest_rate_pct"].set("0")
+        except Exception as e:
+            log_exception(e, "_offers_fill_market")
+
+    def _offers_supplier_defaults(self, rv):
+        """Supplier picked → intake from Setup → Suppliers, freight default."""
+        try:
+            comm = (self._oc2_vars["commodity"].get() or "CORN").upper()
+            rec, _m = self._supplier_intake_defaults(rv["supplier"].get(), comm)
+            if rec and not rv["intake_egp_mt"].get().strip():
+                v = to_float(rec.get("direct_egp_mt"), None)
+                if v is not None:
+                    rv["intake_egp_mt"].set(f"{v:g}")
+            if not rv["freight_egp_mt"].get().strip():
+                rv["freight_egp_mt"].set(f"{get_commodity_freight_egp_mt(self.state_obj, comm):g}")
+            if not rv["name"].get().strip():
+                rv["name"].set(rv["supplier"].get())
+        except Exception as e:
+            log_exception(e, "_offers_supplier_defaults")
+
+    def _offers_inputs(self):
+        shared = {k: v.get().strip() for k, v in self._oc2_vars.items()}
+        offers = []
+        for rv in self._oc2_rows:
+            o = {k: v.get().strip() for k, v in rv.items()}
+            if not any(o.get(k) for k in ("name", "supplier", "premium", "flat_cif")):
+                continue
+            offers.append(o)
+        return shared, offers
+
+    def _offers_compare(self):
+        try:
+            shared, offers = self._offers_inputs()
+            self.state_obj.setdefault("ui", {})["offer_compare"] = {
+                "shared": shared, "offers": [{k: v.get() for k, v in rv.items()} for rv in self._oc2_rows]}
+            save_state(self.state_obj)
+            tv = self._oc2_tree
+            for i in tv.get_children():
+                tv.delete(i)
+            if not offers:
+                self._oc2_verdict_var.set("Enter at least one offer.")
+                return
+            res = _core_compare_offers(shared, offers)
+            self._oc2_last = (shared, offers, res)
+            unit = "$/st" if res["commodity"] == "SBM" else "¢/bu"
+
+            def f(v, d=0, signed=False):
+                if v is None:
+                    return "—"
+                return f"{v:+,.{d}f}" if signed else f"{v:,.{d}f}"
+
+            def price_txt(r, v):
+                if v is None:
+                    return "—"
+                return f"{v:,.2f} $/MT" if r["price_type"] == "FLAT" else f"{v:,.2f} {unit}"
+
+            for r in res["rows"]:
+                tag = "best" if r["rank"] == 1 else ("bad" if r["rank"] is None else "")
+                tv.insert("", "end", tags=(tag,), values=(
+                    r["rank"] or "—", r["name"], r["supplier"], f(r["cif_usd_mt"], 2), f(r["carry_usd_mt"], 2),
+                    f(r["landed_egp_mt"]), f(r["saving_vs_local_egp_mt"], 0, True),
+                    f(r["saving_total_egp"], 0, True), f(r["gap_vs_best_egp_mt"], 0, True),
+                    f(r["gap_vs_best_total_egp"], 0, True),
+                    ("(best)" if r["rank"] == 1 else price_txt(r, r["match_best_price"]) if r["rank"] else "—"),
+                    price_txt(r, r["max_price_vs_local"]) if r["rank"] else "—"))
+            best = res["best"]
+            ranked = [r for r in res["rows"] if r["rank"]]
+            bad = [r for r in res["rows"] if not r["rank"]]
+            if not best:
+                self._oc2_verdict_var.set("No offer could be priced — missing: " +
+                                          "; ".join(f"{r['name']}: {', '.join(r['missing'])}" for r in bad))
+                return
+            msg = f"BEST: {best['name']} — landed {best['landed_egp_mt']:,.0f} EGP/MT"
+            if len(ranked) > 1:
+                second = ranked[1]
+                msg += (f", cheaper than {second['name']} by {second['gap_vs_best_egp_mt']:,.0f} EGP/MT"
+                        + (f" ({second['gap_vs_best_total_egp']:,.0f} EGP on {second['qty_mt']:,.0f} MT)"
+                           if second.get("gap_vs_best_total_egp") else ""))
+            if best["saving_vs_local_egp_mt"] is not None:
+                msg += (f".  vs local: {best['saving_vs_local_egp_mt']:+,.0f} EGP/MT "
+                        f"({'import cheaper' if best['saving_vs_local_egp_mt'] > 0 else 'LOCAL IS CHEAPER'})")
+            if bad:
+                msg += "   ·  Not priced: " + "; ".join(f"{r['name']} (missing {', '.join(r['missing'])})" for r in bad)
+            self._oc2_verdict_var.set(msg)
+        except Exception as e:
+            self._surface_error("_offers_compare", e, show=True)
+
+    def _offers_clear(self):
+        for rv in self._oc2_rows:
+            for k, v in rv.items():
+                v.set("CBOT" if k == "price_type" else "")
+        for i in self._oc2_tree.get_children():
+            self._oc2_tree.delete(i)
+        self._oc2_verdict_var.set("")
+
+    def _build_offers_workbook(self, shared, offers):
+        """Formula-based comparison: shared market on top, one row per offer."""
+        from openpyxl import Workbook
+        from openpyxl.utils import get_column_letter as L
+        res = _core_compare_offers(shared, offers)
+        kit = _XlKit()
+        wb = Workbook()
+        wb.calculation.calcOnSave = True
+        wb.calculation.fullCalcOnLoad = True
+        ws = wb.active
+        ws.title = "Offer Comparison"
+        kit.title(ws, f"Supplier Offer Comparison — {res['commodity']}  ·  {dt.date.today().isoformat()}",
+                  "Yellow = inputs (edit any of them, everything recalculates). Landed = (CIF + carry) × FX + "
+                  "freight + intake + clearance + quality adj.  Rank 1 = cheapest.", 20)
+        shared_rows = (("Commodity", res["commodity"], None), ("CBOT (¢/bu, SBM $/st)", res["cbot"], "#,##0.00"),
+                       ("Conversion factor", res["factor"], "0.00000"), ("FX EGP/USD", res["fx"], "#,##0.0000"),
+                       ("Interest % per year", res["interest_rate_pct"], "0.00"),
+                       ("Local all-in EGP/MT", res["local_egp_mt"], "#,##0"))
+        for i, (lab, val, fmt) in enumerate(shared_rows, start=4):
+            kit.put(ws, i, 1, lab, kind="text", bold=True)
+            kit.put(ws, i, 2, val, fmt, kind="input")
+        CBOT, FAC, FX, RATE, LOC = "$B$5", "$B$6", "$B$7", "$B$8", "$B$9"
+        hdr = 11
+        heads = [("Offer", 16), ("Supplier", 16), ("Origin", 10), ("Type", 7), ("Premium", 9), ("Flat CIF", 9),
+                 ("Freight", 9), ("Intake", 9), ("Clearance", 9), ("Pay days", 8), ("Quality adj", 9),
+                 ("Qty MT", 9), ("CIF $/MT", 10), ("Carry $/MT", 10), ("Landed EGP/MT", 12),
+                 ("vs Local /MT", 11), ("vs Local total", 14), ("Rank", 6), ("Gap vs best /MT", 12),
+                 ("Price to match best", 14)]
+        kit.header(ws, hdr, heads)
+        first = hdr + 1
+        last = first + len(offers) - 1
+        for i, o in enumerate(offers):
+            x = first + i
+            kit.put(ws, x, 1, o.get("name") or f"Offer {i + 1}", kind="text", bold=True)
+            kit.put(ws, x, 2, o.get("supplier", ""), kind="text")
+            kit.put(ws, x, 3, o.get("origin", ""), kind="text")
+            kit.put(ws, x, 4, (o.get("price_type") or "CBOT").upper(), kind="input")
+            for col, key, fmt in ((5, "premium", "#,##0.00"), (6, "flat_cif", "#,##0.00"),
+                                  (7, "freight_egp_mt", "#,##0.00"), (8, "intake_egp_mt", "#,##0.00"),
+                                  (9, "clearance_egp_mt", "#,##0.00"), (10, "payment_days", "0"),
+                                  (11, "quality_adj_egp_mt", "#,##0.00"), (12, "qty_mt", "#,##0")):
+                kit.put(ws, x, col, to_float(o.get(key), None), fmt, kind="input")
+            kit.put(ws, x, 13, f'=IF(D{x}="FLAT",IF(F{x}="","",F{x}),IF(E{x}="","",({CBOT}+E{x})*{FAC}))', "#,##0.00")
+            kit.put(ws, x, 14, f'=IF(M{x}="","",M{x}*{RATE}/100*N(J{x})/360)', "#,##0.00")
+            kit.put(ws, x, 15, f'=IF(M{x}="","",(M{x}+N{x})*{FX}+N(G{x})+N(H{x})+N(I{x})+N(K{x}))', "#,##0")
+            kit.put(ws, x, 16, f'=IF(OR(O{x}="",{LOC}=""),"",{LOC}-O{x})', "+#,##0;-#,##0;0")
+            kit.put(ws, x, 17, f'=IF(OR(P{x}="",L{x}=""),"",P{x}*L{x})', "+#,##0;-#,##0;0")
+            kit.put(ws, x, 18, f'=IF(O{x}="","",RANK(O{x},$O${first}:$O${last},1))', "0", bold=True)
+            kit.put(ws, x, 19, f'=IF(O{x}="","",O{x}-MIN($O${first}:$O${last}))', "+#,##0;-#,##0;0")
+            kit.put(ws, x, 20, (f'=IF(O{x}="","",IF(D{x}="FLAT",(MIN($O${first}:$O${last})-N(G{x})-N(H{x})-N(I{x})-N(K{x}))'
+                                f'/{FX}/(1+{RATE}/100*N(J{x})/360),(MIN($O${first}:$O${last})-N(G{x})-N(H{x})-N(I{x})-N(K{x}))'
+                                f'/{FX}/(1+{RATE}/100*N(J{x})/360)/{FAC}-{CBOT}))'), "#,##0.00")
+        if offers:
+            kit.sign_colours(ws, f"P{first}:Q{last}")
+            from openpyxl.formatting.rule import FormulaRule
+            ws.conditional_formatting.add(f"A{first}:T{last}", FormulaRule(
+                formula=[f"$R{first}=1"], fill=kit.grn_fill))
+        kit.notes(ws, last + 3, [
+            "Carry = interest on the CIF for the payment days (simple interest, 360-day year).",
+            "Quality adj = extra cost per MT you expect from this origin/quality (e.g. fines, moisture); negative = better than standard.",
+            "Price to match best = premium (CBOT unit) or flat CIF ($/MT) at which this offer would cost the same as the cheapest one.",
+        ], 20)
+        return wb, res
+
+    def _offers_export_excel(self):
+        if not _need_openpyxl():
+            return
+        try:
+            shared, offers = self._offers_inputs()
+            if not offers:
+                messagebox.showinfo(APP_NAME, "Enter at least one offer first.")
+                return
+            fp = filedialog.asksaveasfilename(
+                initialdir=get_default_export_dir(),
+                initialfile=f"Offer_Comparison_{dt.date.today().isoformat()}.xlsx",
+                defaultextension=".xlsx", filetypes=[("Excel", "*.xlsx")], title="Export Offer Comparison")
+            if not fp:
+                return
+            wb, _res = self._build_offers_workbook(shared, offers)
+            wb.save(fp)
+            messagebox.showinfo(APP_NAME, f"Offer comparison exported (formula-based).\n\n{fp}")
+        except Exception as e:
+            self._surface_error("_offers_export_excel", e, show=True)
 
     def _build_future_snapshot(self):
         ttk.Label(self.tab_future, text="Future Contract Snapshot (No contract selection needed)", font=("Segoe UI", 12, "bold")).grid(row=0, column=0, sticky="w")

@@ -5,6 +5,7 @@ import math
 import unittest
 
 from prometheus_core import (
+    compare_offers,
     cbot_history_scenarios,
     evaluate_local_purchase,
     import_parity_egp_mt,
@@ -100,6 +101,39 @@ class StressShockSettingsTests(unittest.TestCase):
     def test_locked_cbot_ignores_custom_cbot_shocks(self):
         res = run_stress_test({**self.inputs, "cbot_locked": True, "cbot_shocks_custom": (-0.3, 0.3)})
         self.assertEqual(res["cbot_shocks_used"], (0.0,))
+
+
+class OfferComparisonTests(unittest.TestCase):
+    shared = {"commodity": "CORN", "cbot": 445.0, "fx": 51.5, "interest_rate_pct": 24, "local_egp_mt": 15000}
+
+    def test_ranking_and_landed_cost(self):
+        res = compare_offers(self.shared, [
+            {"name": "A", "premium": 175, "freight_egp_mt": 485, "intake_egp_mt": 235, "qty_mt": 3000},
+            {"name": "B", "premium": 165, "freight_egp_mt": 485, "intake_egp_mt": 320, "payment_days": 60},
+            {"name": "C", "price_type": "FLAT", "flat_cif": 240, "freight_egp_mt": 300,
+             "intake_egp_mt": 235, "quality_adj_egp_mt": 150},
+        ])
+        by = {r["name"]: r for r in res["rows"]}
+        self.assertAlmostEqual(by["A"]["landed_egp_mt"], (445 + 175) * 0.3937 * 51.5 + 720)
+        self.assertAlmostEqual(by["B"]["landed_egp_mt"],
+                               (445 + 165) * 0.3937 * (1 + 0.24 * 60 / 360) * 51.5 + 805)
+        self.assertEqual([r["name"] for r in res["rows"]], ["C", "A", "B"])
+        self.assertEqual(res["best"]["name"], "C")
+
+    def test_price_to_match_best_really_matches(self):
+        res = compare_offers(self.shared, [
+            {"name": "A", "premium": 175, "freight_egp_mt": 485},
+            {"name": "B", "premium": 150, "freight_egp_mt": 600, "payment_days": 30}])
+        worse = [r for r in res["rows"] if r["rank"] == 2][0]
+        again = compare_offers(self.shared, [{"name": "X", "premium": worse["match_best_price"],
+                                              "freight_egp_mt": worse["fees_egp_mt"],
+                                              "payment_days": worse["payment_days"]}])
+        self.assertAlmostEqual(again["rows"][0]["landed_egp_mt"], res["best"]["landed_egp_mt"])
+
+    def test_incomplete_offer_is_not_ranked(self):
+        res = compare_offers(self.shared, [{"name": "No premium"}])
+        self.assertIsNone(res["rows"][0]["rank"])
+        self.assertIn("premium", res["rows"][0]["missing"])
 
 
 class CbotHistoryScenarioTests(unittest.TestCase):
