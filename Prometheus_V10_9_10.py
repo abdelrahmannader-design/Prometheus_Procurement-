@@ -65,6 +65,8 @@ from prometheus_core import (
     evaluate_local_purchase as _core_evaluate_local_purchase,
     compare_offers as _core_compare_offers,
     stock_cover_plan as _core_stock_cover_plan,
+    evaluate_target as _core_evaluate_target,
+    suggest_ladder as _core_suggest_ladder,
 )
 
 # ══════════════════════════════════════════════════════════════════════
@@ -6724,8 +6726,10 @@ class App(tk.Tk):
         self.tab_contracts_outer       = ttk.Frame(self._contracts_nb)
         self.tab_local_purchases_outer = ttk.Frame(self._contracts_nb)
         self.tab_slots_outer           = ttk.Frame(self._contracts_nb)
+        self.tab_targets_outer         = ttk.Frame(self._contracts_nb)
         self._contracts_nb.add(self.tab_contracts_outer,       text="Import Contracts")
         self._contracts_nb.add(self.tab_local_purchases_outer, text="Local Purchases")
+        self._contracts_nb.add(self.tab_targets_outer,         text="CBOT Targets")
         self._contracts_nb.add(self.tab_slots_outer,           text="CBOT Slots")
 
         # ── Scrollable inner frames (existing builders keep their names) ─
@@ -6740,6 +6744,7 @@ class App(tk.Tk):
             pass
         self.tab_local_purchases = self._make_scrollable_tab(self.tab_local_purchases_outer, padding=10)
         self.tab_slots           = self._make_scrollable_tab(self.tab_slots_outer, padding=10)
+        self.tab_targets         = self._make_scrollable_tab(self.tab_targets_outer, padding=10)
         self.tab_setup           = self._make_scrollable_tab(self.tab_setup_outer, padding=10)
         self.tab_consumption     = self._make_scrollable_tab(self.tab_consumption_outer, padding=10)
         self.tab_analysis        = self._make_scrollable_tab(self.tab_analysis_outer, padding=10)
@@ -6783,6 +6788,10 @@ class App(tk.Tk):
             log_exception(_e_offers, "_build_offer_compare")
         self._build_setup_tab()
         self._build_slots()
+        try:
+            self._build_cbot_targets()
+        except Exception as _e_tg:
+            log_exception(_e_tg, "_build_cbot_targets")
         self._build_consumption()
         self._build_local_purchases()
         # Analysis builds its own sub-tabs, including Contract Performance,
@@ -29513,6 +29522,9 @@ class App(tk.Tk):
         # 6. Stock cover — a purchase is due (or already late) to stay
         #    above the safety stock (Analysis → Stock Cover & Buying Plan).
         alerts.extend(self._buying_plan_alerts())
+
+        # 7. CBOT targets hit / near on unpriced quantity.
+        alerts.extend(self._cbot_target_alerts())
         return alerts
 
     def refresh_risk_alerts(self):
@@ -31078,6 +31090,337 @@ class App(tk.Tk):
         self._roll_autofill()
         self._activate_contract_context_from_label(self.roll_contract_var.get())
 
+    # ══════════════════════════════════════════════════════════════════
+    #  CBOT TARGETS — price levels for the unpriced part of open
+    #  contracts, checked against the live board (prometheus_core.targets).
+    # ══════════════════════════════════════════════════════════════════
+    def _targets_near_pct(self):
+        return to_float((self.state_obj.get("ui", {}) or {}).get("cbot_target_near_pct"), 1.0) or 1.0
+
+    def _contract_unpriced_mt(self, c):
+        try:
+            _p, u = self._home_contract_pricing_split(c)
+            return max(0.0, to_float(u, 0.0) or 0.0)
+        except Exception:
+            return 0.0 if self._contract_pricing_status(c) == "PRICED" else (self._hd_contract_qty(c) or 0.0)
+
+    def _cbot_target_rows(self):
+        """Every target on every open contract, with live status."""
+        rows = []
+        near = self._targets_near_pct()
+        for cid, c in (self.state_obj.get("contracts", {}) or {}).items():
+            if not self._contract_is_open(c):
+                continue
+            targets = c.get("cbot_targets") or []
+            if not targets:
+                continue
+            base = (c.get("commodity") or "").upper().split("-")[0]
+            price, _src, _asof, unit = self._hd_live_quote_details(base)
+            factor = cbot_conv_factor(base, strict=True)
+            prem = to_float(c.get("premium_cents"), None)
+            for t in targets:
+                ev = _core_evaluate_target(t, price, near)
+                sav = None
+                lvl = to_float(t.get("level"), None)
+                if factor and prem is not None and lvl is not None:
+                    try:
+                        e = self._hd_cost_for_contract(cid, c, overrides={"cif": (lvl + prem) * factor},
+                                                       use_latest_fx=True, fx_mode="live")
+                        sav = e.get("sav_mt")
+                    except Exception:
+                        sav = None
+                rows.append({"cid": cid, "contract": self._hd_ref(cid, c), "commodity": base,
+                             "target": t, "price": price, "unit": unit, "saving_at_target": sav, **ev})
+        order = {"HIT": 0, "NEAR": 1, "WAITING": 2, "NO_PRICE": 3, "DONE": 4}
+        rows.sort(key=lambda r: (order.get(r["state"], 9), r["contract"]))
+        return rows
+
+    def _cbot_target_alerts(self):
+        out = []
+        try:
+            for r in self._cbot_target_rows():
+                t = r["target"]
+                if r["state"] not in ("HIT", "NEAR"):
+                    continue
+                kind = "cap" if str(t.get("direction")).upper() == "PROTECT_ABOVE" else "target"
+                out.append({
+                    "priority": "High" if r["state"] == "HIT" else "Medium",
+                    "issue": (f"{r['contract']}: CBOT {r['commodity']} {r['price']:,.2f} "
+                              f"{'reached' if r['state'] == 'HIT' else 'is within ' + format(r['distance_pct'], '.1f') + '% of'} "
+                              f"{kind} {to_float(t.get('level'), 0):,.2f} ({to_float(t.get('qty_mt'), 0):,.0f} MT)"),
+                    "action": ("Fix the price for this quantity, then Record as pricing lot "
+                               "(Contracts → CBOT Targets)." if r["state"] == "HIT"
+                               else "Get ready to fix — call the supplier / broker."),
+                })
+        except Exception as e:
+            log_exception(e, "_cbot_target_alerts")
+        return out
+
+    def _build_cbot_targets(self):
+        p = self.tab_targets
+        p.columnconfigure(0, weight=1)
+        ttk.Label(p, text="🎯  CBOT Targets — price the unpriced quantity at levels you choose",
+                  font=("Segoe UI", 12, "bold")).grid(row=0, column=0, sticky="w")
+        ttk.Label(p, text="BUY BELOW = price when CBOT falls to the level.  PROTECT ABOVE = a cap: price anyway if "
+                          "CBOT rises to it.  Hits and near-misses appear in Home's Action Centre.",
+                  foreground="#475569", wraplength=1150).grid(row=1, column=0, sticky="w", pady=(2, 6))
+
+        ov = ttk.LabelFrame(p, text="All targets (open contracts)", padding=6)
+        ov.grid(row=2, column=0, sticky="ew")
+        ov.columnconfigure(0, weight=1)
+        cols = [("Contract", 150), ("Commodity", 80), ("Type", 105), ("Target", 80), ("Qty MT", 80),
+                ("Live CBOT", 85), ("Distance", 85), ("Status", 110), ("Saving/MT at target", 140), ("Note", 260)]
+        self._tg_all = ttk.Treeview(ov, columns=[c for c, _ in cols], show="headings", height=7)
+        for c, w in cols:
+            self._tg_all.heading(c, text=c)
+            self._tg_all.column(c, width=w, anchor="w" if c in ("Contract", "Type", "Status", "Note") else "e")
+        self._tg_all.grid(row=0, column=0, sticky="ew")
+        for tag, bg in (("HIT", "#fde2e2"), ("NEAR", "#fff4d6"), ("DONE", "#eef2f6")):
+            self._tg_all.tag_configure(tag, background=bg)
+        self._tg_all.bind("<Double-1>", lambda e: self._targets_pick_from_overview())
+        nb = ttk.Frame(ov)
+        nb.grid(row=1, column=0, sticky="w", pady=(4, 0))
+        ttk.Label(nb, text="'Near' when within").pack(side="left")
+        self._tg_near_var = tk.StringVar(value=f"{self._targets_near_pct():g}")
+        ttk.Entry(nb, textvariable=self._tg_near_var, width=5).pack(side="left", padx=4)
+        ttk.Label(nb, text="% of the level").pack(side="left", padx=(0, 10))
+        ttk.Button(nb, text="⟳ Refresh", command=self._targets_apply_near).pack(side="left")
+
+        ed = ttk.LabelFrame(p, text="Targets for one contract", padding=8)
+        ed.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        ttk.Label(ed, text="Contract").grid(row=0, column=0, sticky="w")
+        self._tg_contract_var = tk.StringVar(value="")
+        self._tg_contract_cb = ttk.Combobox(ed, textvariable=self._tg_contract_var, width=46, state="readonly")
+        self._tg_contract_cb.grid(row=0, column=1, columnspan=4, sticky="w", padx=(4, 10))
+        self._tg_contract_cb.bind("<<ComboboxSelected>>", lambda e: self._targets_show_contract())
+        self._tg_info_var = tk.StringVar(value="")
+        ttk.Label(ed, textvariable=self._tg_info_var, foreground="#1a4fa0", font=("Segoe UI", 9, "bold")
+                  ).grid(row=1, column=0, columnspan=10, sticky="w", pady=(4, 6))
+        self._tg_level_var = tk.StringVar()
+        self._tg_qty_var = tk.StringVar()
+        self._tg_dir_var = tk.StringVar(value="BUY_BELOW")
+        self._tg_note_var = tk.StringVar()
+        for j, (lab, var, w) in enumerate((("CBOT level", self._tg_level_var, 9), ("Qty MT", self._tg_qty_var, 9))):
+            ttk.Label(ed, text=lab).grid(row=2, column=2 * j, sticky="w")
+            ttk.Entry(ed, textvariable=var, width=w).grid(row=2, column=2 * j + 1, sticky="w", padx=(4, 10))
+        ttk.Label(ed, text="Type").grid(row=2, column=4, sticky="w")
+        ttk.Combobox(ed, textvariable=self._tg_dir_var, values=["BUY_BELOW", "PROTECT_ABOVE"], width=15,
+                     state="readonly").grid(row=2, column=5, sticky="w", padx=(4, 10))
+        ttk.Label(ed, text="Note").grid(row=2, column=6, sticky="w")
+        ttk.Entry(ed, textvariable=self._tg_note_var, width=30).grid(row=2, column=7, sticky="w", padx=(4, 10))
+        ttk.Button(ed, text="➕ Add target", command=self._targets_add).grid(row=2, column=8)
+        tcols = [("#", 35), ("Type", 110), ("Target", 80), ("Qty MT", 80), ("Status", 110),
+                 ("Distance", 90), ("Saving/MT at target", 140), ("Note", 300)]
+        self._tg_tree = ttk.Treeview(ed, columns=[c for c, _ in tcols], show="headings", height=5)
+        for c, w in tcols:
+            self._tg_tree.heading(c, text=c)
+            self._tg_tree.column(c, width=w, anchor="w" if c in ("Type", "Status", "Note") else "e")
+        self._tg_tree.grid(row=3, column=0, columnspan=10, sticky="ew", pady=(6, 4))
+        for tag, bg in (("HIT", "#fde2e2"), ("NEAR", "#fff4d6"), ("DONE", "#eef2f6")):
+            self._tg_tree.tag_configure(tag, background=bg)
+        bb = ttk.Frame(ed)
+        bb.grid(row=4, column=0, columnspan=10, sticky="w")
+        ttk.Button(bb, text="Suggest a ladder", command=self._targets_suggest).pack(side="left", padx=(0, 6))
+        ttk.Button(bb, text="✔ Record as pricing lot", command=self._targets_record_lot).pack(side="left", padx=(0, 6))
+        ttk.Button(bb, text="Mark done", command=lambda: self._targets_set_done(True)).pack(side="left", padx=(0, 6))
+        ttk.Button(bb, text="Reactivate", command=lambda: self._targets_set_done(False)).pack(side="left", padx=(0, 6))
+        ttk.Button(bb, text="🗑 Delete", command=self._targets_delete).pack(side="left")
+        self.refresh_cbot_targets()
+
+    def _targets_apply_near(self):
+        v = to_float(self._tg_near_var.get(), None)
+        if v is not None and v >= 0:
+            self.state_obj.setdefault("ui", {})["cbot_target_near_pct"] = v
+            save_state(self.state_obj)
+        self.refresh_cbot_targets()
+
+    def _targets_contract_labels(self):
+        labels = []
+        for cid, c in self._sorted_contract_items():
+            if not self._contract_is_open(c):
+                continue
+            base = (c.get("commodity") or "").upper().split("-")[0]
+            if not cbot_conv_factor(base, strict=True):
+                continue
+            u = self._contract_unpriced_mt(c)
+            if u > 0 or c.get("cbot_targets"):
+                labels.append(f"{cid} - {self._hd_ref(cid, c)} · {base} · {u:,.0f} MT unpriced")
+        return labels
+
+    def _targets_selected_cid(self):
+        lab = (self._tg_contract_var.get() or "").strip()
+        return lab.split(" - ", 1)[0].strip() if lab else ""
+
+    def refresh_cbot_targets(self):
+        if not hasattr(self, "_tg_all"):
+            return
+        try:
+            self._tg_contract_cb["values"] = self._targets_contract_labels()
+            tv = self._tg_all
+            for i in tv.get_children():
+                tv.delete(i)
+            for n, r in enumerate(self._cbot_target_rows()):
+                t = r["target"]
+                tv.insert("", "end", iid=f"{r['cid']}|{t.get('id')}|{n}", tags=(r["state"],), values=(
+                    r["contract"], r["commodity"],
+                    "Buy below" if str(t.get("direction")).upper() == "BUY_BELOW" else "Protect above",
+                    f"{to_float(t.get('level'), 0):,.2f}", f"{to_float(t.get('qty_mt'), 0):,.0f}",
+                    f"{r['price']:,.2f}" if r["price"] is not None else "—",
+                    f"{r['distance_pct']:+.1f}%" if r.get("distance_pct") is not None else "—",
+                    {"HIT": "● HIT — act now", "NEAR": "◐ Near", "WAITING": "○ Waiting",
+                     "DONE": "✔ Done", "NO_PRICE": "no live CBOT"}.get(r["state"], r["state"]),
+                    f"{r['saving_at_target']:+,.0f}" if r.get("saving_at_target") is not None else "—",
+                    t.get("note", "")))
+            self._targets_show_contract()
+        except Exception as e:
+            self._surface_error("refresh_cbot_targets", e)
+
+    def _targets_pick_from_overview(self):
+        sel = self._tg_all.selection()
+        if not sel:
+            return
+        cid = sel[0].split("|", 1)[0]
+        for lab in self._tg_contract_cb["values"]:
+            if lab.startswith(f"{cid} - "):
+                self._tg_contract_var.set(lab)
+                self._targets_show_contract()
+                break
+
+    def _targets_show_contract(self):
+        tv = self._tg_tree
+        for i in tv.get_children():
+            tv.delete(i)
+        cid = self._targets_selected_cid()
+        c = (self.state_obj.get("contracts", {}) or {}).get(cid)
+        if not c:
+            self._tg_info_var.set("Choose an open contract with unpriced quantity.")
+            return
+        base = (c.get("commodity") or "").upper().split("-")[0]
+        price, _s, asof, unit = self._hd_live_quote_details(base)
+        e = self._contract_savings_economics(cid, c)
+        self._tg_info_var.set(
+            f"Live CBOT {base}: {price:,.2f} {unit}" if price is not None else f"No live CBOT for {base}")
+        self._tg_info_var.set(self._tg_info_var.get()
+                              + f"  ·  premium {to_float(c.get('premium_cents'), 0) or 0:,.2f}"
+                              + f"  ·  unpriced {self._contract_unpriced_mt(c):,.0f} MT"
+                              + (f"  ·  saving today {e['sav_mt']:+,.0f} EGP/MT" if e.get("sav_mt") is not None else ""))
+        rows = {r["target"].get("id"): r for r in self._cbot_target_rows() if r["cid"] == cid}
+        for t in c.get("cbot_targets") or []:
+            r = rows.get(t.get("id"), {})
+            state = r.get("state", "DONE" if t.get("status") == "DONE" else "")
+            tv.insert("", "end", iid=str(t.get("id")), tags=(state,), values=(
+                t.get("id"), "Buy below" if str(t.get("direction")).upper() == "BUY_BELOW" else "Protect above",
+                f"{to_float(t.get('level'), 0):,.2f}", f"{to_float(t.get('qty_mt'), 0):,.0f}",
+                {"HIT": "● HIT — act now", "NEAR": "◐ Near", "WAITING": "○ Waiting", "DONE": "✔ Done"}.get(state, state),
+                f"{r['distance_pct']:+.1f}%" if r.get("distance_pct") is not None else "—",
+                f"{r['saving_at_target']:+,.0f}" if r.get("saving_at_target") is not None else "—",
+                t.get("note", "")))
+
+    def _targets_contract_or_warn(self):
+        cid = self._targets_selected_cid()
+        c = (self.state_obj.get("contracts", {}) or {}).get(cid)
+        if not c:
+            messagebox.showinfo(APP_NAME, "Choose a contract first.")
+            return None, None
+        return cid, c
+
+    def _targets_add(self, level=None, qty=None, direction=None, note=None, cid=None):
+        if cid is None:
+            cid, c = self._targets_contract_or_warn()
+        else:
+            c = (self.state_obj.get("contracts", {}) or {}).get(cid)
+        if not c:
+            return
+        lvl = to_float(level if level is not None else self._tg_level_var.get(), None)
+        q = to_float(qty if qty is not None else self._tg_qty_var.get(), None)
+        if lvl is None or lvl <= 0 or q is None or q <= 0:
+            messagebox.showerror(APP_NAME, "Enter a CBOT level and a quantity (both > 0).")
+            return
+        targets = c.setdefault("cbot_targets", [])
+        new_id = max([int(t.get("id", 0) or 0) for t in targets] + [0]) + 1
+        targets.append({"id": new_id, "level": lvl, "qty_mt": q,
+                        "direction": (direction or self._tg_dir_var.get() or "BUY_BELOW").upper(),
+                        "note": note if note is not None else self._tg_note_var.get().strip(),
+                        "status": "ACTIVE", "created": dt.date.today().isoformat()})
+        save_state(self.state_obj)
+        self._tg_level_var.set("")
+        self._tg_qty_var.set("")
+        self._tg_note_var.set("")
+        self.refresh_cbot_targets()
+
+    def _targets_selected_target(self):
+        cid, c = self._targets_contract_or_warn()
+        if not c:
+            return None, None, None
+        sel = self._tg_tree.selection()
+        if not sel:
+            messagebox.showinfo(APP_NAME, "Select a target in the lower table.")
+            return cid, c, None
+        t = next((t for t in c.get("cbot_targets") or [] if str(t.get("id")) == sel[0]), None)
+        return cid, c, t
+
+    def _targets_set_done(self, done):
+        cid, c, t = self._targets_selected_target()
+        if not t:
+            return
+        t["status"] = "DONE" if done else "ACTIVE"
+        t["done_date"] = dt.date.today().isoformat() if done else None
+        save_state(self.state_obj)
+        self.refresh_cbot_targets()
+
+    def _targets_delete(self):
+        cid, c, t = self._targets_selected_target()
+        if not t or not messagebox.askyesno(APP_NAME, "Delete this target?"):
+            return
+        c["cbot_targets"] = [x for x in c.get("cbot_targets") or [] if x is not t]
+        save_state(self.state_obj)
+        self.refresh_cbot_targets()
+
+    def _targets_suggest(self):
+        cid, c = self._targets_contract_or_warn()
+        if not c:
+            return
+        base = (c.get("commodity") or "").upper().split("-")[0]
+        price, *_ = self._hd_live_quote_details(base)
+        ladder = _core_suggest_ladder(price, self._contract_unpriced_mt(c))
+        if not ladder:
+            messagebox.showinfo(APP_NAME, "Needs a live CBOT quote and unpriced quantity.")
+            return
+        txt = "\n".join(f"  {'Buy below' if l['direction'] == 'BUY_BELOW' else 'Protect above'} "
+                        f"{l['level']:,.2f} — {l['qty_mt']:,.0f} MT" for l in ladder)
+        if messagebox.askyesno(APP_NAME, f"Add this ladder for {self._hd_ref(cid, c)}?\n\n{txt}\n\n"
+                                         "You can edit or delete any line afterwards."):
+            for l in ladder:
+                self._targets_add(l["level"], l["qty_mt"], l["direction"], l["note"], cid=cid)
+
+    def _targets_record_lot(self):
+        """Target hit and priced with the supplier: store it as a pricing lot
+        (today, target qty, contract premium, CBOT fixed) and close the target."""
+        cid, c, t = self._targets_selected_target()
+        if not t:
+            return
+        base = (c.get("commodity") or "").upper().split("-")[0]
+        live, *_ = self._hd_live_quote_details(base)
+        default = live if live is not None else to_float(t.get("level"), None)
+        fixed = simpledialog.askfloat(APP_NAME, f"CBOT actually fixed for {to_float(t.get('qty_mt'), 0):,.0f} MT "
+                                                f"({self._hd_ref(cid, c)}):", initialvalue=default, parent=self)
+        if fixed is None:
+            return
+        unpriced = self._contract_unpriced_mt(c)
+        qty = min(to_float(t.get("qty_mt"), 0.0) or 0.0, unpriced) if unpriced else (to_float(t.get("qty_mt"), 0.0) or 0.0)
+        lots = c.setdefault("pricing_lots", [])
+        lots.append({"date": dt.date.today().isoformat(), "qty_mt": qty,
+                     "premium_cents": to_float(c.get("premium_cents"), None), "cbot": fixed,
+                     "futures_month": c.get("futures_month", ""), "notes": f"from CBOT target #{t.get('id')}",
+                     "lot_id": f"lot_{len(lots) + 1}"})
+        t["status"] = "DONE"
+        t["done_date"] = dt.date.today().isoformat()
+        t["fixed_cbot"] = fixed
+        save_state(self.state_obj)
+        self.refresh_cbot_targets()
+        messagebox.showinfo(APP_NAME, f"Pricing lot recorded: {qty:,.0f} MT at CBOT {fixed:,.2f}.\n"
+                                      f"Unpriced now {self._contract_unpriced_mt(c):,.0f} MT.")
+
     def _build_slots(self):
         p = self.tab_slots
         p.columnconfigure(0, weight=1)
@@ -32220,6 +32563,10 @@ class App(tk.Tk):
             self.refresh_buying_plan()
         except Exception as e:
             log_exception(e, "refresh_all→refresh_buying_plan")
+        try:
+            self.refresh_cbot_targets()
+        except Exception as e:
+            log_exception(e, "refresh_all→refresh_cbot_targets")
         try:
             self.refresh_local_purchases()
         except Exception:

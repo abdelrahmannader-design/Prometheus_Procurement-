@@ -5,6 +5,8 @@ import math
 import unittest
 
 from prometheus_core import (
+    evaluate_target,
+    suggest_ladder,
     stock_cover_plan,
     compare_offers,
     cbot_history_scenarios,
@@ -172,6 +174,28 @@ class StockCoverPlanTests(unittest.TestCase):
 
     def test_no_rate(self):
         self.assertEqual(stock_cover_plan(1000, None)["status"], "NO_RATE")
+
+
+class CbotTargetTests(unittest.TestCase):
+    def test_buy_below_states(self):
+        t = {"level": 440, "direction": "BUY_BELOW"}
+        self.assertEqual(evaluate_target(t, 439)["state"], "HIT")
+        self.assertEqual(evaluate_target(t, 444)["state"], "NEAR")      # within 1%
+        self.assertEqual(evaluate_target(t, 460)["state"], "WAITING")
+        self.assertEqual(evaluate_target({**t, "status": "DONE"}, 439)["state"], "DONE")
+
+    def test_protect_above_is_hit_when_market_rises(self):
+        t = {"level": 470, "direction": "PROTECT_ABOVE"}
+        self.assertEqual(evaluate_target(t, 471)["state"], "HIT")
+        self.assertEqual(evaluate_target(t, 450)["state"], "WAITING")
+
+    def test_ladder_splits_quantity_exactly(self):
+        ladder = suggest_ladder(445.25, 25000)
+        buys = [l for l in ladder if l["direction"] == "BUY_BELOW"]
+        self.assertAlmostEqual(sum(l["qty_mt"] for l in buys), 25000)
+        self.assertTrue(all(l["level"] < 445.25 for l in buys))
+        self.assertTrue(any(l["direction"] == "PROTECT_ABOVE" and l["level"] > 445.25 for l in ladder))
+        self.assertEqual(suggest_ladder(None, 1000), [])
 
 
 class CbotHistoryScenarioTests(unittest.TestCase):

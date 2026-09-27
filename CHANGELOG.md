@@ -1,3 +1,10 @@
+# 2026-09-27 (g) — CBOT Targets for unpriced quantity
+
+- New Contracts → CBOT Targets tab: set BUY BELOW levels (price when CBOT falls there) and PROTECT ABOVE caps (price anyway if CBOT rises there), each with a quantity, on any open contract with unpriced tonnage. "Suggest a ladder" splits the unpriced MT into three levels (−2/−4/−6 % vs live) plus a +5 % cap.
+- Live status per target (HIT / Near within x % / Waiting / Done), distance to the level and the saving per MT the target would lock in (shared savings engine).
+- HIT → High alert, Near → Medium alert in Home's Action Centre and Exposure & Risk.
+- "Record as pricing lot" stores the fixed CBOT as a pricing lot (today, target qty, contract premium) and closes the target; the contract's unpriced quantity drops accordingly.
+
 # 2026-09-27 (f) — Stock Cover & Buying Plan
 
 - New Analysis tab: per commodity, stock today (FIFO) + open contracts arriving on their delivery dates − daily use, projected day by day over a horizon (default 180 days). Shows cover days, the date stock drops below the safety level (default 15 days of use), the run-out date, the buy-by date (safety date − import lead time, default 45 days) and the quantity to buy. Open contracts without a delivery date are listed, not counted.
