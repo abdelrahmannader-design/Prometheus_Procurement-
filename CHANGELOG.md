@@ -1,3 +1,10 @@
+# 2026-09-27 (c) — Procurement Monthly Report (PDF)
+
+- New one-click management report (Home → "Monthly Report (PDF)", Export Center, CEO email digest; included in the Executive Pack). Choose any of the last 24 months.
+- Page 1: KPI tiles (realized this month, YTD, open book expected saving, unpriced/FX-open MT), a written summary, a 12-month realized-savings chart, realized savings by commodity (month and YTD).
+- Page 2: best contracts closed and contracts that lost vs local, open position and risk by commodity, local purchases of the month with their verdicts, risk alerts, high-priority data gaps.
+- Every figure comes from the shared savings engine (realized = Savings tab, open = Home live).
+
 # 2026-09-27 (b) — Data Health: a fix list instead of an error count
 
 - The status-bar / top-bar chip now counts real data fixes (High + Medium) found by scanning contracts, local purchases and market data — no longer the raw error log (e.g. repeated failed FX fetches).

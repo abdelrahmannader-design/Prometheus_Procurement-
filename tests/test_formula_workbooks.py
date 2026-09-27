@@ -105,6 +105,18 @@ class FormulaWorkbookTests(unittest.TestCase):
             self.assertEqual(app._health_mark_priced(["C3"]), 1)
         self.assertIsNotNone(app._sv_contract_saving_row("C3", app.state_obj["contracts"]["C3"]))
 
+    def test_monthly_report_totals_come_from_savings_tab(self):
+        app = self._app()
+        app.state_obj["contracts"]["C1"]["closed_date"] = TODAY.replace(day=5).isoformat()
+        d = app._monthly_report_data(TODAY.year, TODAY.month, today=TODAY)
+        row = app._sv_contract_saving_row("C1", app.state_obj["contracts"]["C1"])
+        self.assertAlmostEqual(d["month_total"], row["total_sav"])
+        self.assertAlmostEqual(d["ytd_total"], row["total_sav"])
+        self.assertEqual(d["trend"][-1][0], TODAY.strftime("%Y-%m"))
+        self.assertEqual(len(d["trend"]), 12)
+        self.assertAlmostEqual(d["open_qty"], 2000)
+        self.assertTrue(any("Year to date" in line for line in d["summary"]))
+
     def test_portfolio_open_unpriced_shows_cif_of_the_moment(self):
         app = self._app()
         wb, _info = app._build_portfolio_workbook(today=TODAY)

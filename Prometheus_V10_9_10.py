@@ -9609,6 +9609,7 @@ class App(tk.Tk):
             hero.grid(row=0, column=0, sticky="ew", pady=(0, 12))
             self._hd_hero = hero
             hero.set_actions([
+                ("Monthly Report (PDF)", self._export_monthly_report_pdf),
                 ("CEO Brief (PDF)", self._export_ceo_brief_pdf),
                 ("Refresh everything", lambda: self.refresh_all(fetch_market=True)),
             ])
@@ -14944,10 +14945,381 @@ class App(tk.Tk):
     # ------------------------------------------------------------------
     # ANALYSIS TAB — Contract Pricing Intelligence (Enhanced)
     # ------------------------------------------------------------------
+    # ══════════════════════════════════════════════════════════════════
+    #  MONTHLY MANAGEMENT REPORT — one PDF for the head of the company:
+    #  realized savings (month / YTD / trend), open position and risk,
+    #  local purchase decisions, alerts and data health.  All figures come
+    #  from the shared savings engine, so they match every other screen.
+    # ══════════════════════════════════════════════════════════════════
+    def _monthly_report_data(self, year, month, today=None):
+        today = today or dt.date.today()
+        ym = f"{int(year):04d}-{int(month):02d}"
+        yr = ym[:4]
+        prev_y, prev_m = (int(year) - 1, 12) if int(month) == 1 else (int(year), int(month) - 1)
+        prev_ym = f"{prev_y:04d}-{prev_m:02d}"
+        contracts = self.state_obj.get("contracts", {}) or {}
+
+        rows, totals = self._sv_collect_savings_rows(f_status="Closed")
+        realized = [r for r in rows if r.get("is_realized") and r.get("total_sav") is not None]
+
+        def _period(r):
+            return (r.get("realized_date") or r.get("delivery_date") or "")[:7]
+
+        month_rows = [r for r in realized if _period(r) == ym]
+        ytd_rows = [r for r in realized if _period(r)[:4] == yr and _period(r) <= ym]
+        prev_total = sum(r["total_sav"] for r in realized if _period(r) == prev_ym)
+
+        def _by_comm(rs):
+            out = {}
+            for r in rs:
+                base = (r.get("commodity") or "").split("-")[0] or "OTHER"
+                a = out.setdefault(base, {"qty": 0.0, "total": 0.0, "n": 0})
+                a["qty"] += r.get("qty") or 0.0
+                a["total"] += r["total_sav"]
+                a["n"] += 1
+            return out
+
+        # 12-month trend ending at the report month
+        trend = []
+        y, m = int(year), int(month)
+        for _ in range(12):
+            key = f"{y:04d}-{m:02d}"
+            trend.append((key, sum(r["total_sav"] for r in realized if _period(r) == key)))
+            y, m = (y - 1, 12) if m == 1 else (y, m - 1)
+        trend.reverse()
+
+        top = sorted(month_rows, key=lambda r: r["total_sav"], reverse=True)[:5]
+        worst = [r for r in sorted(month_rows, key=lambda r: r["total_sav"]) if r["total_sav"] < 0][:3]
+
+        # Open position (live — same engine as Home Open MTM)
+        open_by = {}
+        for cid, c in contracts.items():
+            if not self._contract_is_open(c):
+                continue
+            base = (c.get("commodity") or "").split("-")[0] or "OTHER"
+            e = self._contract_savings_economics(cid, c)
+            qty = to_float(e.get("qty"), 0.0) or 0.0
+            try:
+                _pmt, unpriced = self._home_contract_pricing_split(c)
+            except Exception:
+                unpriced = 0.0 if self._contract_pricing_status(c) == "PRICED" else qty
+            fx_open = 0.0 if (to_float(c.get("form4_fx"), 0) or 0) > 0 else qty
+            a = open_by.setdefault(base, {"qty": 0.0, "unpriced": 0.0, "fx_open": 0.0,
+                                          "expected": 0.0, "n": 0})
+            a["qty"] += qty
+            a["unpriced"] += min(unpriced or 0.0, qty) if qty else (unpriced or 0.0)
+            a["fx_open"] += fx_open
+            a["expected"] += e.get("total_sav") or 0.0
+            a["n"] += 1
+
+        # Local purchases made in the month
+        lp_rows = []
+        fees_map = self._lp_import_fees_by_commodity()
+        for rec in self.state_obj.get("local_purchases", []) or []:
+            if str(rec.get("date") or "")[:7] != ym:
+                continue
+            ev = self._lp_evaluate(rec, fees_map)
+            lp_rows.append((rec, ev))
+
+        try:
+            alerts = self.evaluate_alerts() or []
+        except Exception:
+            alerts = []
+        order = {"High": 0, "Medium": 1, "Low": 2}
+        alerts = sorted(alerts, key=lambda a: order.get(a.get("priority"), 3))
+        try:
+            health = self._data_health_checks(today=today)
+        except Exception:
+            health = []
+
+        m_total = sum(r["total_sav"] for r in month_rows)
+        m_qty = sum(r.get("qty") or 0.0 for r in month_rows)
+        y_total = sum(r["total_sav"] for r in ytd_rows)
+        y_qty = sum(r.get("qty") or 0.0 for r in ytd_rows)
+        o_qty = sum(a["qty"] for a in open_by.values())
+        o_exp = sum(a["expected"] for a in open_by.values())
+        o_unp = sum(a["unpriced"] for a in open_by.values())
+        o_fx = sum(a["fx_open"] for a in open_by.values())
+        lp_sav = sum(ev["saving_vs_import_total_egp"] or 0.0 for _r, ev in lp_rows)
+        lp_poor = sum(1 for _r, ev in lp_rows if ev["overall_verdict"].startswith("✘"))
+
+        # Plain-language summary
+        def eg(v):
+            return f"EGP {v / 1e6:,.1f}M" if abs(v) >= 1e6 else f"EGP {v:,.0f}"
+        s = []
+        if month_rows:
+            chg = ""
+            if prev_total:
+                chg = (f", {'up' if m_total >= prev_total else 'down'} from {eg(prev_total)} in "
+                       f"{dt.date(prev_y, prev_m, 1).strftime('%B')}")
+            s.append(f"{len(month_rows)} contract(s) closed in {dt.date(int(year), int(month), 1).strftime('%B %Y')} "
+                     f"({m_qty:,.0f} MT), realizing {eg(m_total)} versus buying locally"
+                     f" ({m_total / m_qty:,.0f} EGP/MT){chg}." if m_qty else
+                     f"{len(month_rows)} contract(s) closed, realizing {eg(m_total)}{chg}.")
+        else:
+            s.append(f"No contracts closed in {dt.date(int(year), int(month), 1).strftime('%B %Y')}.")
+        s.append(f"Year to date: {eg(y_total)} realized on {y_qty:,.0f} MT.")
+        if o_qty:
+            s.append(f"Open book: {o_qty:,.0f} MT with an expected saving of {eg(o_exp)} at today's market; "
+                     f"{o_unp:,.0f} MT still unpriced (CBOT risk) and {o_fx:,.0f} MT without Form 4 FX (FX risk).")
+        if lp_rows:
+            s.append(f"{len(lp_rows)} local purchase(s) this month; versus importing on the same day they "
+                     f"{'saved' if lp_sav >= 0 else 'cost'} {eg(abs(lp_sav))}"
+                     + (f", {lp_poor} judged {'a poor decision' if lp_poor == 1 else 'poor decisions'}."
+                        if lp_poor else "."))
+        hi = sum(1 for h in health if h["severity"] == "High")
+        if hi:
+            s.append(f"{hi} high-priority data gap(s) may understate or hide results — see Data Health.")
+
+        return {
+            "ym": ym, "label": dt.date(int(year), int(month), 1).strftime("%B %Y"),
+            "month_total": m_total, "month_qty": m_qty, "prev_total": prev_total,
+            "ytd_total": y_total, "ytd_qty": y_qty,
+            "month_by_comm": _by_comm(month_rows), "ytd_by_comm": _by_comm(ytd_rows),
+            "trend": trend, "top": top, "worst": worst,
+            "open_by_comm": open_by, "open_qty": o_qty, "open_expected": o_exp,
+            "open_unpriced": o_unp, "open_fx_open": o_fx,
+            "local_purchases": lp_rows, "lp_saving": lp_sav, "lp_poor": lp_poor,
+            "alerts": alerts, "health": health, "summary": s,
+            "generated": now_ts(),
+        }
+
+    def _build_monthly_report_pdf(self, dest, year, month):
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.units import cm
+        from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer, Table,
+                                        TableStyle, Image, PageBreak, KeepTogether)
+        import tempfile
+
+        d = self._monthly_report_data(year, month)
+        navy = colors.HexColor("#1A2D40")
+        green = colors.HexColor("#1A7A1A")
+        red = colors.HexColor("#C0392B")
+        grey = colors.HexColor("#666666")
+        ss = getSampleStyleSheet()
+        h1 = ParagraphStyle("h1", parent=ss["Title"], textColor=navy, fontSize=18, alignment=0, spaceAfter=2)
+        h2 = ParagraphStyle("h2", parent=ss["Heading2"], textColor=navy, fontSize=11.5, spaceBefore=10, spaceAfter=4)
+        body = ParagraphStyle("b", parent=ss["BodyText"], fontSize=9, leading=12.5)
+        small = ParagraphStyle("s", parent=body, fontSize=7.5, textColor=grey, leading=10)
+
+        def money(v, signed=True):
+            if v is None:
+                return "—"
+            if abs(v) >= 1e6:
+                t = f"{abs(v) / 1e6:,.2f}M"
+            else:
+                t = f"{abs(v):,.0f}"
+            sign = ("+" if v > 0 else "−" if v < 0 else "") if signed else ("−" if v < 0 else "")
+            return f"{sign}{t}"
+
+        def table(rows, widths, num_cols=(), sign_cols=()):
+            t = Table(rows, colWidths=widths, repeatRows=1)
+            st = [("BACKGROUND", (0, 0), (-1, 0), navy), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                  ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"), ("FONTSIZE", (0, 0), (-1, -1), 8),
+                  ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#CCCCCC")),
+                  ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                  ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F4F7FB")])]
+            for ci in num_cols:
+                st.append(("ALIGN", (ci, 0), (ci, -1), "RIGHT"))
+            for ri, row in enumerate(rows[1:], start=1):
+                for ci in sign_cols:
+                    txt = str(row[ci])
+                    if txt.startswith("+"):
+                        st.append(("TEXTCOLOR", (ci, ri), (ci, ri), green))
+                    elif txt.startswith("−"):
+                        st.append(("TEXTCOLOR", (ci, ri), (ci, ri), red))
+            t.setStyle(TableStyle(st))
+            return t
+
+        story = [Paragraph(f"Procurement Monthly Report — {d['label']}", h1),
+                 Paragraph(f"Prometheus Procurement · generated {d['generated']} · figures in EGP · "
+                           "saving = local market price − import landed cost (positive = importing was cheaper)", small),
+                 Spacer(1, 8)]
+
+        # KPI tiles
+        kpis = [("Realized this month", money(d["month_total"]), f"{d['month_qty']:,.0f} MT closed"),
+                ("Realized year to date", money(d["ytd_total"]), f"{d['ytd_qty']:,.0f} MT"),
+                ("Open book expected", money(d["open_expected"]), f"{d['open_qty']:,.0f} MT at today's market"),
+                ("Unpriced / FX open", f"{d['open_unpriced']:,.0f} MT", f"{d['open_fx_open']:,.0f} MT without Form 4")]
+        tile = [[Paragraph(f"<font size=7.5 color='#666666'>{k}</font><br/>"
+                           f"<font size=14><b>{v}</b></font><br/><font size=7 color='#666666'>{sub}</font>", body)
+                 for k, v, sub in kpis]]
+        tt = Table(tile, colWidths=[4.3 * cm] * 4)
+        tt.setStyle(TableStyle([("BOX", (0, 0), (-1, -1), 0.5, navy), ("INNERGRID", (0, 0), (-1, -1), 0.5, navy),
+                                ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#EEF3FA")),
+                                ("TOPPADDING", (0, 0), (-1, -1), 6), ("BOTTOMPADDING", (0, 0), (-1, -1), 6)]))
+        story += [tt, Spacer(1, 8), Paragraph("Summary", h2)]
+        story += [Paragraph("• " + line, body) for line in d["summary"]]
+
+        # Trend chart
+        tmp_png = None
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+            labels = [dt.date(int(k[:4]), int(k[5:]), 1).strftime("%b %y") for k, _v in d["trend"]]
+            vals = [v / 1e6 for _k, v in d["trend"]]
+            fig, ax = plt.subplots(figsize=(7.2, 2.3), dpi=150)
+            ax.bar(labels, vals, color=["#1A7A1A" if v >= 0 else "#C0392B" for v in vals])
+            ax.axhline(0, color="#999999", linewidth=0.6)
+            ax.set_ylabel("EGP million", fontsize=7)
+            ax.set_title("Realized savings — last 12 months", fontsize=8.5, loc="left", color="#1A2D40")
+            ax.tick_params(labelsize=6.5)
+            for side in ("top", "right"):
+                ax.spines[side].set_visible(False)
+            fig.tight_layout()
+            tmp_png = tempfile.NamedTemporaryFile(suffix=".png", delete=False).name
+            fig.savefig(tmp_png)
+            plt.close(fig)
+            story += [Spacer(1, 6), Image(tmp_png, width=17.2 * cm, height=5.5 * cm)]
+        except Exception as e:
+            log_exception(e, "_build_monthly_report_pdf:chart")
+
+        # Realized by commodity
+        comms = sorted(set(d["month_by_comm"]) | set(d["ytd_by_comm"]))
+        rows = [["Commodity", "Month MT", "Month saving", "EGP/MT", "YTD MT", "YTD saving", "EGP/MT"]]
+        for cm_ in comms:
+            mo = d["month_by_comm"].get(cm_, {"qty": 0, "total": 0})
+            yt = d["ytd_by_comm"].get(cm_, {"qty": 0, "total": 0})
+            rows.append([cm_, f"{mo['qty']:,.0f}", money(mo["total"]),
+                         money(mo["total"] / mo["qty"]) if mo["qty"] else "—",
+                         f"{yt['qty']:,.0f}", money(yt["total"]),
+                         money(yt["total"] / yt["qty"]) if yt["qty"] else "—"])
+        if comms:
+            story += [Paragraph("Realized savings by commodity", h2),
+                      table(rows, [2.6 * cm, 2 * cm, 2.6 * cm, 2 * cm, 2.2 * cm, 2.8 * cm, 2 * cm],
+                            num_cols=range(1, 7), sign_cols=(2, 3, 5, 6))]
+
+        story.append(PageBreak())
+        # Contracts closed this month
+        if d["top"]:
+            rows = [["Contract", "Supplier", "Commodity", "MT", "EGP/MT", "Total"]]
+            for r in d["top"]:
+                rows.append([str(r["ref"])[:22], str(r["supplier"])[:18], r["commodity"],
+                             f"{r.get('qty') or 0:,.0f}", money(r["sav_mt"]), money(r["total_sav"])])
+            story += [Paragraph("Best contracts closed this month", h2),
+                      table(rows, [4 * cm, 3.6 * cm, 2.4 * cm, 2 * cm, 2.2 * cm, 2.8 * cm],
+                            num_cols=(3, 4, 5), sign_cols=(4, 5))]
+        if d["worst"]:
+            rows = [["Contract", "Supplier", "Commodity", "MT", "EGP/MT", "Total"]]
+            for r in d["worst"]:
+                rows.append([str(r["ref"])[:22], str(r["supplier"])[:18], r["commodity"],
+                             f"{r.get('qty') or 0:,.0f}", money(r["sav_mt"]), money(r["total_sav"])])
+            story += [Paragraph("Contracts that cost more than local", h2),
+                      table(rows, [4 * cm, 3.6 * cm, 2.4 * cm, 2 * cm, 2.2 * cm, 2.8 * cm],
+                            num_cols=(3, 4, 5), sign_cols=(4, 5))]
+
+        # Open position
+        if d["open_by_comm"]:
+            rows = [["Commodity", "Contracts", "Open MT", "Unpriced MT", "No Form 4 MT", "Expected saving"]]
+            for cm_, a in sorted(d["open_by_comm"].items()):
+                rows.append([cm_, str(a["n"]), f"{a['qty']:,.0f}", f"{a['unpriced']:,.0f}",
+                             f"{a['fx_open']:,.0f}", money(a["expected"])])
+            rows.append(["TOTAL", str(sum(a["n"] for a in d["open_by_comm"].values())),
+                         f"{d['open_qty']:,.0f}", f"{d['open_unpriced']:,.0f}",
+                         f"{d['open_fx_open']:,.0f}", money(d["open_expected"])])
+            story += [Paragraph("Open position and risk (today's market)", h2),
+                      table(rows, [3 * cm, 2 * cm, 2.6 * cm, 2.8 * cm, 2.8 * cm, 3.4 * cm],
+                            num_cols=range(1, 6), sign_cols=(5,))]
+
+        # Local purchases
+        if d["local_purchases"]:
+            rows = [["Date", "Supplier", "Commodity", "MT", "All-in", "Local − Import", "Verdict"]]
+            for rec, ev in d["local_purchases"]:
+                vi = ev["vs_import_egp_mt"]
+                rows.append([rec.get("date", ""), str(rec.get("supplier", ""))[:16], ev["commodity"],
+                             f"{ev['qty']:,.0f}", f"{ev['local_all_in'] or 0:,.0f}",
+                             (money(vi) if vi is not None else "—"),
+                             ev["overall_verdict"].replace("✔", "").replace("✘", "").replace("⚠", "").strip()])
+            story += [Paragraph("Local purchases this month (judged against import on the same day)", h2),
+                      table(rows, [2.2 * cm, 3.2 * cm, 2.2 * cm, 1.6 * cm, 2 * cm, 2.6 * cm, 3.6 * cm],
+                            num_cols=(3, 4, 5)),
+                      Paragraph("Local − Import: negative = buying locally was cheaper.", small)]
+
+        # Alerts and data health
+        if d["alerts"]:
+            story.append(Paragraph("Risk alerts", h2))
+            for a in d["alerts"][:8]:
+                col = "#C0392B" if a.get("priority") == "High" else "#B36000" if a.get("priority") == "Medium" else "#475569"
+                story.append(Paragraph(f"<font color='{col}'><b>[{a.get('priority', '')}]</b></font> "
+                                       f"{a.get('issue', '')} — <i>{a.get('action', '')}</i>", body))
+        hi = [h for h in d["health"] if h["severity"] == "High"]
+        story.append(Paragraph("Data health", h2))
+        if hi:
+            story.append(Paragraph(f"{len(hi)} high-priority data gap(s) — these can hide or change results:", body))
+            for h in hi[:8]:
+                story.append(Paragraph(f"• {h['record']}: {h['problem']} → {h['impact']}", body))
+        else:
+            story.append(Paragraph("No high-priority data gaps.", body))
+
+        def _footer(canvas, doc):
+            canvas.saveState()
+            canvas.setFont("Helvetica", 7)
+            canvas.setFillColor(grey)
+            canvas.drawString(1.8 * cm, 1.1 * cm, f"Procurement Monthly Report · {d['label']}")
+            canvas.drawRightString(A4[0] - 1.8 * cm, 1.1 * cm, f"Page {doc.page}")
+            canvas.restoreState()
+
+        doc = SimpleDocTemplate(dest, pagesize=A4, leftMargin=1.8 * cm, rightMargin=1.8 * cm,
+                                topMargin=1.5 * cm, bottomMargin=1.8 * cm,
+                                title=f"Procurement Monthly Report {d['label']}")
+        doc.build(story, onFirstPage=_footer, onLaterPages=_footer)
+        if tmp_png:
+            try:
+                os.remove(tmp_png)
+            except Exception:
+                pass
+        return d
+
+    def _export_monthly_report_pdf(self, year=None, month=None):
+        """Ask for the month (default: this month), then save the PDF."""
+        if not _need_reportlab():
+            return
+        try:
+            today = dt.date.today()
+            if year is None or month is None:
+                months = []
+                y, m = today.year, today.month
+                for _ in range(24):
+                    months.append(dt.date(y, m, 1).strftime("%Y-%m  (%B %Y)"))
+                    y, m = (y - 1, 12) if m == 1 else (y, m - 1)
+                dlg = tk.Toplevel(self)
+                dlg.title("Monthly report")
+                dlg.resizable(False, False)
+                ttk.Label(dlg, text="Report month:").grid(row=0, column=0, padx=12, pady=12, sticky="w")
+                var = tk.StringVar(value=months[0])
+                ttk.Combobox(dlg, textvariable=var, values=months, state="readonly", width=24
+                             ).grid(row=0, column=1, padx=(0, 12), pady=12)
+                chosen = {}
+
+                def _ok():
+                    chosen["v"] = var.get()[:7]
+                    dlg.destroy()
+                ttk.Button(dlg, text="Create report", command=_ok).grid(row=1, column=0, columnspan=2, pady=(0, 12))
+                dlg.grab_set()
+                self.wait_window(dlg)
+                if "v" not in chosen:
+                    return
+                year, month = int(chosen["v"][:4]), int(chosen["v"][5:7])
+            fp = filedialog.asksaveasfilename(
+                initialdir=get_default_export_dir(),
+                initialfile=f"Procurement_Monthly_Report_{year:04d}-{month:02d}.pdf",
+                defaultextension=".pdf", filetypes=[("PDF", "*.pdf")],
+                title="Save Monthly Report")
+            if not fp:
+                return
+            d = self._build_monthly_report_pdf(fp, year, month)
+            messagebox.showinfo(APP_NAME, f"Monthly report for {d['label']} saved.\n\n{fp}")
+        except Exception as e:
+            self._surface_error("_export_monthly_report_pdf", e, show=True)
+
     def _ceo_digest_export_catalog(self):
         """One selectable catalogue for the meaningful exports already available in Prometheus."""
         return [
             ('ceo_brief','CEO Commodity Decision Brief (PDF)','pdf','_export_ceo_brief_pdf',()),
+            ('monthly_report','Procurement Monthly Report (PDF)','pdf','_export_monthly_report_pdf',()),
             ('fifo','FIFO Inventory — Formula Workbook','xlsx','_export_fifo_inventory_excel',('ALL',)),
             ('scenario','Scenario Lab — Formula Workbook','xlsx','_scenario_export_excel',()),
             ('inventory_market','Inventory vs Market','xlsx','export_inventory_market_excel',()),
@@ -14987,6 +15359,8 @@ class App(tk.Tk):
         # Direct builders are deterministic and don't depend on save dialogs.
         try:
             if eid=='ceo_brief': self._build_ceo_brief_pdf(fp); return fp,None
+            if eid=='monthly_report':
+                _t=dt.date.today(); self._build_monthly_report_pdf(fp,_t.year,_t.month); return fp,None
             if eid=='fifo': self._build_fifo_inventory_workbook('ALL').save(fp); return fp,None
             if eid=='scenario':
                 self._scenario_recalc(); data=getattr(self,'_scenario_last_result',None)
@@ -15020,7 +15394,7 @@ class App(tk.Tk):
         bar=ttk.Frame(p); bar.grid(row=2,column=0,sticky='ew',pady=(0,8))
         ttk.Label(bar,text='Delivery').pack(side='left'); self.ceo_digest_mode_var=tk.StringVar(value=(self.state_obj.get('ui',{}) or {}).get('ceo_digest_delivery_mode','Grouped email'))
         ttk.Combobox(bar,textvariable=self.ceo_digest_mode_var,values=['Grouped email','Separate emails'],state='readonly',width=18).pack(side='left',padx=(5,12))
-        ttk.Button(bar,text='Executive Pack',command=lambda:self._ceo_digest_set_selection(['ceo_brief','fifo','inventory_market','scenario','finance'])).pack(side='left',padx=3)
+        ttk.Button(bar,text='Executive Pack',command=lambda:self._ceo_digest_set_selection(['monthly_report','ceo_brief','fifo','inventory_market','scenario','finance'])).pack(side='left',padx=3)
         ttk.Button(bar,text='Select All',command=lambda:self._ceo_digest_set_selection([x[0] for x in self._ceo_digest_export_catalog()])).pack(side='left',padx=3)
         ttk.Button(bar,text='Clear',command=lambda:self._ceo_digest_set_selection([])).pack(side='left',padx=3)
         ttk.Button(bar,text='Save Selection',command=self._ceo_digest_save_preferences).pack(side='right',padx=3)
