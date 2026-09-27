@@ -15346,18 +15346,21 @@ class App(tk.Tk):
         bg = d.get("budget") or {}
         brows = [r for r in bg.get("rows") or [] if r["budget_price"] is not None]
         if brows:
-            rows = [["Commodity", "Budget EGP/MT", "Bought MT", "Avg paid", "vs budget EGP", "Max for rest",
+            rows = [["Commodity", "Unit", "Budget /MT", "Bought MT", "Avg paid /MT", "vs budget", "Max /MT for rest",
                      "Forecast vs budget"]]
             for r in brows:
-                rows.append([r["commodity"], f"{r['budget_price']:,.0f}", f"{r['bought_qty']:,.0f}",
-                             f"{r['bought_avg']:,.0f}" if r["bought_avg"] is not None else "—",
-                             money(r["vs_budget_total"]), f"{r['headroom_price']:,.0f}" if r["headroom_price"] else "—",
+                pm = "{:,.2f}" if r["unit"][0] == "USD" else "{:,.0f}"
+                rows.append([r["commodity"], r["unit_label"], pm.format(r["budget_price"]), f"{r['bought_qty']:,.0f}",
+                             pm.format(r["bought_avg"]) if r["bought_avg"] is not None else "—",
+                             money(r["vs_budget_total"]),
+                             pm.format(r["headroom_price"]) if r["headroom_price"] else "—",
                              money(r["forecast_vs_budget_total"])])
             story += [Paragraph(f"Budget vs actual — {bg['label']}", h2),
-                      table(rows, [2.4 * cm, 2.4 * cm, 2.2 * cm, 2.2 * cm, 2.8 * cm, 2.4 * cm, 3 * cm],
-                            num_cols=range(1, 7), sign_cols=(4, 6)),
-                      Paragraph("vs budget = budget − actual: positive = cheaper than budget. Max for rest = highest "
-                                "EGP/MT the remaining budget MT can cost and still land on budget.", small)]
+                      table(rows, [2 * cm, 2.8 * cm, 1.9 * cm, 1.9 * cm, 2.1 * cm, 2.3 * cm, 2.2 * cm, 2.5 * cm],
+                            num_cols=range(2, 8), sign_cols=(5, 7)),
+                      Paragraph("vs budget = (budget − actual) × MT, in the budget's currency: positive = cheaper than "
+                                "budget. Max /MT for rest = highest price the remaining budget MT can cost and still "
+                                "land on budget.", small)]
 
         # Local purchases
         if d["local_purchases"]:
@@ -15801,10 +15804,35 @@ class App(tk.Tk):
                 return d, key
         return None, ""
 
+    _BUDGET_UNITS = {("USD", "CIF"): "USD/MT CIF", ("USD", "LANDED"): "USD/MT delivered",
+                     ("EGP", "LANDED"): "EGP/MT delivered", ("EGP", "CIF"): "EGP/MT CIF"}
+
+    @staticmethod
+    def _budget_unit_of(b):
+        cur = str((b or {}).get("currency") or "EGP").upper()   # budgets saved before currency existed were EGP
+        basis = str((b or {}).get("basis") or "LANDED").upper()
+        return (cur if cur in ("USD", "EGP") else "EGP", basis if basis in ("CIF", "LANDED") else "LANDED")
+
     def _budget_lines(self, start_month=None):
-        """Every purchase as {base, year, date, kind, source, ref, qty_mt, cost_egp_mt, note}."""
+        """Every purchase as {base, year, date, kind, source, ref, qty_mt, costs{(cur, basis)}, fx, note}.
+
+        costs holds the purchase's cost per MT on every basis a budget may use:
+          imports  CIF USD = contract CIF · landed EGP = CIF × FX + intake + clearance + freight
+          local    landed EGP = price + transport · CIF-equivalent EGP = landed − the commodity's
+                   average import fees (the CIF an import would have needed to cost the same)
+        USD figures use the contract FX (imports) or the FX on the purchase date (local)."""
         sm = start_month or self._budget_start_month()
         out = []
+
+        def costs(cif_usd, cif_egp, landed_egp, fx):
+            c = {("EGP", "LANDED"): landed_egp, ("EGP", "CIF"): cif_egp, ("USD", "CIF"): cif_usd,
+                 ("USD", "LANDED"): (landed_egp / fx) if (landed_egp is not None and fx) else None}
+            if c[("USD", "CIF")] is None and cif_egp is not None and fx:
+                c[("USD", "CIF")] = cif_egp / fx
+            if c[("EGP", "CIF")] is None and cif_usd is not None and fx:
+                c[("EGP", "CIF")] = cif_usd * fx
+            return c
+
         for cid, c in (self.state_obj.get("contracts", {}) or {}).items():
             base = (c.get("commodity") or "").upper().split("-")[0]
             d, dkey = self._budget_contract_date(c)
@@ -15819,11 +15847,14 @@ class App(tk.Tk):
             if is_open:
                 unp = self._contract_unpriced_mt(c)
                 note += (f" · {unp:,.0f} MT unpriced valued at live CBOT" if unp > 0 else " · fully priced")
+            fx = to_float(e.get("fx"), None)
             out.append({"base": base, "year": _core_budget_year_of(d, sm), "date": d,
                         "kind": "COMMITTED" if is_open else "ACTUAL",
                         "source": "Import (open)" if is_open else "Import (closed)",
-                        "ref": self._hd_ref(cid, c), "cid": cid, "qty_mt": qty,
-                        "cost_egp_mt": e.get("own_after"), "note": note})
+                        "ref": self._hd_ref(cid, c), "cid": cid, "qty_mt": qty, "fx": fx,
+                        "costs": costs(to_float(e.get("cif"), None), None, e.get("own_after"), fx),
+                        "note": note})
+        fees_map = self._lp_import_fees_by_commodity()
         for rec in self.state_obj.get("local_purchases", []) or []:
             base = (rec.get("commodity") or "").upper().split("-")[0]
             d = parse_date_flex(rec.get("date"))
@@ -15831,16 +15862,46 @@ class App(tk.Tk):
             trans = to_float(rec.get("transport_egp_mt"), None)
             if trans is None:
                 trans = get_default_local_transport_egp_mt(self.state_obj)
+            allin = (price + (trans or 0.0)) if price is not None else None
+            fx = self._lp_resolve_refs(rec).get("fx")
+            fees = (fees_map.get(base) or (None, 0))[0]
+            cif_egp = (allin - fees) if (allin is not None and fees is not None) else None
             out.append({"base": base, "year": _core_budget_year_of(d, sm), "date": d, "kind": "ACTUAL",
                         "source": "Local purchase", "ref": str(rec.get("supplier") or "local"),
-                        "qty_mt": to_float(rec.get("qty_mt"), 0.0) or 0.0,
-                        "cost_egp_mt": (price + (trans or 0.0)) if price is not None else None,
-                        "note": "price + transport"})
+                        "qty_mt": to_float(rec.get("qty_mt"), 0.0) or 0.0, "fx": fx,
+                        "costs": costs(None, cif_egp, allin, fx),
+                        "note": "price + transport" + (f" · FX {fx:,.2f} on the purchase date" if fx else
+                                                       " · no FX for the date (USD budgets can't use it)")
+                                + ("" if fees is not None else " · no import fees on file (CIF basis can't use it)")})
         return out
 
-    def _budget_market_price(self, base):
+    def _budget_market_price(self, base, unit=("EGP", "LANDED")):
+        """Today's price on the budget's basis → (price, source text)."""
+        fx = to_float((self.state_obj.get("market_data", {}).get("fx", {}) or {}).get("price"), None)
         pairs = self._local_price_map(base)
-        return (pairs[-1][1], pairs[-1][0].isoformat()) if pairs else (None, "")
+        local, ldate = (pairs[-1][1], pairs[-1][0].isoformat()) if pairs else (None, "")
+        cur, basis = unit
+        if basis == "CIF":
+            factor = cbot_conv_factor(base, strict=True)
+            if factor:
+                try:
+                    cbot = self._hd_live_quote_details(base)[0]
+                    prem = self._lp_premium_ref(base, dt.date.today().isoformat())[0]
+                except Exception:
+                    cbot = prem = None
+                if cbot is not None and prem is not None:
+                    cif = (cbot + prem) * factor
+                    return (cif if cur == "USD" else (cif * fx if fx else None)), "live CBOT + latest premium"
+            fees = (self._lp_import_fees_by_commodity().get(base) or (None, 0))[0]
+            if local is not None and fees is not None:
+                v = local - fees
+                return (v / fx if (cur == "USD" and fx) else (v if cur == "EGP" else None)), f"local {ldate} − import fees"
+            return None, ""
+        if local is None:
+            return None, ""
+        if cur == "USD":
+            return (local / fx if fx else None), f"local {ldate} ÷ today's FX"
+        return local, f"local {ldate}"
 
     def _budget_rows(self, year, today=None):
         """One row per commodity that has a budget or purchases in the year."""
@@ -15852,11 +15913,17 @@ class App(tk.Tk):
         bases = sorted(set(budgets) | {l["base"] for l in lines if l["base"]})
         rows = []
         for base in bases:
-            ls = [l for l in lines if l["base"] == base]
-            mkt, mkt_date = self._budget_market_price(base)
-            r = _core_budget_vs_actual(budgets.get(base), ls, mkt, today, sm, year)
-            r.update({"commodity": base, "year": year, "lines": ls, "market_date": mkt_date,
-                      "note": (budgets.get(base) or {}).get("note", "")})
+            b = budgets.get(base)
+            unit = self._budget_unit_of(b) if b else ("EGP", "LANDED")
+            ls = [dict(l, cost_egp_mt=l["costs"].get(unit), cost_mt=l["costs"].get(unit))
+                  for l in lines if l["base"] == base]
+            mkt, mkt_src = self._budget_market_price(base, unit)
+            bud = ({"price_mt": to_float(b.get("price_mt", b.get("price_egp_mt")), None),
+                    "qty_mt": b.get("qty_mt")} if b else None)
+            r = _core_budget_vs_actual(bud, ls, mkt, today, sm, year)
+            r.update({"commodity": base, "year": year, "lines": ls, "market_src": mkt_src,
+                      "unit": unit, "unit_label": self._BUDGET_UNITS[unit],
+                      "note": (b or {}).get("note", "")})
             rows.append(r)
         return rows
 
@@ -15875,15 +15942,16 @@ class App(tk.Tk):
                     out.append({"priority": "Medium",
                                 "issue": f"{r['commodity']} {label}: {what} is {abs(pct):.1f}% OVER budget "
                                          f"({(r['forecast_avg'] if what == 'forecast' else r['bought_avg']):,.0f} vs "
-                                         f"{r['budget_price']:,.0f} EGP/MT).",
+                                         f"{r['budget_price']:,.0f} {r['unit_label']}).",
                                 "action": "Review Analysis → Budget vs Actual; use targets or cheaper sources "
                                           "for the remaining quantity."})
                 hr, mkt = r.get("headroom_price"), r.get("market_price")
+                dp = 2 if r["unit"][0] == "USD" else 0
                 if hr is not None and mkt is not None and r.get("remaining_qty") and mkt > hr:
                     out.append({"priority": "High" if hr < r["budget_price"] * 0.9 else "Medium",
                                 "issue": f"{r['commodity']} {label}: the remaining {r['remaining_qty']:,.0f} MT must "
-                                         f"cost ≤ {hr:,.0f} EGP/MT to land on budget, but today's local market is "
-                                         f"{mkt:,.0f}.",
+                                         f"cost ≤ {hr:,.{dp}f} {r['unit_label']} to land on budget, but today's market is "
+                                         f"{mkt:,.{dp}f} ({r['market_src']}).",
                                 "action": "Buy the balance through import (CBOT targets) or tell management the "
                                           "budget will be exceeded."})
         except Exception as e:
@@ -15893,11 +15961,13 @@ class App(tk.Tk):
     def _build_budget_tab(self):
         p = self.tab_budget
         p.columnconfigure(0, weight=1)
-        ttk.Label(p, text="💰  Budget vs Actual — are we buying at or below the budgeted EGP/MT?",
+        ttk.Label(p, text="💰  Budget vs Actual — are we buying at or below the budgeted price per MT?",
                   font=("Segoe UI", 12, "bold")).grid(row=0, column=0, sticky="w")
-        ttk.Label(p, text="Actual = closed import contracts (landed cost: CIF × FX + intake + clearance + freight) "
-                          "and local purchases (price + transport). Committed = open contracts at today's market "
-                          "for any unpriced MT. Purchases count in the year of their delivery / storage date.",
+        ttk.Label(p, text="Each budget has its own unit: USD or EGP per MT, on CIF or delivered (all-in) basis. "
+                          "Actual = closed import contracts and local purchases; Committed = open contracts at today's "
+                          "market for any unpriced MT. CIF basis: imports use the contract CIF, local purchases their "
+                          "CIF-equivalent (local all-in − import fees). USD uses the contract FX / the FX on the "
+                          "purchase date. Purchases count in the year of their delivery / storage date.",
                   foreground="#475569", wraplength=1150).grid(row=1, column=0, sticky="w", pady=(2, 6))
         bar = ttk.Frame(p)
         bar.grid(row=2, column=0, sticky="w")
@@ -15918,14 +15988,14 @@ class App(tk.Tk):
         sf = ttk.LabelFrame(p, text="Summary per commodity", padding=6)
         sf.grid(row=3, column=0, sticky="ew", pady=(8, 0))
         sf.columnconfigure(0, weight=1)
-        cols = [("Commodity", 85), ("Status", 135), ("Budget /MT", 90), ("Budget MT", 90),
+        cols = [("Commodity", 85), ("Status", 135), ("Unit", 120), ("Budget /MT", 90), ("Budget MT", 90),
                 ("Bought MT", 90), ("% bought", 75), ("Avg paid /MT", 100), ("vs budget /MT", 105),
-                ("vs budget EGP", 125), ("Left to buy MT", 105), ("Max /MT for rest", 115),
-                ("Local today", 90), ("Forecast /MT", 95), ("Forecast vs budget", 135)]
+                ("vs budget total", 125), ("Left to buy MT", 105), ("Max /MT for rest", 115),
+                ("Market today", 95), ("Forecast /MT", 95), ("Forecast vs budget", 135)]
         self._bg_tree = ttk.Treeview(sf, columns=[c for c, _ in cols], show="headings", height=6)
         for c, w in cols:
             self._bg_tree.heading(c, text=c)
-            self._bg_tree.column(c, width=w, anchor="w" if c in ("Commodity", "Status") else "e")
+            self._bg_tree.column(c, width=w, anchor="w" if c in ("Commodity", "Status", "Unit") else "e")
         self._bg_tree.grid(row=0, column=0, sticky="ew")
         for tag, fg in (("OVER", "#b00020"), ("UNDER", "#1a7a1a"), ("ON_BUDGET", "#1a7a1a"),
                         ("NOTHING_BOUGHT", "#475569"), ("NO_BUDGET", "#94a3b8")):
@@ -15934,16 +16004,17 @@ class App(tk.Tk):
         self._bg_note_var = tk.StringVar(value="")
         ttk.Label(sf, textvariable=self._bg_note_var, foreground="#1a4fa0", wraplength=1150,
                   font=("Segoe UI", 9, "bold")).grid(row=1, column=0, sticky="w", pady=(4, 0))
-        ttk.Label(sf, text="vs budget = budget − actual: positive (green) = cheaper than budget, negative (red) = "
-                           "over budget.  Max price for rest = the most the remaining MT can cost and still land "
-                           "on budget.  Forecast = bought + remaining MT at today's local price.",
+        ttk.Label(sf, text="vs budget = budget − actual, in the budget's unit: positive (green) = cheaper than "
+                           "budget, negative (red) = over budget.  Max /MT for rest = the most the remaining MT can "
+                           "cost and still land on budget.  Market today: CIF basis = live CBOT + latest premium; "
+                           "delivered basis = today's local price.  Forecast = bought + remaining MT at market today.",
                   foreground="#64748b", wraplength=1150).grid(row=2, column=0, sticky="w")
 
         df = ttk.LabelFrame(p, text="Purchases in the year (select a commodity above)", padding=6)
         df.grid(row=4, column=0, sticky="ew", pady=(8, 0))
         df.columnconfigure(0, weight=1)
-        dcols = [("Date", 90), ("Source", 115), ("Reference", 170), ("MT", 85), ("Cost EGP/MT", 100),
-                 ("vs budget /MT", 100), ("vs budget EGP", 120), ("Note", 420)]
+        dcols = [("Date", 90), ("Source", 115), ("Reference", 170), ("MT", 85), ("Cost /MT", 95), ("FX", 70),
+                 ("vs budget /MT", 100), ("vs budget total", 120), ("Note", 400)]
         self._bg_detail = ttk.Treeview(df, columns=[c for c, _ in dcols], show="headings", height=8)
         for c, w in dcols:
             self._bg_detail.heading(c, text=c)
@@ -15953,32 +16024,42 @@ class App(tk.Tk):
         self._bg_detail.tag_configure("under", foreground="#1a7a1a")
         self._bg_detail.tag_configure("open", background="#f3f6fb")
 
-        ef = ttk.LabelFrame(p, text="Budgets — one line per commodity per year (EGP/MT delivered, all-in)", padding=6)
+        ef = ttk.LabelFrame(p, text="Budgets — one line per commodity per year", padding=6)
         ef.grid(row=5, column=0, sticky="ew", pady=(8, 0))
-        self._bg_vars = {k: tk.StringVar() for k in ("commodity", "year", "price", "qty", "note")}
-        fields = (("commodity", "Commodity", 10), ("year", "Year", 7), ("price", "Budget EGP/MT", 10),
-                  ("qty", "Budget MT (optional)", 10), ("note", "Note", 26))
+        self._bg_vars = {k: tk.StringVar() for k in ("commodity", "year", "currency", "basis", "price", "qty",
+                                                     "note")}
+        self._bg_vars["currency"].set("USD")
+        self._bg_vars["basis"].set("CIF")
+        fields = (("commodity", "Commodity", 10), ("year", "Year", 7), ("currency", "Currency", 6),
+                  ("basis", "Basis", 10), ("price", "Budget /MT", 10), ("qty", "Budget MT (optional)", 10),
+                  ("note", "Note", 22))
         for j, (k, lab, w) in enumerate(fields):
             ttk.Label(ef, text=lab).grid(row=0, column=2 * j, sticky="w")
             if k == "commodity":
                 self._bg_comm_cb = ttk.Combobox(ef, textvariable=self._bg_vars[k], width=w,
                                                 values=self._budget_commodities())
                 self._bg_comm_cb.grid(row=0, column=1, sticky="w", padx=(4, 10))
+            elif k in ("currency", "basis"):
+                ttk.Combobox(ef, textvariable=self._bg_vars[k], width=w, state="readonly",
+                             values=["USD", "EGP"] if k == "currency" else ["CIF", "DELIVERED"]
+                             ).grid(row=0, column=2 * j + 1, sticky="w", padx=(4, 10))
             else:
                 ttk.Entry(ef, textvariable=self._bg_vars[k], width=w).grid(row=0, column=2 * j + 1, sticky="w",
                                                                          padx=(4, 10))
-        ttk.Button(ef, text="💾 Save budget", command=self._budget_save).grid(row=0, column=10, padx=(0, 6))
-        ttk.Button(ef, text="🗑 Delete", command=self._budget_delete).grid(row=0, column=11)
-        bcols = [("Year", 110), ("Commodity", 90), ("Budget EGP/MT", 110), ("Budget MT", 100),
-                 ("Budget value EGP", 140), ("Note", 380)]
+        ttk.Button(ef, text="💾 Save budget", command=self._budget_save).grid(row=0, column=14, padx=(0, 6))
+        ttk.Button(ef, text="🗑 Delete", command=self._budget_delete).grid(row=0, column=15)
+        bcols = [("Year", 110), ("Commodity", 90), ("Unit", 130), ("Budget /MT", 100), ("Budget MT", 100),
+                 ("Budget value", 140), ("Note", 360)]
         self._bg_list = ttk.Treeview(ef, columns=[c for c, _ in bcols], show="headings", height=6)
         for c, w in bcols:
             self._bg_list.heading(c, text=c)
-            self._bg_list.column(c, width=w, anchor="w" if c in ("Year", "Commodity", "Note") else "e")
-        self._bg_list.grid(row=1, column=0, columnspan=12, sticky="ew", pady=(6, 0))
+            self._bg_list.column(c, width=w, anchor="w" if c in ("Year", "Commodity", "Unit", "Note") else "e")
+        self._bg_list.grid(row=1, column=0, columnspan=16, sticky="ew", pady=(6, 0))
         self._bg_list.bind("<<TreeviewSelect>>", lambda e: self._budget_pick())
         ttk.Label(ef, text="Year = the year the budget year STARTS in (e.g. 2026 = FY 2026/27 when the year starts "
-                           "in July). Enter this year's and next year's budget for each commodity.",
+                           "in July). CIF = the supplier price at the port (like the contract CIF); DELIVERED = "
+                           "all-in cost in the warehouse (CIF × FX + intake + clearance + freight, or local price + "
+                           "transport). Enter this year's and next year's budget for each commodity.",
                   foreground="#64748b", wraplength=1150).grid(row=2, column=0, columnspan=12, sticky="w",
                                                               pady=(4, 0))
         self._bg_rows = {}
@@ -16016,7 +16097,7 @@ class App(tk.Tk):
         price = to_float(v["price"].replace(",", ""), None)
         qty = to_float(v["qty"].replace(",", ""), None) if v["qty"] else None
         if not comm or year is None or not (1990 <= year <= 2100) or price is None or price <= 0:
-            messagebox.showerror(APP_NAME, "Enter a commodity, a year (e.g. 2026) and a budget price in EGP/MT.")
+            messagebox.showerror(APP_NAME, "Enter a commodity, a year (e.g. 2026) and a budget price per MT.")
             return
         if v["qty"] and (qty is None or qty < 0):
             messagebox.showerror(APP_NAME, "Budget MT must be a number (or leave it empty).")
@@ -16024,8 +16105,16 @@ class App(tk.Tk):
         bl = self._budgets()
         bl[:] = [b for b in bl if not (str(b.get("commodity")).upper() == comm and
                                        int(to_float(b.get("year"), 0) or 0) == int(year))]
-        bl.append({"commodity": comm, "year": int(year), "price_egp_mt": price, "qty_mt": qty,
-                   "note": v["note"], "updated": now_ts()})
+        cur = v["currency"] if v["currency"] in ("USD", "EGP") else "USD"
+        basis = "CIF" if v["basis"] == "CIF" else "LANDED"
+        if cur == "USD" and price > 5000 and not messagebox.askyesno(
+                APP_NAME, f"{price:,.0f} USD/MT looks like an EGP price. Save it as USD anyway?"):
+            return
+        if cur == "EGP" and price < 1500 and not messagebox.askyesno(
+                APP_NAME, f"{price:,.0f} EGP/MT looks like a USD price. Save it as EGP anyway?"):
+            return
+        bl.append({"commodity": comm, "year": int(year), "price_mt": price, "currency": cur, "basis": basis,
+                   "qty_mt": qty, "note": v["note"], "updated": now_ts()})
         save_state(self.state_obj)
         self.refresh_budget()
 
@@ -16050,7 +16139,10 @@ class App(tk.Tk):
         if b:
             self._bg_vars["commodity"].set(comm)
             self._bg_vars["year"].set(year)
-            self._bg_vars["price"].set(f"{to_float(b.get('price_egp_mt'), 0):g}")
+            self._bg_vars["price"].set(f"{to_float(b.get('price_mt', b.get('price_egp_mt')), 0):g}")
+            cur, basis = self._budget_unit_of(b)
+            self._bg_vars["currency"].set(cur)
+            self._bg_vars["basis"].set("CIF" if basis == "CIF" else "DELIVERED")
             q = to_float(b.get("qty_mt"), None)
             self._bg_vars["qty"].set("" if q is None else f"{q:g}")
             self._bg_vars["note"].set(b.get("note", ""))
@@ -16077,18 +16169,30 @@ class App(tk.Tk):
             def n(v, f="{:,.0f}"):
                 return "—" if v is None else f.format(v)
             for r in rows:
+                pm = "{:,.2f}" if r["unit"][0] == "USD" else "{:,.0f}"      # per-MT figures
+                pms = "{:+,.2f}" if r["unit"][0] == "USD" else "{:+,.0f}"
                 tv.insert("", "end", iid=r["commodity"], tags=(r["status"],), values=(
-                    r["commodity"], self._BUDGET_STATUS.get(r["status"], r["status"]), n(r["budget_price"]),
-                    n(r["budget_qty"]), n(r["bought_qty"]), n(r["pct_bought"], "{:.0f}%"), n(r["bought_avg"]),
-                    n(r["vs_budget_mt"], "{:+,.0f}"), n(r["vs_budget_total"], "{:+,.0f}"),
-                    n(r["remaining_qty"]), n(r["headroom_price"]), n(r["market_price"]), n(r["forecast_avg"]),
-                    n(r["forecast_vs_budget_total"], "{:+,.0f}")))
+                    r["commodity"], self._BUDGET_STATUS.get(r["status"], r["status"]),
+                    r["unit_label"] if r["budget_price"] is not None else "—", n(r["budget_price"], pm),
+                    n(r["budget_qty"]), n(r["bought_qty"]), n(r["pct_bought"], "{:.0f}%"), n(r["bought_avg"], pm),
+                    n(r["vs_budget_mt"], pms), n(r["vs_budget_total"], "{:+,.0f}"),
+                    n(r["remaining_qty"]), n(r["headroom_price"], pm), n(r["market_price"], pm),
+                    n(r["forecast_avg"], pm), n(r["forecast_vs_budget_total"], "{:+,.0f}")))
             if prev and prev[0] in self._bg_rows:
                 tv.selection_set(prev[0])
             elif rows:
                 tv.selection_set(rows[0]["commodity"])
-            tot_b = sum(r["vs_budget_total"] or 0.0 for r in rows)
-            tot_f = sum(r["forecast_vs_budget_total"] or 0.0 for r in rows)
+            def by_cur(key):
+                acc = {}
+                for r in rows:
+                    if r[key] is not None:
+                        acc[r["unit"][0]] = acc.get(r["unit"][0], 0.0) + r[key]
+                return acc
+
+            def cur_txt(acc):
+                return " and ".join(f"{'UNDER' if v >= 0 else 'OVER'} budget by {c} {abs(v):,.0f}"
+                                    for c, v in sorted(acc.items())) or "—"
+            tot_b, tot_f = by_cur("vs_budget_total"), by_cur("forecast_vs_budget_total")
             label = _core_budget_year_label(year, sm)
             s, e = _core_budget_year_range(year, sm)
             if not any(r["budget_price"] is not None for r in rows):
@@ -16097,9 +16201,7 @@ class App(tk.Tk):
                 el = rows[0].get("pct_year_elapsed")
                 self._bg_note_var.set(
                     f"{label} ({s:%d %b %Y} – {e:%d %b %Y}{f', {el:.0f}% elapsed' if el is not None else ''}): "
-                    f"bought so far is {'UNDER' if tot_b >= 0 else 'OVER'} budget by EGP {abs(tot_b):,.0f}"
-                    + (f"; full-year forecast {'UNDER' if tot_f >= 0 else 'OVER'} by EGP {abs(tot_f):,.0f}."
-                       if any(r["forecast_vs_budget_total"] is not None for r in rows) else "."))
+                    f"bought so far is {cur_txt(tot_b)}" + (f"; full-year forecast {cur_txt(tot_f)}." if tot_f else "."))
             gaps = [f"{r['commodity']} {r['no_cost_qty']:,.0f} MT" for r in rows if r.get("no_cost_qty")]
             if gaps:
                 self._bg_note_var.set(self._bg_note_var.get() + "   ⚠ Not counted (no cost yet — check CIF / FX / "
@@ -16110,10 +16212,13 @@ class App(tk.Tk):
             for b in sorted(self._budgets(), key=lambda b: (-int(to_float(b.get("year"), 0) or 0),
                                                               str(b.get("commodity")))):
                 y = int(to_float(b.get("year"), 0) or 0)
-                pr, q = to_float(b.get("price_egp_mt"), None), to_float(b.get("qty_mt"), None)
+                pr = to_float(b.get("price_mt", b.get("price_egp_mt")), None)
+                q = to_float(b.get("qty_mt"), None)
+                unit = self._budget_unit_of(b)
                 bl.insert("", "end", iid=f"{str(b.get('commodity')).upper()}|{y}", values=(
-                    _core_budget_year_label(y, sm), b.get("commodity"), n(pr), n(q),
-                    n(pr * q if (pr is not None and q) else None), b.get("note", "")))
+                    _core_budget_year_label(y, sm), b.get("commodity"), self._BUDGET_UNITS[unit],
+                    n(pr, "{:,.2f}" if unit[0] == "USD" else "{:,.0f}"), n(q),
+                    (f"{unit[0]} " + n(pr * q)) if (pr is not None and q) else "—", b.get("note", "")))
         except Exception as e:
             self._surface_error("refresh_budget", e)
 
@@ -16135,8 +16240,9 @@ class App(tk.Tk):
                 tags.append("open")
             tv.insert("", "end", iid=str(i), tags=tuple(tags), values=(
                 l["date"].isoformat() if l["date"] else "—", l["source"], l["ref"], f"{l['qty_mt']:,.0f}",
-                f"{cost:,.0f}" if cost is not None else "no cost yet",
-                f"{vs:+,.0f}" if vs is not None else "—",
+                (f"{cost:,.2f}" if r["unit"][0] == "USD" else f"{cost:,.0f}") if cost is not None else "no cost yet",
+                f"{l['fx']:,.2f}" if l.get("fx") else "—",
+                (f"{vs:+,.2f}" if r["unit"][0] == "USD" else f"{vs:+,.0f}") if vs is not None else "—",
                 f"{vs * l['qty_mt']:+,.0f}" if vs is not None else "—", l["note"]))
 
     def _budget_export(self):
@@ -16172,8 +16278,8 @@ class App(tk.Tk):
         kit.title(wd, f"Purchases counted in {label}", "Yellow = input (edit to test). vs budget = budget − cost "
                                                       "(positive = cheaper than budget).", 10)
         kit.header(wd, 4, [("Commodity", 11), ("Date", 11), ("Type", 10), ("Source", 15), ("Reference", 22),
-                           ("MT", 10), ("Cost EGP/MT", 12), ("Value EGP", 15), ("vs budget /MT", 13),
-                           ("Note", 50)])
+                           ("MT", 10), ("Cost /MT", 12), ("Value", 15), ("vs budget /MT", 13),
+                           ("Note", 50), ("Unit", 18), ("FX", 9)])
         x = 5
         first_line = x
         for r in rows:
@@ -16189,6 +16295,11 @@ class App(tk.Tk):
                 kit.put(wd, x, 9, f"=IF(ISNUMBER(G{x}),IFERROR(INDEX('Budget vs Actual'!$B:$B,"
                                   f"MATCH(A{x},'Budget vs Actual'!$A:$A,0))-G{x},\"\"),\"\")", "+#,##0;-#,##0")
                 kit.put(wd, x, 10, l["note"], kind="note")
+                kit.put(wd, x, 11, r["unit_label"], kind="text")
+                kit.put(wd, x, 12, l.get("fx"), "#,##0.00", kind="text")
+                if r["unit"][0] == "USD":
+                    wd.cell(x, 7).number_format = "#,##0.00"
+                    wd.cell(x, 9).number_format = "+#,##0.00;-#,##0.00"
                 x += 1
         last_line = max(first_line, x - 1)
         kit.sign_colours(wd, f"I{first_line}:I{last_line}")
@@ -16196,11 +16307,12 @@ class App(tk.Tk):
         kit.title(ws, f"Budget vs Actual — {label}",
                   "Actual = closed imports (landed CIF×FX+fees) + local purchases (price+transport). Committed = "
                   "open imports at today's market. vs budget = budget − actual (positive = under budget).", 16)
-        kit.header(ws, 4, [("Commodity", 11), ("Budget EGP/MT", 12), ("Budget MT", 11), ("Budget value", 15),
+        kit.header(ws, 4, [("Commodity", 11), ("Budget /MT", 12), ("Budget MT", 11), ("Budget value", 15),
                            ("Actual MT", 11), ("Committed MT", 12), ("Bought MT", 11), ("Bought value", 15),
-                           ("Avg paid EGP/MT", 13), ("vs budget /MT", 12), ("vs budget EGP", 15),
-                           ("Remaining MT", 12), ("Max price for rest", 14), ("Today's local EGP/MT", 14),
-                           ("Forecast avg", 12), ("Forecast vs budget EGP", 17)])
+                           ("Avg paid /MT", 13), ("vs budget /MT", 12), ("vs budget total", 15),
+                           ("Remaining MT", 12), ("Max price for rest", 14), ("Market today /MT", 14),
+                           ("Forecast avg", 12), ("Forecast vs budget", 17), ("Unit", 18),
+                           ("Market source", 30)])
         rng = lambda col: f"Purchases!${col}${first_line}:${col}${last_line}"
         y = 5
         for r in rows:
@@ -16222,6 +16334,12 @@ class App(tk.Tk):
                     "#,##0")
             kit.put(ws, y, 16, f'=IF(AND(ISNUMBER(O{y}),ISNUMBER(B{y})),(B{y}-O{y})*(G{y}+L{y}),"")',
                     "+#,##0;-#,##0")
+            kit.put(ws, y, 17, r["unit_label"], kind="text")
+            kit.put(ws, y, 18, r.get("market_src", ""), kind="note")
+            if r["unit"][0] == "USD":
+                for col in (2, 9, 13, 14, 15):
+                    ws.cell(y, col).number_format = "#,##0.00"
+                ws.cell(y, 10).number_format = "+#,##0.00;-#,##0.00"
             y += 1
         if rows:
             kit.put(ws, y, 1, "TOTAL", kind="text", bold=True)
@@ -16231,10 +16349,14 @@ class App(tk.Tk):
             kit.sign_colours(ws, f"J5:K{y}")
             kit.sign_colours(ws, f"P5:P{y}")
         kit.notes(ws, y + 2, [
-            "How to read: vs budget = budget − average paid. Green (positive) = bought cheaper than budget; red = over.",
+            "How to read: vs budget = budget − average paid, in each commodity's budget unit (column Q). "
+            "Green (positive) = bought cheaper than budget; red = over. Totals in row TOTAL only add up when all "
+            "commodities use the same currency.",
             "Max price for rest = (budget value − value already bought) ÷ remaining MT: the most the rest can cost "
             "and still land on budget.",
-            "Forecast = bought value + remaining MT × today's local price. Edit the yellow cells to test other prices.",
+            "Forecast = bought value + remaining MT × market today (CIF basis: live CBOT + latest premium; delivered: "
+            "today's local price). CIF basis for local purchases = local all-in − average import fees. Edit the yellow "
+            "cells to test other prices.",
             f"Budget year {label}: purchases are counted by delivery / storage date (local purchases by purchase date).",
         ], 16)
         return wb

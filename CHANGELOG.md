@@ -1,3 +1,10 @@
+# 2026-09-27 (k) — Budget vs Actual in USD/MT (CIF or delivered)
+
+- Each budget line now has a **currency (USD / EGP)** and a **basis (CIF / DELIVERED)**; default USD CIF. Budgets saved earlier stay EGP delivered.
+- Costs are compared on the same basis: imports use the contract CIF (or landed ÷ contract FX); local purchases use price + transport, or their CIF-equivalent (minus average import fees), converted with the FX on the purchase date.
+- "Market today" follows the basis: live CBOT + latest premium for CIF, today's local price for delivered.
+- USD figures show 2 decimals; unit column in the app, Excel and Monthly Report; a warning if a USD price looks like EGP (or the reverse).
+
 # 2026-09-27 (j) — Budget vs Actual
 
 - New Analysis → Budget vs Actual tab. Enter a budget EGP/MT (and optional budget MT) per commodity for this year and next; calendar or fiscal year ("Year starts in").

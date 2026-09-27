@@ -44,6 +44,13 @@ class BudgetVsActualTests(unittest.TestCase):
         self.assertIsNone(r["headroom_price"])
         self.assertEqual(r["status"], "ON_BUDGET")               # +1 % is within ±2 %
 
+    def test_currency_neutral_keys(self):
+        usd = budget_vs_actual({"price_mt": 230.0, "qty_mt": 1000},
+                               [{"kind": "ACTUAL", "qty_mt": 400, "cost_mt": 220.0}], 240.0)
+        self.assertAlmostEqual(usd["vs_budget_mt"], 10.0)
+        self.assertAlmostEqual(usd["headroom_price"], (230000 - 88000) / 600)
+        self.assertAlmostEqual(usd["forecast_avg"], (88000 + 600 * 240) / 1000)
+
     def test_statuses(self):
         self.assertEqual(budget_vs_actual(None, self.LINES)["status"], "NO_BUDGET")
         self.assertEqual(budget_vs_actual({"price_egp_mt": 20000}, [])["status"], "NOTHING_BOUGHT")

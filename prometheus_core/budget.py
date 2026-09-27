@@ -1,6 +1,6 @@
 """Budget vs actual purchase cost per commodity and budget year.
 
-A budget is an EGP/MT price (all-in, delivered) and optionally a quantity.
+A budget is a price per MT (USD or EGP, CIF or delivered) and optionally a quantity.
 Purchases are split into ACTUAL (closed import contracts and local
 purchases) and COMMITTED (open import contracts, valued at today's market
 for any unpriced part).  With a budget quantity the remaining tonnage is
@@ -40,25 +40,29 @@ def budget_year_range(year: int, start_month: int = 1) -> tuple[dt.date, dt.date
 
 
 def budget_vs_actual(budget: dict[str, Any] | None, lines: list[dict[str, Any]],
-                     market_egp_mt: Any = None, today: dt.date | None = None,
+                     market_mt: Any = None, today: dt.date | None = None,
                      start_month: int = 1, year: int | None = None) -> dict[str, Any]:
-    """budget: {price_egp_mt, qty_mt}; lines: [{kind: ACTUAL|COMMITTED, qty_mt, cost_egp_mt}].
+    """budget: {price_mt, qty_mt}; lines: [{kind: ACTUAL|COMMITTED, qty_mt, cost_mt}].
+    Currency-neutral: budget and costs just have to be in the same unit (e.g. USD/MT CIF).
+    (price_egp_mt / cost_egp_mt are accepted as older names.)
     Returns totals, averages and "vs budget" figures = budget − actual
     (positive = UNDER budget = good, negative = over budget)."""
-    b_price = to_float((budget or {}).get("price_egp_mt"), None)
-    b_qty = to_float((budget or {}).get("qty_mt"), None)
-    mkt = to_float(market_egp_mt, None)
+    b = budget or {}
+    b_price = to_float(b.get("price_mt", b.get("price_egp_mt")), None)
+    b_qty = to_float(b.get("qty_mt"), None)
+    lines = [dict(l, cost_mt=l.get("cost_mt", l.get("cost_egp_mt"))) for l in lines]
+    mkt = to_float(market_mt, None)
 
     def agg(kind):
-        ls = [l for l in lines if l.get("kind") == kind and to_float(l.get("cost_egp_mt"), None) is not None]
+        ls = [l for l in lines if l.get("kind") == kind and to_float(l.get("cost_mt"), None) is not None]
         q = sum(to_float(l.get("qty_mt"), 0.0) or 0.0 for l in ls)
-        v = sum((to_float(l.get("qty_mt"), 0.0) or 0.0) * to_float(l.get("cost_egp_mt"), 0.0) for l in ls)
+        v = sum((to_float(l.get("qty_mt"), 0.0) or 0.0) * to_float(l.get("cost_mt"), 0.0) for l in ls)
         return q, v
 
     a_qty, a_val = agg("ACTUAL")
     c_qty, c_val = agg("COMMITTED")
     missing = sum(to_float(l.get("qty_mt"), 0.0) or 0.0 for l in lines
-                  if to_float(l.get("cost_egp_mt"), None) is None)
+                  if to_float(l.get("cost_mt"), None) is None)
     t_qty, t_val = a_qty + c_qty, a_val + c_val
 
     def avg(v, q):
