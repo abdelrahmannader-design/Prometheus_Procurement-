@@ -68,6 +68,21 @@ from prometheus_core import (
     evaluate_target as _core_evaluate_target,
     suggest_ladder as _core_suggest_ladder,
 )
+from prometheus_core.market_signals import (
+    CFTC_CODES as _core_CFTC_CODES,
+    parse_cot_rows as _core_parse_cot_rows,
+    cot_signal as _core_cot_signal,
+    parse_nass_condition as _core_parse_nass_condition,
+    crop_condition_signal as _core_crop_condition_signal,
+    wasde_signal as _core_wasde_signal,
+    deferred_contract as _core_deferred_contract,
+    curve_signal as _core_curve_signal,
+    trend_signal as _core_trend_signal,
+    seasonality as _core_seasonality,
+    seasonal_signal as _core_seasonal_signal,
+    combine_signals as _core_combine_signals,
+    report_calendar as _core_report_calendar,
+)
 
 # ══════════════════════════════════════════════════════════════════════
 # V8 DESIGN TOKENS — single source of truth for typography & palette.
@@ -836,6 +851,59 @@ def fetch_yahoo_futures_quote(symbol, timeout=8):
 def fetch_yahoo_fx_rate(timeout=8):
     """Fetch delayed USD/EGP from Yahoo Finance using EGP=X."""
     return fetch_yahoo_futures_quote(YAHOO_FX_SYMBOL, timeout=timeout)
+
+
+# ── Market signals sources (public, no login except the free NASS key) ──
+CFTC_COT_URL = "https://publicreporting.cftc.gov/resource/72hh-3qpy.json"
+NASS_API_URL = "https://quickstats.nass.usda.gov/api/api_GET/"
+NASS_COMMODITY = {"CORN": "CORN", "SOYBEAN": "SOYBEANS", "SBM": "SOYBEANS", "WHEAT": "WHEAT"}
+MARKET_SIGNAL_COMMODITIES = ["CORN", "SOYBEAN", "SBM"]
+MARKET_SOURCE_LINKS = {
+    "WASDE (USDA)": "https://www.usda.gov/oce/commodity/wasde",
+    "Crop Progress (USDA NASS)": "https://www.nass.usda.gov/Publications/National_Crop_Progress/",
+    "Commitments of Traders (CFTC)": "https://www.cftc.gov/MarketReports/CommitmentsofTraders/index.htm",
+    "NASS free API key": "https://quickstats.nass.usda.gov/api",
+}
+
+
+def _http_get_json(url, timeout=15):
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8", errors="replace"))
+
+
+def fetch_cftc_cot(commodity, weeks=160, timeout=15):
+    """Managed-money positions for one CBOT market from the CFTC public
+    reporting API (Disaggregated, futures only).  No key needed."""
+    code = _core_CFTC_CODES.get((commodity or "").upper())
+    if not code:
+        raise RuntimeError(f"No CFTC code for {commodity}")
+    q = urllib.parse.urlencode({"cftc_contract_market_code": code,
+                                "$order": "report_date_as_yyyy_mm_dd DESC", "$limit": int(weeks)})
+    rows = _core_parse_cot_rows(_http_get_json(f"{CFTC_COT_URL}?{q}", timeout=timeout))
+    if not rows:
+        raise RuntimeError("CFTC returned no managed-money rows")
+    return rows
+
+
+def fetch_nass_condition(commodity, api_key, year, timeout=20):
+    """Weekly national good/excellent % for this year and last year."""
+    name = NASS_COMMODITY.get((commodity or "").upper())
+    if not name:
+        raise RuntimeError(f"No USDA crop for {commodity}")
+    q = urllib.parse.urlencode({
+        "key": api_key, "source_desc": "SURVEY", "sector_desc": "CROPS", "commodity_desc": name,
+        "statisticcat_desc": "CONDITION", "agg_level_desc": "NATIONAL", "freq_desc": "WEEKLY",
+        "year__GE": int(year) - 1, "format": "JSON"})
+    payload = _http_get_json(f"{NASS_API_URL}?{q}", timeout=timeout)
+    if isinstance(payload, dict) and payload.get("error"):
+        raise RuntimeError(str(payload.get("error")))
+    data = (payload or {}).get("data") or []
+    by_year = {}
+    for r in data:
+        by_year.setdefault(str(r.get("year") or ""), []).append(r)
+    return (_core_parse_nass_condition(by_year.get(str(year), [])),
+            _core_parse_nass_condition(by_year.get(str(int(year) - 1), [])))
 
 
 
@@ -15794,9 +15862,9 @@ class App(tk.Tk):
         self._an_nb=ttk.Notebook(p); self._an_nb.grid(row=1,column=0,sticky='nsew')
         self.tab_performance=ttk.Frame(self._an_nb,padding=10); self.tab_an_contract=ttk.Frame(self._an_nb,padding=6); self.tab_an_supplier=ttk.Frame(self._an_nb,padding=6); self.tab_an_season=ttk.Frame(self._an_nb,padding=6)
         self.tab_origin_cmp_outer=ttk.Frame(self._an_nb); self.tab_savings_outer=ttk.Frame(self._an_nb); self.tab_origin_cmp=self._make_scrollable_tab(self.tab_origin_cmp_outer,padding=10); self.tab_savings=self._make_scrollable_tab(self.tab_savings_outer,padding=10)
-        self.tab_basis=ttk.Frame(self._an_nb,padding=10); self.tab_exposure=ttk.Frame(self._an_nb,padding=10); self.tab_inventory_market=ttk.Frame(self._an_nb,padding=10); self.tab_scenario=ttk.Frame(self._an_nb,padding=10); self.tab_buying_plan=ttk.Frame(self._an_nb,padding=10); self.tab_ceo_digest=ttk.Frame(self._an_nb,padding=10)
-        for tab,label in [(self.tab_performance,'Contract Performance'),(self.tab_an_contract,'Contract Detail'),(self.tab_an_supplier,'Supplier Scorecard'),(self.tab_an_season,'Seasonality'),(self.tab_origin_cmp_outer,'Origin Compare'),(self.tab_savings_outer,'Savings Tracker'),(self.tab_basis,'Basis Tracker'),(self.tab_exposure,'Exposure & Risk'),(self.tab_inventory_market,'Inventory vs Market'),(self.tab_scenario,'Scenario Lab'),(self.tab_buying_plan,'Stock Cover & Buying Plan'),(self.tab_ceo_digest,'CEO Email Digest')]: self._an_nb.add(tab,text=label)
-        self._build_performance(); self._build_an_contract_subtab(); self._build_an_supplier_subtab(); self._build_an_season_subtab(); self._build_origin_compare(); self._build_savings_tracker(); self._build_basis_tracker(); self._build_exposure_risk(); self._build_inventory_market(); self._build_scenario_lab(); self._build_buying_plan(); self._build_ceo_digest_tab()
+        self.tab_basis=ttk.Frame(self._an_nb,padding=10); self.tab_exposure=ttk.Frame(self._an_nb,padding=10); self.tab_inventory_market=ttk.Frame(self._an_nb,padding=10); self.tab_scenario=ttk.Frame(self._an_nb,padding=10); self.tab_buying_plan=ttk.Frame(self._an_nb,padding=10); self.tab_market_signals=ttk.Frame(self._an_nb,padding=10); self.tab_ceo_digest=ttk.Frame(self._an_nb,padding=10)
+        for tab,label in [(self.tab_performance,'Contract Performance'),(self.tab_an_contract,'Contract Detail'),(self.tab_an_supplier,'Supplier Scorecard'),(self.tab_an_season,'Seasonality'),(self.tab_origin_cmp_outer,'Origin Compare'),(self.tab_savings_outer,'Savings Tracker'),(self.tab_basis,'Basis Tracker'),(self.tab_exposure,'Exposure & Risk'),(self.tab_inventory_market,'Inventory vs Market'),(self.tab_scenario,'Scenario Lab'),(self.tab_buying_plan,'Stock Cover & Buying Plan'),(self.tab_market_signals,'Market Signals'),(self.tab_ceo_digest,'CEO Email Digest')]: self._an_nb.add(tab,text=label)
+        self._build_performance(); self._build_an_contract_subtab(); self._build_an_supplier_subtab(); self._build_an_season_subtab(); self._build_origin_compare(); self._build_savings_tracker(); self._build_basis_tracker(); self._build_exposure_risk(); self._build_inventory_market(); self._build_scenario_lab(); self._build_buying_plan(); self._build_market_signals(); self._build_ceo_digest_tab()
 
     def _inventory_market_rows(self, commodity="ALL", status="ALL"):
         """Build auditable remaining FIFO inventory vs today's local/CBOT.
@@ -29525,6 +29593,9 @@ class App(tk.Tk):
 
         # 7. CBOT targets hit / near on unpriced quantity.
         alerts.extend(self._cbot_target_alerts())
+
+        # 8. Big USDA/CFTC report tomorrow + a strong UP bias, while MT is unpriced.
+        alerts.extend(self._market_signal_alerts())
         return alerts
 
     def refresh_risk_alerts(self):
@@ -31104,6 +31175,558 @@ class App(tk.Tk):
         except Exception:
             return 0.0 if self._contract_pricing_status(c) == "PRICED" else (self._hd_contract_qty(c) or 0.0)
 
+    # ══════════════════════════════════════════════════════════════════
+    # MARKET SIGNALS — which way is the CBOT risk leaning, and why?
+    # Sources: CFTC fund positions, USDA crop condition, USDA WASDE
+    # (entered by hand), the futures curve, and our own CBOT history.
+    # The bias is a transparent vote count — not a price forecast.
+    # ══════════════════════════════════════════════════════════════════
+    def _ms_state(self):
+        ms = self.state_obj.setdefault("market_signals", {})
+        for k in ("cot", "nass", "wasde", "curve", "errors"):
+            if not isinstance(ms.get(k), dict):
+                ms[k] = {}
+        for k in ("calendar_custom", "calendar_hidden"):
+            if not isinstance(ms.get(k), list):
+                ms[k] = []
+        return ms
+
+    def _ms_unpriced_by_commodity(self):
+        out = {}
+        for _cid, c in (self.state_obj.get("contracts", {}) or {}).items():
+            if not self._contract_is_open(c):
+                continue
+            base = (c.get("commodity") or "").upper().split("-")[0]
+            if not cbot_conv_factor(base, strict=True):
+                continue
+            out[base] = out.get(base, 0.0) + self._contract_unpriced_mt(c)
+        return out
+
+    def _market_signals_for(self, commodity, today=None):
+        """Combine every signal we have (cached — no network) for one board."""
+        today = today or dt.date.today()
+        base = (commodity or "").upper()
+        ms = self._ms_state()
+        sigs, missing = [], []
+        cot = (ms["cot"].get(base) or {}).get("rows") or []
+        s = _core_cot_signal(cot)
+        (sigs if s else missing).append(s or "Fund positioning (CFTC) — press ⟳ Fetch latest")
+        nass = ms["nass"].get(base) or {}
+        weeks = nass.get("weeks") or []
+        if weeks:
+            last = parse_date_flex(weeks[-1].get("week_ending"))
+            if last and (today - last).days > 30:
+                missing.append(f"US crop condition — out of season (last report {last.isoformat()})")
+            else:
+                sigs.append(_core_crop_condition_signal(weeks, nass.get("last_year") or []))
+        else:
+            missing.append("US crop condition (USDA) — add your free NASS key and fetch")
+        w = ms["wasde"].get(base) or {}
+        s = _core_wasde_signal(w.get("us_this"), w.get("us_last"), w.get("world_this"),
+                               w.get("world_last"), w.get("month", ""))
+        (sigs if s else missing).append(s or "Supply & demand (WASDE) — type this month's and last month's ending stocks")
+        cv = ms["curve"].get(base) or {}
+        s = _core_curve_signal(cv.get("front"), cv.get("deferred"), cv.get("label", ""))
+        if s:
+            s["as_of"] = cv.get("fetched", "")[:10]
+        (sigs if s else missing).append(s or "Futures curve — press ⟳ Fetch latest")
+        series = self._basis_history_lists(base)[0]
+        s = _core_trend_signal(series)
+        (sigs if s else missing).append(s or "Price trend — needs 60+ days of CBOT history")
+        season = _core_seasonality(series)
+        s = _core_seasonal_signal(season, today)
+        (sigs if s else missing).append(s or "Seasonality — needs 2+ years of CBOT history")
+        out = _core_combine_signals(sigs)
+        out.update({"commodity": base, "missing": missing, "season": season})
+        return out
+
+    def _market_signal_alerts(self, today=None):
+        """Report-day warnings + a strong bias, only where MT is still unpriced."""
+        out = []
+        try:
+            today = today or dt.date.today()
+            unpriced = self._ms_unpriced_by_commodity()
+            total = sum(v for v in unpriced.values() if v > 0)
+            if total > 0:
+                tomorrow = today + dt.timedelta(days=1)
+                while tomorrow.weekday() >= 5:
+                    tomorrow += dt.timedelta(days=1)
+                for e in self._ms_calendar_events(today, tomorrow):
+                    if e["impact"] != "High":
+                        continue
+                    when = "TODAY" if e["date"] == today else f"on {e['date']:%a %d %b}"
+                    est = " (date estimated — confirm on usda.gov)" if e.get("estimated") else ""
+                    mix = ", ".join(f"{k} {v:,.0f}" for k, v in sorted(unpriced.items()) if v > 0)
+                    out.append({"priority": "Medium",
+                                "issue": f"USDA/CFTC report {when}: {e['name']}{est} — {total:,.0f} MT still "
+                                         f"unpriced ({mix}). CBOT often moves 2–5% on this report.",
+                                "action": "Decide before the report: fix part of the quantity, or set BUY BELOW / "
+                                          "PROTECT ABOVE targets (Contracts → CBOT Targets)."})
+            for base, mt in sorted(unpriced.items()):
+                if mt <= 0:
+                    continue
+                r = self._market_signals_for(base, today)
+                if r["bias"] == "UP":
+                    out.append({"priority": "Medium",
+                                "issue": f"Market signals lean to HIGHER CBOT {base} (score {r['score']:+.1f}) "
+                                         f"with {mt:,.0f} MT unpriced.",
+                                "action": "Consider fixing part now and setting a PROTECT ABOVE cap "
+                                          "(Analysis → Market Signals shows why)."})
+        except Exception as e:
+            log_exception(e, "_market_signal_alerts")
+        return out
+
+    def _ms_calendar_events(self, start, end):
+        ms = self._ms_state()
+        hidden = set(ms.get("calendar_hidden") or [])
+        ev = [e for e in _core_report_calendar(start, end) if e["key"] not in hidden]
+        for c in ms.get("calendar_custom") or []:
+            d = parse_date_flex(c.get("date"))
+            if d and start <= d <= end:
+                ev.append({"date": d, "name": c.get("name") or "Custom event",
+                           "impact": c.get("impact") or "Medium", "detail": c.get("detail") or "",
+                           "estimated": False, "custom": True, "key": f"custom|{c.get('id')}"})
+        ev.sort(key=lambda e: (e["date"], {"High": 0, "Medium": 1, "Low": 2}.get(e["impact"], 3)))
+        return ev
+
+    def _build_market_signals(self):
+        p = self.tab_market_signals
+        p.columnconfigure(0, weight=1)
+        p.rowconfigure(2, weight=1)
+        ttk.Label(p, text="🧭  Market Signals — is the risk that CBOT goes UP or DOWN?",
+                  font=("Segoe UI", 12, "bold")).grid(row=0, column=0, sticky="w")
+        ttk.Label(p, text="Trusted public sources (CFTC, USDA) + the futures curve + our own CBOT history. Each signal "
+                          "votes up / down / neutral with a weight; the bias is the total. It tells you which way the "
+                          "RISK leans — it is not a price forecast.",
+                  foreground="#475569", wraplength=1150).grid(row=1, column=0, sticky="w", pady=(2, 6))
+        nb = ttk.Notebook(p)
+        nb.grid(row=2, column=0, sticky="nsew")
+        sig, cal, sea = (ttk.Frame(nb, padding=8) for _ in range(3))
+        nb.add(sig, text="Signals & bias")
+        nb.add(cal, text="Report calendar")
+        nb.add(sea, text="CBOT seasonality")
+        self._build_ms_signals(sig)
+        self._build_ms_calendar(cal)
+        self._build_ms_seasonality(sea)
+        self._ms_autofetch_done = False
+        try:
+            self._an_nb.bind("<<NotebookTabChanged>>", self._ms_on_tab_changed, add="+")
+        except Exception:
+            pass
+        self.refresh_market_signals()
+
+    def _build_ms_signals(self, p):
+        p.columnconfigure(0, weight=1)
+        p.rowconfigure(3, weight=1)
+        bar = ttk.Frame(p)
+        bar.grid(row=0, column=0, sticky="ew")
+        ttk.Button(bar, text="⟳ Fetch latest (CFTC · USDA · curve)", command=self._ms_fetch).pack(side="left")
+        ttk.Label(bar, text="   USDA NASS API key").pack(side="left")
+        self._ms_key_var = tk.StringVar(value=(self.state_obj.get("ui", {}) or {}).get("nass_api_key", ""))
+        ttk.Entry(bar, textvariable=self._ms_key_var, width=38, show="•").pack(side="left", padx=4)
+        ttk.Button(bar, text="Save key", command=self._ms_save_key).pack(side="left", padx=(0, 10))
+        for name in ("NASS free API key", "WASDE (USDA)"):
+            ttk.Button(bar, text=f"🌐 {name}",
+                       command=lambda u=MARKET_SOURCE_LINKS[name]: self._ms_open_link(u)).pack(side="left", padx=2)
+        self._ms_status_var = tk.StringVar(value="")
+        ttk.Label(p, textvariable=self._ms_status_var, foreground="#64748b", wraplength=1150
+                  ).grid(row=1, column=0, sticky="w", pady=(4, 4))
+
+        ov = ttk.LabelFrame(p, text="Bias per commodity (click one to see the reasons)", padding=6)
+        ov.grid(row=2, column=0, sticky="ew")
+        ov.columnconfigure(0, weight=1)
+        cols = [("Commodity", 90), ("Bias", 150), ("Score", 80), ("Signals used", 95), ("Unpriced MT", 100),
+                ("What to do", 640)]
+        self._ms_over = ttk.Treeview(ov, columns=[c for c, _ in cols], show="headings", height=4)
+        for c, w in cols:
+            self._ms_over.heading(c, text=c)
+            self._ms_over.column(c, width=w, anchor="e" if c in ("Score", "Signals used", "Unpriced MT") else "w")
+        self._ms_over.grid(row=0, column=0, sticky="ew")
+        for tag, fg in (("UP", "#b00020"), ("DOWN", "#1a7a1a"), ("BALANCED", "#475569")):
+            self._ms_over.tag_configure(tag, foreground=fg)
+        self._ms_over.bind("<<TreeviewSelect>>", lambda e: self._ms_show_detail())
+
+        det = ttk.LabelFrame(p, text="Signals", padding=6)
+        det.grid(row=3, column=0, sticky="nsew", pady=(8, 0))
+        det.columnconfigure(0, weight=1)
+        det.rowconfigure(1, weight=1)
+        self._ms_title_var = tk.StringVar(value="")
+        ttk.Label(det, textvariable=self._ms_title_var, font=("Segoe UI", 10, "bold"), foreground="#1a4fa0",
+                  wraplength=1150).grid(row=0, column=0, sticky="w")
+        dcols = [("Signal", 190), ("Lean", 110), ("Weight", 60), ("Reading", 380), ("Why it matters", 420),
+                 ("Source", 150), ("As of", 90)]
+        self._ms_tree = ttk.Treeview(det, columns=[c for c, _ in dcols], show="headings", height=8)
+        for c, w in dcols:
+            self._ms_tree.heading(c, text=c)
+            self._ms_tree.column(c, width=w, anchor="e" if c == "Weight" else "w")
+        self._ms_tree.grid(row=1, column=0, sticky="nsew", pady=(4, 4))
+        for tag, fg in (("up", "#b00020"), ("down", "#1a7a1a"), ("missing", "#94a3b8")):
+            self._ms_tree.tag_configure(tag, foreground=fg)
+
+        wf = ttk.LabelFrame(det, text="WASDE ending stocks — type them after each monthly report "
+                                      "(US in million bu, or 1000 short tons for meal; world in million t)",
+                            padding=6)
+        wf.grid(row=2, column=0, sticky="ew", pady=(4, 4))
+        self._ms_w_vars = {}
+        for j, (k, lab, w) in enumerate((("month", "Report month", 10), ("us_this", "US this month", 9),
+                                         ("us_last", "US last month", 9), ("world_this", "World this month", 9),
+                                         ("world_last", "World last month", 9))):
+            ttk.Label(wf, text=lab).grid(row=0, column=2 * j, sticky="w")
+            v = tk.StringVar()
+            self._ms_w_vars[k] = v
+            ttk.Entry(wf, textvariable=v, width=w).grid(row=0, column=2 * j + 1, sticky="w", padx=(4, 10))
+        ttk.Button(wf, text="Save WASDE", command=self._ms_save_wasde).grid(row=0, column=10)
+
+        bb = ttk.Frame(det)
+        bb.grid(row=3, column=0, sticky="w")
+        ttk.Button(bb, text="🧪 Use this bias in the stress test", command=self._ms_apply_to_stress
+                   ).pack(side="left", padx=(0, 8))
+        ttk.Button(bb, text="🎯 Go to CBOT Targets", command=self._ms_goto_targets).pack(side="left")
+        self._ms_results = {}
+
+    def _build_ms_calendar(self, p):
+        p.columnconfigure(0, weight=1)
+        p.rowconfigure(1, weight=1)
+        top = ttk.Frame(p)
+        top.grid(row=0, column=0, sticky="ew")
+        self._ms_cal_note = tk.StringVar(value="")
+        ttk.Label(top, textvariable=self._ms_cal_note, foreground="#1a4fa0", font=("Segoe UI", 9, "bold"),
+                  wraplength=1150).pack(side="left")
+        cols = [("Date", 95), ("Day", 50), ("In", 70), ("Report", 250), ("Impact", 70), ("What it tells you", 520),
+                ("Note", 190)]
+        self._ms_cal = ttk.Treeview(p, columns=[c for c, _ in cols], show="headings", height=16)
+        for c, w in cols:
+            self._ms_cal.heading(c, text=c)
+            self._ms_cal.column(c, width=w, anchor="w")
+        self._ms_cal.grid(row=1, column=0, sticky="nsew", pady=(6, 6))
+        for tag, bg in (("High", "#fde2e2"), ("Medium", "#fff4d6")):
+            self._ms_cal.tag_configure(tag, background=bg)
+        af = ttk.LabelFrame(p, text="Add your own event (e.g. a tender, a holiday, a supplier deadline)", padding=6)
+        af.grid(row=2, column=0, sticky="ew")
+        self._ms_cal_vars = {k: tk.StringVar(value=v) for k, v in
+                             (("date", ""), ("name", ""), ("impact", "High"), ("detail", ""))}
+        for j, (k, lab, w) in enumerate((("date", "Date (YYYY-MM-DD)", 12), ("name", "Event", 26),
+                                         ("detail", "Detail", 36))):
+            ttk.Label(af, text=lab).grid(row=0, column=2 * j, sticky="w")
+            ttk.Entry(af, textvariable=self._ms_cal_vars[k], width=w).grid(row=0, column=2 * j + 1, sticky="w",
+                                                                         padx=(4, 10))
+        ttk.Label(af, text="Impact").grid(row=0, column=6, sticky="w")
+        ttk.Combobox(af, textvariable=self._ms_cal_vars["impact"], values=["High", "Medium", "Low"], width=8,
+                     state="readonly").grid(row=0, column=7, sticky="w", padx=(4, 10))
+        ttk.Button(af, text="➕ Add", command=self._ms_cal_add).grid(row=0, column=8, padx=(0, 6))
+        ttk.Button(af, text="Hide / delete selected", command=self._ms_cal_hide).grid(row=0, column=9, padx=(0, 6))
+        ttk.Button(af, text="Show hidden again", command=self._ms_cal_unhide).grid(row=0, column=10)
+        ttk.Label(p, text="Fixed-rule dates (Crop Progress, Export Sales, COT, quarterly Stocks, Acreage) are exact; "
+                          "WASDE dates are estimated around the 10th — USDA publishes the real schedule each year. "
+                          "High-impact reports raise an alert in Home's Action Centre the day before when you "
+                          "still have unpriced MT.",
+                  foreground="#64748b", wraplength=1150).grid(row=3, column=0, sticky="w", pady=(4, 0))
+
+    def _build_ms_seasonality(self, p):
+        p.columnconfigure(0, weight=1)
+        p.rowconfigure(2, weight=1)
+        bar = ttk.Frame(p)
+        bar.grid(row=0, column=0, sticky="w")
+        ttk.Label(bar, text="Commodity").pack(side="left")
+        self._ms_sea_var = tk.StringVar(value="CORN")
+        cb = ttk.Combobox(bar, textvariable=self._ms_sea_var, values=MARKET_SIGNAL_COMMODITIES, width=10,
+                          state="readonly")
+        cb.pack(side="left", padx=6)
+        cb.bind("<<ComboboxSelected>>", lambda e: self._ms_refresh_seasonality())
+        self._ms_sea_note = tk.StringVar(value="")
+        ttk.Label(p, textvariable=self._ms_sea_note, foreground="#1a4fa0", wraplength=1150,
+                  font=("Segoe UI", 9, "bold")).grid(row=1, column=0, sticky="w", pady=(6, 4))
+        cols = [("Month", 80), ("Average change %", 130), ("Higher in % of years", 150), ("Years of data", 110),
+                ("Reading", 420)]
+        self._ms_sea = ttk.Treeview(p, columns=[c for c, _ in cols], show="headings", height=13)
+        for c, w in cols:
+            self._ms_sea.heading(c, text=c)
+            self._ms_sea.column(c, width=w, anchor="w" if c in ("Month", "Reading") else "e")
+        self._ms_sea.grid(row=2, column=0, sticky="nsew")
+        self._ms_sea.tag_configure("next", background="#e0ecff")
+        self._ms_sea.tag_configure("up", foreground="#b00020")
+        self._ms_sea.tag_configure("down", foreground="#1a7a1a")
+        ttk.Label(p, text="Month-over-month change of the month-end CBOT close, from the app's CBOT History. "
+                          "More years = more reliable; with less than 3 years treat it as a hint only.",
+                  foreground="#64748b", wraplength=1150).grid(row=3, column=0, sticky="w", pady=(4, 0))
+
+    # ── actions ─────────────────────────────────────────────────────────
+    def _ms_open_link(self, url):
+        try:
+            import webbrowser
+            webbrowser.open(url)
+        except Exception as e:
+            log_exception(e, "_ms_open_link")
+
+    def _ms_save_key(self):
+        self.state_obj.setdefault("ui", {})["nass_api_key"] = (self._ms_key_var.get() or "").strip()
+        save_state(self.state_obj)
+        self._ms_status_var.set("NASS key saved. Press ⟳ Fetch latest.")
+
+    def _ms_selected(self):
+        sel = self._ms_over.selection() if hasattr(self, "_ms_over") else ()
+        return sel[0] if sel else ""
+
+    def _ms_save_wasde(self):
+        base = self._ms_selected()
+        if not base:
+            messagebox.showinfo(APP_NAME, "Select a commodity in the bias table first.")
+            return
+        vals = {k: (v.get() or "").strip() for k, v in self._ms_w_vars.items()}
+        for k in ("us_this", "us_last", "world_this", "world_last"):
+            if vals[k] and to_float(vals[k].replace(",", ""), None) is None:
+                messagebox.showerror(APP_NAME, "Ending stocks must be numbers.")
+                return
+            vals[k] = to_float(vals[k].replace(",", ""), None) if vals[k] else None
+        if vals["us_this"] is None or not vals["us_last"]:
+            messagebox.showerror(APP_NAME, "Enter at least US ending stocks for this month and last month.")
+            return
+        self._ms_state()["wasde"][base] = vals
+        save_state(self.state_obj)
+        self.refresh_market_signals(select=base)
+
+    def _ms_apply_to_stress(self):
+        base = self._ms_selected()
+        r = self._ms_results.get(base)
+        if not r:
+            messagebox.showinfo(APP_NAME, "Select a commodity in the bias table first.")
+            return
+        txt = r["suggested_cbot_shocks"]
+        self.state_obj.setdefault("ui", {})["stress_cbot_shocks_pct"] = txt
+        save_state(self.state_obj)
+        if hasattr(self, "_stress_cbot_pct_var"):
+            self._stress_cbot_pct_var.set(txt)
+        messagebox.showinfo(APP_NAME, f"Stress test CBOT shocks set to {txt}% ({base} bias {r['bias']}).\n"
+                                      "Run Calculate → Deal Evaluator to see the new stress table.")
+
+    def _ms_goto_targets(self):
+        self._jump_to_contracts_subtab("tab_targets_outer")
+
+    def _ms_on_tab_changed(self, _event=None):
+        try:
+            if self._an_nb.select() != str(self.tab_market_signals) or self._ms_autofetch_done:
+                return
+            self._ms_autofetch_done = True
+            last = parse_date_flex((self._ms_state().get("last_fetch") or "")[:10])
+            if last is None or (dt.date.today() - last).days >= 1:
+                self._ms_fetch()
+        except Exception as e:
+            log_exception(e, "_ms_on_tab_changed")
+
+    def _ms_fetch(self):
+        if getattr(self, "_ms_fetching", False):
+            return
+        self._ms_fetching = True
+        self._ms_status_var.set("Fetching CFTC fund positions, USDA crop condition and the futures curve…")
+        key = ((self.state_obj.get("ui", {}) or {}).get("nass_api_key") or "").strip()
+        today = dt.date.today()
+
+        def _run():
+            res = {"cot": {}, "nass": {}, "curve": {}, "errors": {}}
+            for base in MARKET_SIGNAL_COMMODITIES:
+                try:
+                    res["cot"][base] = {"rows": fetch_cftc_cot(base)[-160:], "fetched": dt.datetime.now().isoformat()}
+                except Exception as ex:
+                    res["errors"][f"CFTC {base}"] = str(ex)[:160]
+                try:
+                    front = fetch_yahoo_futures_quote(CBOT_YAHOO_SYMBOLS.get(base) or f"{base}=F")["price"]
+                    sym, label = _core_deferred_contract(base, today)
+                    deferred = fetch_yahoo_futures_quote(sym)["price"] if sym else None
+                    res["curve"][base] = {"front": front, "deferred": deferred, "label": label, "symbol": sym,
+                                          "fetched": dt.datetime.now().isoformat()}
+                except Exception as ex:
+                    res["errors"][f"Curve {base}"] = str(ex)[:160]
+            if key:
+                done = {}
+                for base in MARKET_SIGNAL_COMMODITIES:
+                    crop = NASS_COMMODITY.get(base)
+                    try:
+                        if crop not in done:
+                            done[crop] = fetch_nass_condition(base, key, today.year)
+                        weeks, ly = done[crop]
+                        if not weeks:
+                            weeks, ly = ly, []  # before the new season starts: last year's final weeks
+                        res["nass"][base] = {"weeks": weeks, "last_year": ly,
+                                             "fetched": dt.datetime.now().isoformat()}
+                    except Exception as ex:
+                        res["errors"][f"USDA {base}"] = str(ex)[:160]
+                        done[crop] = ([], [])
+            box.append(res)
+
+        # The worker never touches Tk; the main thread polls for the result.
+        box = []
+
+        def _poll():
+            if box:
+                self._ms_fetch_done(box[0])
+            else:
+                self.after(250, _poll)
+
+        import threading
+        threading.Thread(target=_run, daemon=True).start()
+        self.after(250, _poll)
+
+    def _ms_fetch_done(self, res):
+        self._ms_fetching = False
+        try:
+            ms = self._ms_state()
+            for k in ("cot", "nass", "curve"):
+                ms[k].update(res[k])
+            ms["errors"] = res["errors"]
+            ms["last_fetch"] = dt.datetime.now().isoformat(timespec="seconds")
+            save_state(self.state_obj)
+            got = [k.upper() for k in ("cot", "nass", "curve") if res[k]]
+            msg = f"✔ Updated {ms['last_fetch'][:16].replace('T', ' ')}: " + (", ".join(got) or "nothing")
+            if res["errors"]:
+                msg += ("   ⚠ Could not reach: " + "; ".join(f"{k} ({v})" for k, v in res["errors"].items())
+                        + " — check the internet / proxy; the last saved values are still used.")
+            if not ((self.state_obj.get("ui", {}) or {}).get("nass_api_key")):
+                msg += "   ℹ Crop condition needs a free USDA NASS API key (button above)."
+            self._ms_status_var.set(msg)
+            self.refresh_market_signals()
+            if hasattr(self, "refresh_risk_alerts"):
+                self.refresh_risk_alerts()
+        except Exception as e:
+            self._surface_error("_ms_fetch_done", e)
+
+    def _ms_cal_add(self):
+        v = {k: (x.get() or "").strip() for k, x in self._ms_cal_vars.items()}
+        d = parse_date_flex(v["date"])
+        if d is None or not v["name"]:
+            messagebox.showerror(APP_NAME, "Enter a date (YYYY-MM-DD) and an event name.")
+            return
+        ms = self._ms_state()
+        nid = max([int(to_float(c.get("id"), 0) or 0) for c in ms["calendar_custom"]] + [0]) + 1
+        ms["calendar_custom"].append({"id": nid, "date": d.isoformat(), "name": v["name"],
+                                      "impact": v["impact"] or "Medium", "detail": v["detail"]})
+        save_state(self.state_obj)
+        for k in ("date", "name", "detail"):
+            self._ms_cal_vars[k].set("")
+        self.refresh_market_signals()
+
+    def _ms_cal_hide(self):
+        sel = self._ms_cal.selection()
+        if not sel:
+            return
+        ms = self._ms_state()
+        for key in sel:
+            if key.startswith("custom|"):
+                cid = key.split("|", 1)[1]
+                ms["calendar_custom"] = [c for c in ms["calendar_custom"] if str(c.get("id")) != cid]
+            elif key not in ms["calendar_hidden"]:
+                ms["calendar_hidden"].append(key)
+        save_state(self.state_obj)
+        self.refresh_market_signals()
+
+    def _ms_cal_unhide(self):
+        self._ms_state()["calendar_hidden"] = []
+        save_state(self.state_obj)
+        self.refresh_market_signals()
+
+    # ── refresh ─────────────────────────────────────────────────────────
+    def refresh_market_signals(self, select=None):
+        if not hasattr(self, "_ms_over"):
+            return
+        try:
+            today = dt.date.today()
+            unpriced = self._ms_unpriced_by_commodity()
+            prev = select or self._ms_selected() or MARKET_SIGNAL_COMMODITIES[0]
+            tv = self._ms_over
+            tv.delete(*tv.get_children())
+            self._ms_results = {}
+            for base in MARKET_SIGNAL_COMMODITIES:
+                r = self._market_signals_for(base, today)
+                self._ms_results[base] = r
+                label = {"UP": "▲ Risk of HIGHER", "DOWN": "▼ Risk of LOWER", "BALANCED": "● Balanced"}[r["bias"]]
+                tv.insert("", "end", iid=base, tags=(r["bias"],), values=(
+                    base, label, f"{r['score']:+.1f} of ±{r['max_score']:.1f}",
+                    f"{len(r['signals'])} of 6", f"{unpriced.get(base, 0.0):,.0f}", r["advice"]))
+            if prev in self._ms_results:
+                tv.selection_set(prev)
+            self._ms_show_detail()
+            if not self._ms_status_var.get():
+                ms = self._ms_state()
+                self._ms_status_var.set(
+                    f"Last fetched {ms['last_fetch'][:16].replace('T', ' ')}" if ms.get("last_fetch")
+                    else "Not fetched yet — press ⟳ Fetch latest.")
+            self._ms_refresh_calendar(today, unpriced)
+            self._ms_refresh_seasonality()
+        except Exception as e:
+            self._surface_error("refresh_market_signals", e)
+
+    def _ms_show_detail(self):
+        base = self._ms_selected()
+        tv = self._ms_tree
+        tv.delete(*tv.get_children())
+        r = self._ms_results.get(base)
+        if not r:
+            self._ms_title_var.set("")
+            return
+        self._ms_title_var.set(f"{base}: bias {r['bias']} (score {r['score']:+.1f} of ±{r['max_score']:.1f}). "
+                               f"{r['advice']}  Suggested stress CBOT shocks: {r['suggested_cbot_shocks']}%")
+        for i, s in enumerate(r["signals"]):
+            lean = {1: "▲ Up risk", -1: "▼ Down risk", 0: "● Neutral"}[s["direction"]]
+            tv.insert("", "end", iid=f"s{i}", tags=({1: "up", -1: "down"}.get(s["direction"], ""),), values=(
+                s["name"], lean, f"{s['weight']:g}", s["reading"], s["why"], s["source"], s.get("as_of", "")))
+        for i, m in enumerate(r["missing"]):
+            name, _, why = m.partition(" — ")
+            tv.insert("", "end", iid=f"m{i}", tags=("missing",), values=(name, "— not used", "", why, "", "", ""))
+        w = self._ms_state()["wasde"].get(base) or {}
+        for k, v in self._ms_w_vars.items():
+            val = w.get(k)
+            v.set("" if val in (None, "") else (f"{val:g}" if isinstance(val, (int, float)) else str(val)))
+
+    def _ms_refresh_calendar(self, today, unpriced):
+        tv = self._ms_cal
+        tv.delete(*tv.get_children())
+        events = self._ms_calendar_events(today, today + dt.timedelta(days=60))
+        for e in events:
+            days = (e["date"] - today).days
+            note = "date estimated — confirm on usda.gov" if e.get("estimated") else ("your event" if e.get("custom") else "")
+            tv.insert("", "end", iid=e["key"], tags=(e["impact"],), values=(
+                e["date"].isoformat(), f"{e['date']:%a}", "today" if days == 0 else f"{days} d",
+                e["name"], e["impact"], e["detail"], note))
+        nxt = next((e for e in events if e["impact"] == "High"), None)
+        total = sum(v for v in unpriced.values() if v > 0)
+        txt = (f"Next high-impact report: {nxt['name']} on {nxt['date']:%a %d %b %Y}"
+               f"{' (estimated)' if nxt.get('estimated') else ''}." if nxt else "No high-impact report in 60 days.")
+        txt += (f"   Unpriced exposure: {total:,.0f} MT — decide before big reports." if total > 0
+                else "   No unpriced quantity — reports only matter for new purchases.")
+        self._ms_cal_note.set(txt)
+
+    def _ms_refresh_seasonality(self):
+        base = self._ms_sea_var.get() or "CORN"
+        r = self._ms_results.get(base) or self._market_signals_for(base)
+        season = r["season"]
+        tv = self._ms_sea
+        tv.delete(*tv.get_children())
+        nxt = dt.date.today().month % 12 + 1
+        for row in season["table"]:
+            avg, share, yrs = row["avg_pct"], row["up_share"], row["years"]
+            tags = []
+            if row["month"] == nxt:
+                tags.append("next")
+            reading = ""
+            if avg is not None and yrs >= 2:
+                if avg >= 1.5 and share >= 60:
+                    reading = "usually firmer"
+                    tags.append("up")
+                elif avg <= -1.5 and share <= 40:
+                    reading = "usually weaker"
+                    tags.append("down")
+                else:
+                    reading = "no clear pattern"
+            elif yrs:
+                reading = "too little history"
+            if row["month"] == nxt:
+                reading = ("NEXT MONTH — " + reading) if reading else "NEXT MONTH"
+            tv.insert("", "end", iid=str(row["month"]), tags=tuple(tags), values=(
+                row["name"], f"{avg:+.1f}%" if avg is not None else "—",
+                f"{share:.0f}%" if share is not None else "—", yrs or "—", reading))
+        self._ms_sea_note.set(f"{base}: {season['months']} month-end closes over {season['years']} calendar year(s) "
+                              f"of CBOT history." + ("  Backfill more history (Setup → CBOT History) for a "
+                                                     "reliable pattern." if season["years"] < 3 else ""))
+
     def _cbot_target_rows(self):
         """Every target on every open contract, with live status."""
         rows = []
@@ -32567,6 +33190,10 @@ class App(tk.Tk):
             self.refresh_cbot_targets()
         except Exception as e:
             log_exception(e, "refresh_all→refresh_cbot_targets")
+        try:
+            self.refresh_market_signals()
+        except Exception as e:
+            log_exception(e, "refresh_all→refresh_market_signals")
         try:
             self.refresh_local_purchases()
         except Exception:

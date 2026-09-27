@@ -1,3 +1,13 @@
+# 2026-09-27 (h) — Market Signals: which way is the CBOT risk leaning?
+
+- New Analysis → Market Signals tab with three views.
+- **Signals & bias** per commodity (Corn, Soybean, SBM): CFTC fund positioning (fetched automatically, no login), USDA NASS crop condition (free API key, saved in the app), USDA WASDE ending stocks (typed after each monthly report), CBOT futures curve (front vs ~5 months out), price trend (50/200-day) and seasonality from the app's CBOT history. Each signal shows its reading, why it matters, source and date; the bias is the weighted vote — a risk lean, not a price forecast. Missing sources are listed as "not used" with what to do.
+- "Use this bias in the stress test" writes matching CBOT shocks into the Calculate stress settings.
+- **Report calendar**: next 60 days of WASDE (estimated dates), Crop Progress, Grain Stocks, Prospective Plantings/Acreage, Export Sales and COT, plus your own events (add / hide / delete). Action Centre alert the day before a High-impact report when MT is unpriced, and when the bias leans UP on a commodity with unpriced MT.
+- **CBOT seasonality** table by calendar month (average change, % of years higher), next month highlighted.
+- Data is fetched in the background when the tab is first opened each day or with ⟳ Fetch latest; if a source cannot be reached the tab says which one and keeps the last saved values.
+- Engine in `prometheus_core/market_signals.py`, tests in `tests/test_market_signals.py`.
+
 # 2026-09-27 (g) — CBOT Targets for unpriced quantity
 
 - New Contracts → CBOT Targets tab: set BUY BELOW levels (price when CBOT falls there) and PROTECT ABOVE caps (price anyway if CBOT rises there), each with a quantity, on any open contract with unpriced tonnage. "Suggest a ladder" splits the unpriced MT into three levels (−2/−4/−6 % vs live) plus a +5 % cap.

@@ -55,3 +55,9 @@ from .offers import OFFERS_ENGINE_VERSION, compare_offers
 from .planning import PLANNING_ENGINE_VERSION, stock_cover_plan
 
 from .targets import TARGETS_ENGINE_VERSION, evaluate_target, suggest_ladder
+
+from .market_signals import (
+    SIGNALS_ENGINE_VERSION, CFTC_CODES, parse_cot_rows, cot_signal, parse_nass_condition,
+    crop_condition_signal, wasde_signal, deferred_contract, curve_signal, trend_signal,
+    seasonality, seasonal_signal, combine_signals, report_calendar,
+)
