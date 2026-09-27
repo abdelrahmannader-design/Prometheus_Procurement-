@@ -1,3 +1,10 @@
+# 2026-09-27 (b) — Data Health: a fix list instead of an error count
+
+- The status-bar / top-bar chip now counts real data fixes (High + Medium) found by scanning contracts, local purchases and market data — no longer the raw error log (e.g. repeated failed FX fetches).
+- Data Health window, tab "What to fix": each row names the record, the problem, what it breaks and how to fix it; double-click opens the contract, local purchase or Setup screen. Filter by severity/area; export to Excel with Owner/Done columns.
+- One-click fix for closed contracts that have a CIF but are not marked priced (they were silently excluded from the Savings total).
+- Tab "Technical log": the old log, grouped so repeats show once, with Clear log.
+
 # 2026-09-27 — One savings engine everywhere
 
 - New `_contract_savings_economics`: closed contracts = Savings tab (saved CIF × delivery FX + resolved fees, local on/before delivery); open contracts = Home Open MTM (Live).

@@ -4012,70 +4012,465 @@ class App(tk.Tk):
                          it.get("message", "")))
         return rows
 
-    def _err_chip_tick(self):
-        """Keep the data-issues chip current. Runs every 5 s."""
+    def _health_fix_count(self):
+        """High + Medium Data Health items (what the chips show)."""
+        return sum(1 for r in self._data_health_cached()
+                   if r["severity"] in ("High", "Medium"))
+
+    def _update_health_chip(self):
         try:
-            cnt = len(self._all_data_issues())
+            rows = self._data_health_cached()
+            hi = sum(1 for r in rows if r["severity"] == "High")
+            md = sum(1 for r in rows if r["severity"] == "Medium")
             self._sb_err_var.set(
-                f"⚠ {cnt} data issue{'s' if cnt != 1 else ''} — click to review"
-                if cnt else "")
+                f"⚠ {hi + md} data fix{'es' if hi + md != 1 else ''} ({hi} high) — click to review"
+                if hi + md else ("✓ Data health OK" if rows == [] else ""))
         except Exception:
             pass
+
+    def _err_chip_tick(self):
+        """Keep the Data Health chip current. Runs every 5 s (checks are
+        cached for 60 s)."""
+        self._update_health_chip()
         try:
             self.after(5000, self._err_chip_tick)
         except Exception:
             pass
 
+    # ══════════════════════════════════════════════════════════════════
+    #  DATA HEALTH — a to-do list of concrete data gaps, each tied to the
+    #  record that needs fixing and to the figure it breaks.  Replaces the
+    #  raw error log as the status-bar signal (the log stays one tab away).
+    # ══════════════════════════════════════════════════════════════════
+    _HEALTH_ORDER = {"High": 0, "Medium": 1, "Low": 2}
+
+    def _data_health_checks(self, today=None):
+        """Scan contracts, local purchases and market data.
+
+        Returns a list of dicts: severity, area, record, problem, impact,
+        fix, action, and optional autofix.  Pure read — changes nothing.
+        """
+        today = today or dt.date.today()
+        s = self.state_obj
+        out = []
+
+        def add(sev, area, record, problem, impact, fix, action=None, autofix=None):
+            out.append({"severity": sev, "area": area, "record": record,
+                        "problem": problem, "impact": impact, "fix": fix,
+                        "action": action, "autofix": autofix})
+
+        contracts = s.get("contracts", {}) or {}
+        used_local_keys = set()
+        used_boards = set()
+        for cid, c in contracts.items():
+            if not isinstance(c, dict):
+                continue
+            ref = self._hd_ref(cid, c)
+            comm = (c.get("commodity") or "").strip().upper()
+            base = comm.split("-")[0]
+            factor = cbot_conv_factor(base, strict=True)
+            is_open = self._contract_is_open(c)
+            act = ("contract", cid)
+            saved_cif = to_float(c.get("cif_usd_mt"), None)
+            legacy_cif = to_float(c.get("own_after_usd_mt"), None)
+            del_d = parse_date_flex(c.get("storage_start") or c.get("delivery_date") or "")
+            qty = to_float(c.get("qty_mt"), None)
+            if not comm:
+                add("High", "Contract", ref, "No commodity", "Contract is ignored by every analysis",
+                    "Set the commodity", act)
+                continue
+            if qty is None or qty <= 0:
+                add("High", "Contract", ref, "No quantity (MT)",
+                    "Total saving and exposure cannot be calculated", "Enter Qty MT", act)
+            if saved_cif is None and legacy_cif is not None:
+                add("Medium", "Contract", ref, "CIF stored only in the old 'own-after USD' field",
+                    "App uses it as CIF, but own-after USD includes finance carry — cost may be overstated",
+                    "Re-enter the true CIF USD/MT", act)
+            disc, clr, frt = self._hd_resolve_fees(c, cid)
+            if not ((disc or 0) + (clr or 0) + (frt or 0)):
+                add("Medium", "Contract", ref, "No intake, clearance or freight",
+                    "Landed cost is understated, saving overstated",
+                    "Enter intake/discharge, clearance and freight (or supplier intake in Setup → Suppliers)", act)
+            if is_open:
+                # The key actually used (origin key, else the base fallback) —
+                # the same lookup Home uses.
+                _lp, _lk, _ld = self._hd_local_for_contract(c, latest=True)
+                used_local_keys.add(_lk or " / ".join(self._hd_local_keys_for_contract(c)))
+                if factor:
+                    used_boards.add(base)
+                status = self._contract_pricing_status(c)
+                if factor and status != "PRICED" and to_float(c.get("premium_cents"), None) is None:
+                    add("High", "Contract", ref, "Open unpriced contract has no premium",
+                        "No CIF of the moment → no open MTM, exposure or stress for this contract",
+                        "Enter the agreed premium", act)
+                if not factor and saved_cif is None and legacy_cif is None:
+                    add("High", "Contract", ref, "Flat-price contract has no CIF",
+                        "No cost → no open MTM for this contract", "Enter CIF USD/MT", act)
+                if del_d is None:
+                    add("Medium", "Contract", ref, "No delivery date",
+                        "Missing from the delivery ladder and cash calendar; no delivery-date comparison",
+                        "Enter the delivery date", act)
+                continue
+
+            # Closed contract → realized savings
+            if saved_cif is None and legacy_cif is None:
+                add("High", "Contract", ref, "Closed contract has no CIF",
+                    "Excluded from realized savings", "Enter the final CIF USD/MT", act)
+            elif not c.get("priced", False):
+                add("High", "Contract", ref, "Closed with a CIF but not marked as priced",
+                    "Excluded from the Savings tab and the realized total",
+                    "Mark as priced (one click) — or check the contract", act, "mark_priced")
+            if to_float(c.get("delivery_fx"), None) is None:
+                add("High", "Contract", ref, "Closed contract has no delivery FX",
+                    "Saving uses today's FX instead of the rate actually paid",
+                    "Enter the delivery FX", act)
+            if del_d is None:
+                add("High", "Contract", ref, "Closed contract has no delivery/storage date",
+                    "No local price can be matched → no realized saving",
+                    "Enter the delivery or storage-start date", act)
+            else:
+                local, _k, _d = self._hd_local_for_contract(c, date_str=del_d.isoformat())
+                if local is None:
+                    keys = ", ".join(self._hd_local_keys_for_contract(c))
+                    add("High", "Local price", ref,
+                        f"No local price logged on/before {del_d.isoformat()} ({keys})",
+                        "Realized saving is blank for this contract",
+                        "Log a local price for that date in Setup → Local Prices", ("setup", "tab_local_prices"))
+                else:
+                    age = (del_d - parse_date_flex(_d)).days if parse_date_flex(_d) else None
+                    if age is not None and age > 30:
+                        add("Low", "Local price", ref,
+                            f"Local price used is {age} days older than delivery ({_d})",
+                            "Realized saving compares with an old market price",
+                            "Log a local price nearer the delivery date", ("setup", "tab_local_prices"))
+
+        # Local purchases
+        for rec in s.get("local_purchases", []) or []:
+            if not isinstance(rec, dict):
+                continue
+            ref = f"Local purchase #{rec.get('id', '?')} ({rec.get('supplier', '')})"
+            miss = [n for n, k in (("date", "date"), ("quantity", "qty_mt"), ("price", "price_egp_mt"))
+                    if rec.get(k) in (None, "", 0)]
+            if miss:
+                add("Medium", "Local purchase", ref, "Missing " + ", ".join(miss),
+                    "Purchase cannot be judged or counted", "Complete the purchase record",
+                    ("local_purchase", rec.get("id")))
+
+        # Market data freshness (only for what the open book uses)
+        for key in sorted(used_local_keys):
+            pairs = self._local_price_map(key) if " / " not in key else []
+            if not pairs:
+                add("High", "Local price", key, "No local prices logged at all",
+                    "Open contracts on this commodity have no local comparison",
+                    "Log local prices in Setup → Local Prices", ("setup", "tab_local_prices"))
+            else:
+                age = (today - pairs[-1][0]).days
+                if age > 7:
+                    add("Medium", "Local price", key, f"Latest local price is {age} days old ({pairs[-1][0].isoformat()})",
+                        "Open MTM and expected savings use a stale market price",
+                        "Log today's local price", ("setup", "tab_local_prices"))
+        for board in sorted(used_boards):
+            series = self._basis_history_lists(board)[0]
+            last = parse_date_flex(series[-1][0]) if series else None
+            if last is None:
+                add("Medium", "CBOT history", board, "No CBOT closes logged",
+                    "Stress-test history scenarios and local-purchase judgments unavailable",
+                    "Import or log CBOT daily closes", ("setup", "tab_fx_history"))
+            elif (today - last).days > 5:
+                add("Low", "CBOT history", board, f"Last CBOT close is {(today - last).days} days old ({last.isoformat()})",
+                    "History scenarios and purchase-date references lag the market",
+                    "Log recent CBOT closes", ("setup", "tab_fx_history"))
+        fxh = self._basis_history_lists("CORN")[1]
+        last_fx = parse_date_flex(fxh[-1][0]) if fxh else None
+        if last_fx is None or (today - last_fx).days > 5:
+            add("Low", "FX history", "USD/EGP",
+                "No FX history logged" if last_fx is None else
+                f"Last FX history entry is {(today - last_fx).days} days old ({last_fx.isoformat()})",
+                "Purchase-date FX references fall back to older rates",
+                "Log FX daily (Fetch Live saves it)", ("setup", "tab_fx_history"))
+
+        out.sort(key=lambda r: (self._HEALTH_ORDER.get(r["severity"], 3), r["area"], str(r["record"])))
+        return out
+
+    def _data_health_cached(self, max_age_s=60):
+        now = dt.datetime.now()
+        cache = getattr(self, "_health_cache", None)
+        if cache and (now - cache[0]).total_seconds() < max_age_s:
+            return cache[1]
+        try:
+            rows = self._data_health_checks()
+        except Exception as e:
+            log_exception(e, "_data_health_checks")
+            rows = []
+        self._health_cache = (now, rows)
+        return rows
+
+    def _grouped_error_log(self):
+        """Session errors + stored issues grouped by (kind, operation, detail)."""
+        groups = {}
+        for t, kind, ctx, msg in self._all_data_issues():
+            key = (kind, ctx, str(msg)[:300])
+            g = groups.setdefault(key, [0, t])
+            g[0] += 1
+            g[1] = max(g[1], t)
+        rows = [(n, last, k, c, m) for (k, c, m), (n, last) in groups.items()]
+        rows.sort(key=lambda r: (-r[0], r[3]))
+        return rows
+
+    def _health_open_record(self, action):
+        """Jump from a Data Health row to the screen that fixes it."""
+        if not action:
+            return
+        kind, target = action
+        try:
+            if kind == "contract":
+                self.nb.select(self.tab_contracts_group)
+                self._contracts_nb.select(self.tab_contracts_outer)
+                for name, val in (("contract_search_var", ""), ("contract_filter_commodity_var", "ALL"),
+                                  ("contract_filter_status_var", "ALL"), ("contract_filter_origin_var", "ALL")):
+                    if hasattr(self, name):
+                        getattr(self, name).set(val)
+                if hasattr(self, "contract_open_only_var"):
+                    self.contract_open_only_var.set(False)
+                self.refresh_contracts_tree()
+                if self.contract_tree.exists(target):
+                    self.contract_tree.selection_set(target)
+                    self.contract_tree.focus(target)
+                    self.contract_tree.see(target)
+                    self.load_contract_from_tree()
+                    self.update_contract_detail_panel()
+            elif kind == "setup":
+                self.nb.select(self.tab_setup_outer)
+                if hasattr(self, "_setup_nb") and getattr(self, target, None) is not None:
+                    self._setup_nb.select(getattr(self, target))
+            elif kind == "local_purchase":
+                self._jump_to_contracts_subtab("tab_local_purchases_outer")
+                self.refresh_local_purchases()
+                iid = str(target)
+                if self.lp_purchases_tree.exists(iid):
+                    self.lp_purchases_tree.selection_set(iid)
+                    self.lp_purchases_tree.see(iid)
+                    self._lp_on_select()
+        except Exception as e:
+            self._surface_error("_health_open_record", e, show=True)
+
+    def _health_mark_priced(self, cids):
+        """Autofix: closed contracts that carry a CIF are realized — flag them."""
+        contracts = self.state_obj.get("contracts", {}) or {}
+        n = 0
+        for cid in cids:
+            c = contracts.get(cid)
+            if c and not self._contract_is_open(c) and self._contract_cif_usd(c, cid) is not None:
+                c["priced"] = True
+                n += 1
+        if n:
+            save_state(self.state_obj)
+            self._health_cache = None
+            try:
+                self.refresh_savings_tracker()
+            except Exception:
+                pass
+        return n
+
+    def _export_data_health_excel(self, rows=None):
+        if not _need_openpyxl():
+            return
+        try:
+            rows = rows if rows is not None else self._data_health_checks()
+            fp = filedialog.asksaveasfilename(
+                initialdir=get_default_export_dir(),
+                initialfile=f"Data_Health_{dt.date.today().isoformat()}.xlsx",
+                defaultextension=".xlsx", filetypes=[("Excel", "*.xlsx")],
+                title="Export Data Health fix list")
+            if not fp:
+                return
+            from openpyxl import Workbook
+            kit = _XlKit()
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Fix list"
+            kit.title(ws, f"Data Health — {len(rows)} items to fix  ·  {dt.date.today().isoformat()}",
+                      "High = changes realized savings or hides a contract · Medium = affects live/open figures · "
+                      "Low = housekeeping", 8)
+            kit.header(ws, 4, [("Severity", 10), ("Area", 14), ("Record", 26), ("Problem", 46),
+                               ("What it breaks", 46), ("How to fix", 46), ("Owner", 14), ("Done", 8)])
+            for i, r in enumerate(rows, start=5):
+                for j, key in enumerate(("severity", "area", "record", "problem", "impact", "fix"), start=1):
+                    kit.put(ws, i, j, str(r.get(key) or ""), kind="text", bold=(j == 1))
+                kit.put(ws, i, 7, "", kind="input")
+                kit.put(ws, i, 8, "", kind="input")
+            ws.freeze_panes = "A5"
+            if rows:
+                ws.auto_filter.ref = f"A4:H{len(rows) + 4}"
+            wb.save(fp)
+            messagebox.showinfo(APP_NAME, f"Data Health list exported ({len(rows)} items).\n\n{fp}")
+        except Exception as e:
+            self._surface_error("_export_data_health_excel", e, show=True)
+
     def _show_error_center(self):
-        """List everything that failed quietly: this session's exceptions and
-        the persisted data-quality issues. A decision tool must never fail
-        silently; this window is the audit trail."""
+        """Data Health window: tab 1 = what to fix (from the data itself),
+        tab 2 = the technical log (grouped, so repeats show once)."""
         try:
             win = tk.Toplevel(self)
-            win.title("Data Issues — session + stored")
-            win.geometry("920x440")
+            win.title("Data Health")
+            win.geometry("1180x560")
             win.columnconfigure(0, weight=1)
             win.rowconfigure(1, weight=1)
+            summary_var = tk.StringVar(value="")
+            ttk.Label(win, textvariable=summary_var, font=(FONT_FAMILY, FS_BODY, "bold"),
+                      wraplength=1140).grid(row=0, column=0, sticky="w", padx=10, pady=(10, 6))
+            nb = ttk.Notebook(win)
+            nb.grid(row=1, column=0, sticky="nsew", padx=10)
 
-            ttk.Label(win,
-                      text="Everything below failed or was flagged. Figures touched "
-                           "by these operations may be stale or incomplete.",
-                      foreground=CLR["danger"],
-                      font=(FONT_FAMILY, FS_BODY, "bold"),
-                      wraplength=880).grid(row=0, column=0, sticky="w",
-                                           padx=10, pady=(10, 6))
-
-            cols = [("Time", 75, "w"), ("Kind", 70, "w"),
-                    ("Operation", 280, "w"), ("Detail", 440, "w")]
-            frame = ttk.Frame(win)
-            frame.grid(row=1, column=0, sticky="nsew", padx=10)
-            frame.columnconfigure(0, weight=1)
-            frame.rowconfigure(0, weight=1)
-            tv = ttk.Treeview(frame, columns=[c for c, _, _ in cols],
-                              show="headings")
-            for c, w, a in cols:
+            # ── Tab 1: fix list ───────────────────────────────────────
+            t1 = ttk.Frame(nb, padding=6)
+            nb.add(t1, text="What to fix")
+            t1.columnconfigure(0, weight=1)
+            t1.rowconfigure(1, weight=1)
+            bar = ttk.Frame(t1)
+            bar.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+            ttk.Label(bar, text="Show:").pack(side="left")
+            sev_var = tk.StringVar(value="All")
+            area_var = tk.StringVar(value="All")
+            sev_cb = ttk.Combobox(bar, textvariable=sev_var, state="readonly", width=9,
+                                  values=["All", "High", "Medium", "Low"])
+            sev_cb.pack(side="left", padx=(4, 10))
+            area_cb = ttk.Combobox(bar, textvariable=area_var, state="readonly", width=16)
+            area_cb.pack(side="left", padx=(0, 10))
+            cols = [("Severity", 70), ("Area", 100), ("Record", 170), ("Problem", 290),
+                    ("What it breaks", 290), ("How to fix", 250)]
+            fr = ttk.Frame(t1)
+            fr.grid(row=1, column=0, sticky="nsew")
+            fr.columnconfigure(0, weight=1)
+            fr.rowconfigure(0, weight=1)
+            tv = ttk.Treeview(fr, columns=[c for c, _ in cols], show="headings")
+            for c, w in cols:
                 tv.heading(c, text=c)
-                tv.column(c, width=w, anchor=a)
+                tv.column(c, width=w, anchor="w")
             tv.grid(row=0, column=0, sticky="nsew")
-            ysb = ttk.Scrollbar(frame, orient="vertical", command=tv.yview)
+            ysb = ttk.Scrollbar(fr, orient="vertical", command=tv.yview)
             tv.configure(yscrollcommand=ysb.set)
             ysb.grid(row=0, column=1, sticky="ns")
-            for row in reversed(self._all_data_issues()):
-                tv.insert("", "end", values=row)
+            tv.tag_configure("High", foreground="#b00020")
+            tv.tag_configure("Medium", foreground="#b36000")
+            tv.tag_configure("Low", foreground="#475569")
+            state = {"rows": [], "by_iid": {}}
 
-            btns = ttk.Frame(win)
-            btns.grid(row=2, column=0, sticky="ew", padx=10, pady=8)
-            ttk.Button(btns, text="Open full error log",
-                       command=lambda: open_folder(get_app_data_dir())).pack(
-                           side="left", padx=(0, 8))
+            def _load(recheck=False):
+                if recheck:
+                    self._health_cache = None
+                rows = self._data_health_cached()
+                state["rows"] = rows
+                areas = sorted({r["area"] for r in rows})
+                area_cb["values"] = ["All"] + areas
+                if area_var.get() not in area_cb["values"]:
+                    area_var.set("All")
+                for i in tv.get_children():
+                    tv.delete(i)
+                state["by_iid"] = {}
+                shown = [r for r in rows
+                         if (sev_var.get() == "All" or r["severity"] == sev_var.get())
+                         and (area_var.get() == "All" or r["area"] == area_var.get())]
+                for n, r in enumerate(shown):
+                    iid = f"h{n}"
+                    state["by_iid"][iid] = r
+                    tv.insert("", "end", iid=iid, tags=(r["severity"],),
+                              values=(r["severity"], r["area"], r["record"], r["problem"],
+                                      r["impact"], r["fix"]))
+                cnt = {k: sum(1 for r in rows if r["severity"] == k) for k in ("High", "Medium", "Low")}
+                n_auto = sum(1 for r in rows if r.get("autofix") == "mark_priced")
+                summary_var.set(
+                    f"{len(rows)} items to fix — {cnt['High']} High (change realized savings or hide a contract), "
+                    f"{cnt['Medium']} Medium (live/open figures), {cnt['Low']} Low (housekeeping)."
+                    + (f"   {n_auto} can be fixed in one click (closed contracts not marked priced)." if n_auto else "")
+                    + "   Double-click a row to open the record.")
+                self._update_health_chip()
 
-            def _clear():
+            def _selected():
+                sel = tv.selection()
+                return state["by_iid"].get(sel[0]) if sel else None
+
+            def _open(_e=None):
+                r = _selected()
+                if r:
+                    self._health_open_record(r.get("action"))
+
+            def _fix_selected():
+                r = _selected()
+                if not r or r.get("autofix") != "mark_priced":
+                    messagebox.showinfo(APP_NAME, "Select a 'not marked as priced' row to fix it here. "
+                                                  "Other items need the data entered in the record.",
+                                        parent=win)
+                    return
+                n = self._health_mark_priced([r["action"][1]])
+                _load(recheck=True)
+                messagebox.showinfo(APP_NAME, f"{n} contract marked as priced.", parent=win)
+
+            def _fix_all():
+                cids = [r["action"][1] for r in state["rows"] if r.get("autofix") == "mark_priced"]
+                if not cids:
+                    messagebox.showinfo(APP_NAME, "Nothing to fix automatically.", parent=win)
+                    return
+                if not messagebox.askyesno(APP_NAME, f"Mark {len(cids)} closed contract(s) that already have a "
+                                                     "CIF as priced?\n\nThey will then count in the Savings tab "
+                                                     "and the realized total.", parent=win):
+                    return
+                n = self._health_mark_priced(cids)
+                _load(recheck=True)
+                messagebox.showinfo(APP_NAME, f"{n} contract(s) marked as priced.", parent=win)
+
+            tv.bind("<Double-1>", _open)
+            sev_cb.bind("<<ComboboxSelected>>", lambda e: _load())
+            area_cb.bind("<<ComboboxSelected>>", lambda e: _load())
+            b1 = ttk.Frame(t1)
+            b1.grid(row=2, column=0, sticky="w", pady=(6, 0))
+            ttk.Button(b1, text="Open record", command=_open).pack(side="left", padx=(0, 6))
+            ttk.Button(b1, text="Mark selected as priced", command=_fix_selected).pack(side="left", padx=(0, 6))
+            ttk.Button(b1, text="Fix all 'not marked priced'", command=_fix_all).pack(side="left", padx=(0, 6))
+            ttk.Button(b1, text="Re-check", command=lambda: _load(recheck=True)).pack(side="left", padx=(0, 6))
+            ttk.Button(b1, text="Export fix list to Excel",
+                       command=lambda: self._export_data_health_excel(state["rows"])).pack(side="left")
+
+            # ── Tab 2: grouped technical log ──────────────────────────
+            t2 = ttk.Frame(nb, padding=6)
+            log_rows = self._grouped_error_log()
+            nb.add(t2, text=f"Technical log ({sum(r[0] for r in log_rows)} entries, {len(log_rows)} distinct)")
+            t2.columnconfigure(0, weight=1)
+            t2.rowconfigure(1, weight=1)
+            ttk.Label(t2, text="Failed fetches and warnings recorded while the app runs. Repeats are grouped. "
+                               "These are not data errors in your contracts.",
+                      foreground="#475569").grid(row=0, column=0, sticky="w", pady=(0, 6))
+            f2 = ttk.Frame(t2)
+            f2.grid(row=1, column=0, sticky="nsew")
+            f2.columnconfigure(0, weight=1)
+            f2.rowconfigure(0, weight=1)
+            cols2 = [("Count", 60), ("Last", 80), ("Kind", 70), ("Operation", 260), ("Detail", 560)]
+            tv2 = ttk.Treeview(f2, columns=[c for c, _ in cols2], show="headings")
+            for c, w in cols2:
+                tv2.heading(c, text=c)
+                tv2.column(c, width=w, anchor="w")
+            tv2.grid(row=0, column=0, sticky="nsew")
+            ysb2 = ttk.Scrollbar(f2, orient="vertical", command=tv2.yview)
+            tv2.configure(yscrollcommand=ysb2.set)
+            ysb2.grid(row=0, column=1, sticky="ns")
+            for r in log_rows:
+                tv2.insert("", "end", values=r)
+            b2 = ttk.Frame(t2)
+            b2.grid(row=2, column=0, sticky="w", pady=(6, 0))
+            ttk.Button(b2, text="Open full error log",
+                       command=lambda: open_folder(get_app_data_dir())).pack(side="left", padx=(0, 8))
+
+            def _clear_log():
                 RECENT_ERRORS.clear()
                 self.state_obj["data_issues"] = []
                 save_state(self.state_obj)
-                self._err_chip_tick()
-                win.destroy()
-            ttk.Button(btns, text="Clear all issues", command=_clear).pack(side="left")
+                for i in tv2.get_children():
+                    tv2.delete(i)
+                nb.tab(t2, text="Technical log (0 entries)")
+                self._update_health_chip()
+            ttk.Button(b2, text="Clear log", command=_clear_log).pack(side="left")
+
+            _load()
         except Exception as e:
             log_exception(e, "_show_error_center")
 
@@ -4125,14 +4520,17 @@ class App(tk.Tk):
             if isinstance(_cq, dict):
                 _cq = _cq.get("confidence") or _cq.get("quality") or ""
             conf = str(_cq).upper()
-            issue_count = len(self.state_obj.get("data_issues", []) or [])
+            try:
+                issue_count = self._health_fix_count()
+            except Exception:
+                issue_count = 0
             qual = (
                 "● HIGH" if conf == "HIGH" else
                 "◐ MEDIUM" if conf == "MEDIUM" else
                 "○ LOW" if conf == "LOW" else ""
             )
             if issue_count:
-                qual = (qual + "  |  " if qual else "") + f"⚠ {issue_count} issue(s)"
+                qual = (qual + "  |  " if qual else "") + f"⚠ {issue_count} data fix(es)"
             feed_status = ((md.get("feed_policy") or {}).get("status") or "")
             if feed_status:
                 qual = (qual + "  |  " if qual else "") + feed_status
@@ -4161,7 +4559,15 @@ class App(tk.Tk):
             else:
                 topbar.remove_chip("quality")
             if issue_count:
-                topbar.set_chip("issues", f"⚠ {issue_count}", "rose")
+                chip = topbar.set_chip("issues", f"⚠ {issue_count} data fixes", "rose")
+                if chip is not None and not getattr(chip, "_health_bound", False):
+                    for w in [chip] + list(chip.winfo_children()):
+                        try:
+                            w.bind("<Button-1>", lambda e: self._show_error_center())
+                            w.configure(cursor="hand2")
+                        except Exception:
+                            pass
+                    chip._health_bound = True
             else:
                 topbar.remove_chip("issues")
             shell.sidebar.set_badge("cbot", len(getattr(self, "_hd_action_alerts", []) or []))

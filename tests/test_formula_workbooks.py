@@ -6,6 +6,7 @@ import datetime as dt
 import importlib.util
 import pathlib
 import unittest
+import unittest.mock
 
 TODAY = dt.date(2026, 9, 23)
 
@@ -85,6 +86,24 @@ class FormulaWorkbookTests(unittest.TestCase):
                 self.assertAlmostEqual(row["sav_mt"], engine["sav_mt"], places=6)
                 self.assertAlmostEqual(engine["freight"], 342.0)   # 300 × 1.14
                 self.assertLessEqual(engine["local_date"], c["delivery_date"])
+
+    def test_data_health_lists_real_gaps_and_autofix(self):
+        app = self._app()
+        app.state_obj["contracts"]["C3"] = {"name": "Closed not flagged", "commodity": "CORN", "status": "Closed",
+                                             "qty_mt": 500, "cif_usd_mt": 205.0, "delivery_fx": 50.0,
+                                             "freight_egp_mt": 300, "delivery_date": "2026-09-01"}
+        app.state_obj["contracts"]["C4"] = {"name": "Open no premium", "commodity": "CORN", "status": "Open",
+                                             "pricing_status": "UNPRICED", "qty_mt": 1000, "freight_egp_mt": 300}
+        rows = app._data_health_checks(today=TODAY)
+        problems = {(r["record"], r["problem"]) for r in rows}
+        self.assertIn(("Closed not flagged", "Closed with a CIF but not marked as priced"), problems)
+        self.assertIn(("Open no premium", "Open unpriced contract has no premium"), problems)
+        self.assertFalse(any(r["record"] == "Closed corn" for r in rows))   # complete contract: no noise
+        self.assertIsNone(app._sv_contract_saving_row("C3", app.state_obj["contracts"]["C3"]))
+        with unittest.mock.patch.object(self.module, "save_state", lambda *_a, **_k: None):
+            app.refresh_savings_tracker = lambda: None
+            self.assertEqual(app._health_mark_priced(["C3"]), 1)
+        self.assertIsNotNone(app._sv_contract_saving_row("C3", app.state_obj["contracts"]["C3"]))
 
     def test_portfolio_open_unpriced_shows_cif_of_the_moment(self):
         app = self._app()
