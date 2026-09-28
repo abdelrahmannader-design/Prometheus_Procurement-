@@ -1,3 +1,15 @@
+# 2026-09-28 — Market Signals redesigned (Aurora look)
+
+- The Market Signals tab now uses the app's modern design kit, like the CBOT Desk:
+  - Gradient header with the selected commodity's bias (swipe / arrows to switch CORN · SOYBEAN · SBM) and quick actions: Fetch latest, Use in stress test, CBOT targets. A coloured status dot shows whether the last fetch worked.
+  - One card per commodity with a half-dial gauge (lower ← → higher risk), the bias chip, score, signals used and unpriced MT; click a card to select it.
+  - Advice banner for the selected commodity with one-click stress-test shocks.
+  - One card per signal (icon, lean chip, reading, why it matters, source, date, weight dots); sources not yet in use show a "not used yet" card saying how to add them.
+  - Report calendar as a timeline grouped by week with date badges, impact chips and a ✕ to hide; a banner for the next high-impact report and your unpriced MT.
+  - Seasonality as a bar chart (red = months CBOT usually rose, green = fell, purple = next month) with the share of up-years per month.
+  - Settings: NASS key and WASDE numbers in their own cards.
+- The classic table layout is kept automatically if the modern kit is unavailable.
+
 # 2026-09-27 (m) — Approvals & Change History
 
 - New Contracts → Approvals & History tab.

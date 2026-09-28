@@ -32017,7 +32017,465 @@ class App(tk.Tk):
         ev.sort(key=lambda e: (e["date"], {"High": 0, "Medium": 1, "Low": 2}.get(e["impact"], 3)))
         return ev
 
+    # ── Market Signals — modern (Aurora) layout ─────────────────────────
+    _MSX_BIAS = {"UP": ("▲", "Risk of HIGHER", "rose"), "DOWN": ("▼", "Risk of LOWER", "mint"),
+                 "BALANCED": ("●", "Balanced", "sky")}
+    _MSX_GLYPH = {"Fund positioning (CFTC)": "🏦", "US crop condition (USDA)": "🌽",
+                  "Supply & demand (WASDE)": "📊", "Futures curve": "📈", "Price trend": "〽",
+                  "Seasonality (own history)": "📅"}
+
+    def _build_market_signals_modern(self):
+        from prometheus_ui.widgets import HeroBanner, SegmentedControl
+        t = self.ui_theme
+        outer = self.tab_market_signals
+        outer.columnconfigure(0, weight=1)
+        root = tk.Frame(outer, bg=t.c("bg"))
+        root.grid(row=0, column=0, sticky="nsew")
+        root.columnconfigure(0, weight=1)
+        self._msx = {"root": root}
+        self._ms_sel = MARKET_SIGNAL_COMMODITIES[0]
+        self._ms_status_var = tk.StringVar(value="")
+        self._ms_key_var = tk.StringVar(value=(self.state_obj.get("ui", {}) or {}).get("nass_api_key", ""))
+        self._ms_results = {}
+
+        hero = HeroBanner(root, t, height=204, ground=t.c("bg"))
+        hero.grid(row=0, column=0, sticky="ew", padx=4, pady=(0, 10))
+        hero.set_actions([("⟳  Fetch latest", self._ms_fetch),
+                          ("🧪  Use in stress test", self._ms_apply_to_stress),
+                          ("🎯  CBOT targets", self._ms_goto_targets)])
+        hero.set_nav(MARKET_SIGNAL_COMMODITIES, 0,
+                     command=lambda i: self._msx_select(MARKET_SIGNAL_COMMODITIES[i]))
+        self._msx["hero"] = hero
+
+        st = tk.Frame(root, bg=t.c("bg"))
+        st.grid(row=1, column=0, sticky="ew", padx=8)
+        st.columnconfigure(1, weight=1)
+        self._msx["status_dot"] = tk.Label(st, text="●", bg=t.c("bg"), fg=t.c("ink_3"), font=t.font("body"))
+        self._msx["status_dot"].grid(row=0, column=0, sticky="nw", padx=(0, 6))
+        lbl = tk.Label(st, textvariable=self._ms_status_var, bg=t.c("bg"), fg=t.c("ink_2"),
+                       font=t.font("caption"), anchor="w", justify="left", wraplength=1100)
+        lbl.grid(row=0, column=1, sticky="ew")
+        self._ms_status_var.trace_add("write", lambda *_a: self._msx_status_tone())
+
+        seg = SegmentedControl(root, t, ["Signals & bias", "Report calendar", "Seasonality", "Settings"],
+                               command=self._msx_show_view, ground=t.c("bg"), height=38, pad_x=26)
+        seg.grid(row=2, column=0, sticky="w", padx=8, pady=(12, 10))
+        self._msx["seg"] = seg
+        views = {}
+        for name in ("Signals & bias", "Report calendar", "Seasonality", "Settings"):
+            f = tk.Frame(root, bg=t.c("bg"))
+            f.columnconfigure(0, weight=1)
+            views[name] = f
+        self._msx["views"] = views
+        self._msx_build_settings(views["Settings"])
+        self._msx_show_view("Signals & bias")
+        self._ms_autofetch_done = False
+        try:
+            self._an_nb.bind("<<NotebookTabChanged>>", self._ms_on_tab_changed, add="+")
+        except Exception:
+            pass
+        self.refresh_market_signals()
+
+    def _msx_status_tone(self):
+        txt = self._ms_status_var.get()
+        tone = "rose" if "⚠" in txt else "mint" if txt.startswith("✔") else "amber" if "Fetching" in txt else "sky"
+        try:
+            self._msx["status_dot"].configure(fg=self.ui_theme.c(tone))
+        except Exception:
+            pass
+
+    def _msx_show_view(self, name):
+        for n, f in self._msx["views"].items():
+            if n == name:
+                f.grid(row=3, column=0, sticky="nsew", padx=4)
+            else:
+                f.grid_remove()
+        self._msx["view"] = name
+
+    @staticmethod
+    def _msx_clear(frame):
+        for w in frame.winfo_children():
+            w.destroy()
+
+    def _msx_label(self, parent, text, token="body", weight="regular", ink="ink", bg=None, wrap=0, **kw):
+        t = self.ui_theme
+        return tk.Label(parent, text=text, bg=bg or parent.cget("bg"), fg=t.c(ink), font=t.font(token, weight),
+                        anchor="w", justify="left", wraplength=wrap, **kw)
+
+    # ── Signals view ────────────────────────────────────────────────────
+    def _msx_render_signals(self, unpriced):
+        from prometheus_ui.widgets import Card, Chip, IconBubble, PillButton
+        from prometheus_ui.charts import BiasGauge
+        t = self.ui_theme
+        v = self._msx["views"]["Signals & bias"]
+        self._msx_clear(v)
+        row = tk.Frame(v, bg=t.c("bg"))
+        row.grid(row=0, column=0, sticky="ew")
+        for i, base in enumerate(MARKET_SIGNAL_COMMODITIES):
+            row.columnconfigure(i, weight=1, uniform="ms")
+            r = self._ms_results[base]
+            glyph, text, tone = self._MSX_BIAS[r["bias"]]
+            selected = base == self._ms_sel
+            card = Card(row, t, radius="xl", pad=14, border=selected,
+                        fill="brand_soft" if selected else "surface", ground=t.c("bg"))
+            card.grid(row=0, column=i, sticky="nsew", padx=6, pady=4)
+            b = card.body
+            b.columnconfigure(0, weight=1)
+            head = tk.Frame(b, bg=card.fill)
+            head.grid(row=0, column=0, sticky="ew")
+            head.columnconfigure(0, weight=1)
+            self._msx_label(head, base, "title", "bold").grid(row=0, column=0, sticky="w")
+            Chip(head, t, f"{glyph} {text}", tone=tone, ground=card.fill, solid=r["bias"] != "BALANCED"
+                 ).grid(row=0, column=1, sticky="e")
+            g = BiasGauge(b, t, ground=card.fill, height=112)
+            g.grid(row=1, column=0, sticky="ew", pady=(6, 2))
+            g.set(r["score"], r["max_score"] or 1.0)
+            self._msx_label(b, f"Score {r['score']:+.1f} of ±{r['max_score']:.1f}   ·   "
+                               f"{len(r['signals'])} of 6 signals", "caption", "bold", "ink_2"
+                            ).grid(row=2, column=0, sticky="w")
+            mt = unpriced.get(base, 0.0)
+            self._msx_label(b, f"{mt:,.0f} MT unpriced" if mt > 0 else "Nothing unpriced", "caption",
+                            ink="rose" if (mt > 0 and r["bias"] == "UP") else "ink_3"
+                            ).grid(row=3, column=0, sticky="w", pady=(2, 0))
+            self._msx_bind_click(card, lambda b_=base: self._msx_select(b_))
+
+        r = self._ms_results.get(self._ms_sel)
+        if not r:
+            return
+        glyph, text, tone = self._MSX_BIAS[r["bias"]]
+        adv = Card(v, t, radius="lg", pad=16, accent=tone, accent_width=6, ground=t.c("bg"))
+        adv.grid(row=1, column=0, sticky="ew", padx=6, pady=(12, 4))
+        ab = adv.body
+        ab.columnconfigure(1, weight=1)
+        IconBubble(ab, t, glyph, tone=tone, size=44, ground=adv.fill).grid(row=0, column=0, rowspan=2,
+                                                                           sticky="nw", padx=(4, 12))
+        self._msx_label(ab, f"{self._ms_sel}: {text.lower()}", "subtitle", "bold").grid(row=0, column=1, sticky="w")
+        self._msx_label(ab, r["advice"], "body", ink="ink_2", wrap=820).grid(row=1, column=1, sticky="w",
+                                                                             pady=(2, 0))
+        btns = tk.Frame(ab, bg=adv.fill)
+        btns.grid(row=0, column=2, rowspan=2, sticky="e")
+        PillButton(btns, t, f"Stress test {r['suggested_cbot_shocks']}%", command=self._ms_apply_to_stress,
+                   icon="🧪", variant="soft", ground=adv.fill, size="caption").pack(side="left", padx=4)
+        PillButton(btns, t, "CBOT targets", command=self._ms_goto_targets, icon="🎯", variant="ghost",
+                   ground=adv.fill, size="caption").pack(side="left", padx=4)
+
+        grid = tk.Frame(v, bg=t.c("bg"))
+        grid.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        cols = 3
+        for c in range(cols):
+            grid.columnconfigure(c, weight=1, uniform="sig")
+        items = [("sig", s) for s in r["signals"]] + [("miss", m) for m in r["missing"]]
+        for i, (kind, s) in enumerate(items):
+            cell = self._msx_signal_card(grid, kind, s)
+            cell.grid(row=i // cols, column=i % cols, sticky="nsew", padx=6, pady=6)
+
+    def _msx_signal_card(self, parent, kind, s):
+        from prometheus_ui.widgets import Card, Chip, IconBubble
+        t = self.ui_theme
+        if kind == "miss":
+            name, _, how = s.partition(" — ")
+            card = Card(parent, t, radius="lg", pad=14, fill="surface_2", shadow=False, border=True,
+                        ground=t.c("bg"))
+            b = card.body
+            b.columnconfigure(1, weight=1)
+            IconBubble(b, t, self._MSX_GLYPH.get(name, "◌"), tone="sky", size=34, ground=card.fill
+                       ).grid(row=0, column=0, sticky="nw", padx=(0, 10))
+            self._msx_label(b, name, "body", "bold", "ink_3").grid(row=0, column=1, sticky="w")
+            Chip(b, t, "not used yet", tone="amber", ground=card.fill).grid(row=0, column=2, sticky="e")
+            lab = self._msx_label(b, how, "caption", ink="ink_3", wrap=300)
+            lab.grid(row=1, column=0, columnspan=3, sticky="w", pady=(8, 0))
+            self._msx_fit_wrap(b, [lab])
+            return card
+        d = s["direction"]
+        tone = {1: "rose", -1: "mint", 0: "sky"}[d]
+        lean = {1: "▲ up risk", -1: "▼ down risk", 0: "● neutral"}[d]
+        card = Card(parent, t, radius="lg", pad=14, accent=tone, ground=t.c("bg"))
+        b = card.body
+        b.columnconfigure(1, weight=1)
+        IconBubble(b, t, self._MSX_GLYPH.get(s["name"], "◆"), tone=tone, size=34, ground=card.fill
+                   ).grid(row=0, column=0, sticky="nw", padx=(0, 10))
+        self._msx_label(b, s["name"], "body", "bold").grid(row=0, column=1, sticky="w")
+        Chip(b, t, lean, tone=tone, ground=card.fill).grid(row=0, column=2, sticky="e")
+        wraps = [self._msx_label(b, s["reading"], "body", "bold", wrap=300),
+                 self._msx_label(b, s["why"], "caption", ink="ink_2", wrap=300)]
+        wraps[0].grid(row=1, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        wraps[1].grid(row=2, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        foot = tk.Frame(b, bg=card.fill)
+        foot.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(10, 0))
+        foot.columnconfigure(0, weight=1)
+        self._msx_label(foot, f"{s['source']}" + (f"  ·  {s['as_of']}" if s.get("as_of") else ""),
+                        "micro", ink="ink_3").grid(row=0, column=0, sticky="w")
+        w = float(s["weight"])
+        full, half = int(w), (w - int(w)) >= 0.5
+        self._msx_label(foot, "weight " + "●" * full + ("◐" if half else "") + "○" * max(0, 2 - full - half),
+                        "micro", ink="ink_3").grid(row=0, column=1, sticky="e")
+        self._msx_fit_wrap(b, wraps)
+        return card
+
+    @staticmethod
+    def _msx_fit_wrap(container, labels):
+        """Wrap long text at the card's real width instead of a fixed guess."""
+        def _sync(event):
+            for lab in labels:
+                try:
+                    if lab.winfo_exists() and event.width > 60:
+                        lab.configure(wraplength=event.width - 8)
+                except Exception:
+                    pass
+        container.bind("<Configure>", _sync, add="+")
+
+    def _msx_bind_click(self, widget, cmd):
+        try:
+            widget.configure(cursor="hand2")
+        except Exception:
+            pass
+        widget.bind("<Button-1>", lambda _e: cmd(), add="+")
+        for ch in widget.winfo_children():
+            self._msx_bind_click(ch, cmd)
+
+    def _msx_select(self, base):
+        self._ms_sel = base
+        self.refresh_market_signals()
+
+    # ── Calendar view ───────────────────────────────────────────────────
+    def _msx_render_calendar(self, today, unpriced):
+        from prometheus_ui.widgets import Card, Chip, PillButton
+        t = self.ui_theme
+        v = self._msx["views"]["Report calendar"]
+        self._msx_clear(v)
+        events = self._ms_calendar_events(today, today + dt.timedelta(days=60))
+        total = sum(x for x in unpriced.values() if x > 0)
+        nxt = next((e for e in events if e["impact"] == "High"), None)
+        top = Card(v, t, radius="xl", pad=16, accent="rose" if (nxt and total > 0) else "brand", ground=t.c("bg"))
+        top.grid(row=0, column=0, sticky="ew", padx=6, pady=(0, 10))
+        tb = top.body
+        tb.columnconfigure(1, weight=1)
+        if nxt:
+            days = (nxt["date"] - today).days
+            self._msx_date_badge(tb, nxt["date"], "rose", top.fill).grid(row=0, column=0, rowspan=2, padx=(4, 14))
+            self._msx_label(tb, f"Next big report: {nxt['name']}"
+                                + ("  (date estimated)" if nxt.get("estimated") else ""), "subtitle", "bold"
+                            ).grid(row=0, column=1, sticky="w")
+            self._msx_label(tb, ("today" if days == 0 else f"in {days} day(s)") + f" · {nxt['detail']}",
+                            "body", ink="ink_2", wrap=760).grid(row=1, column=1, sticky="w")
+        else:
+            self._msx_label(tb, "No high-impact report in the next 60 days.", "subtitle", "bold"
+                            ).grid(row=0, column=1, sticky="w")
+        Chip(tb, t, f"{total:,.0f} MT unpriced" if total > 0 else "nothing unpriced",
+             tone="rose" if total > 0 else "mint", ground=top.fill).grid(row=0, column=2, sticky="e")
+
+        lst = Card(v, t, radius="lg", pad=10, ground=t.c("bg"))
+        lst.grid(row=1, column=0, sticky="ew", padx=6)
+        lb = lst.body
+        lb.columnconfigure(1, weight=1)
+        tone_of = {"High": "rose", "Medium": "amber", "Low": "sky"}
+        last_week = None
+        r = 0
+        for e in events:
+            wk = e["date"].isocalendar()[1]
+            if wk != last_week:
+                mon = e["date"] - dt.timedelta(days=e["date"].weekday())
+                self._msx_label(lb, f"Week of {mon:%d %b}", "micro", "bold", "ink_3"
+                                ).grid(row=r, column=0, columnspan=4, sticky="w", pady=(10 if r else 2, 4), padx=6)
+                r += 1
+                last_week = wk
+            tone = tone_of.get(e["impact"], "sky")
+            self._msx_date_badge(lb, e["date"], tone, lst.fill, small=True).grid(row=r, column=0, padx=(6, 12),
+                                                                                  pady=3, sticky="w")
+            txt = tk.Frame(lb, bg=lst.fill)
+            txt.grid(row=r, column=1, sticky="ew")
+            self._msx_label(txt, e["name"] + ("  · your event" if e.get("custom") else ""), "body", "bold"
+                            ).grid(row=0, column=0, sticky="w")
+            days = (e["date"] - today).days
+            self._msx_label(txt, ("today · " if days == 0 else f"in {days} d · ") + e["detail"]
+                            + ("  (estimated — confirm on usda.gov)" if e.get("estimated") else ""),
+                            "caption", ink="ink_3", wrap=720).grid(row=1, column=0, sticky="w")
+            Chip(lb, t, e["impact"], tone=tone, ground=lst.fill).grid(row=r, column=2, padx=6)
+            hide = tk.Label(lb, text="✕", bg=lst.fill, fg=t.c("ink_3"), font=t.font("body"), cursor="hand2")
+            hide.grid(row=r, column=3, padx=(4, 6))
+            hide.bind("<Button-1>", lambda _e, k=e["key"]: self._ms_cal_hide(k))
+            r += 1
+        if not events:
+            self._msx_label(lb, "No reports in the next 60 days.", ink="ink_3").grid(row=0, column=0, pady=10)
+
+        add = Card(v, t, radius="lg", pad=14, ground=t.c("bg"))
+        add.grid(row=2, column=0, sticky="ew", padx=6, pady=(10, 0))
+        ab = add.body
+        self._msx_label(ab, "Add your own event", "body", "bold").grid(row=0, column=0, columnspan=9, sticky="w")
+        self._ms_cal_vars = {k: tk.StringVar(value=val) for k, val in
+                             (("date", ""), ("name", ""), ("impact", "High"), ("detail", ""))}
+        for j, (k, lab, w) in enumerate((("date", "Date (YYYY-MM-DD)", 12), ("name", "Event", 24),
+                                         ("detail", "Detail", 30))):
+            self._msx_label(ab, lab, "caption", ink="ink_2").grid(row=1, column=2 * j, sticky="w", pady=(8, 0))
+            ttk.Entry(ab, textvariable=self._ms_cal_vars[k], width=w).grid(row=1, column=2 * j + 1, sticky="w",
+                                                                         padx=(4, 12), pady=(8, 0))
+        ttk.Combobox(ab, textvariable=self._ms_cal_vars["impact"], values=["High", "Medium", "Low"], width=8,
+                     state="readonly").grid(row=1, column=6, padx=(0, 10), pady=(8, 0))
+        PillButton(ab, t, "Add", command=self._ms_cal_add, icon="＋", size="caption", ground=add.fill
+                   ).grid(row=1, column=7, pady=(8, 0))
+        PillButton(ab, t, "Show hidden", command=self._ms_cal_unhide, variant="ghost", size="caption",
+                   ground=add.fill).grid(row=1, column=8, padx=6, pady=(8, 0))
+        self._msx_label(ab, "✕ hides a report. Crop Progress, Export Sales, COT, Grain Stocks and Acreage dates are "
+                            "exact; WASDE dates are estimated. High-impact reports raise an alert the day before when "
+                            "you still have unpriced MT.", "caption", ink="ink_3", wrap=1000
+                        ).grid(row=2, column=0, columnspan=9, sticky="w", pady=(8, 0))
+
+    def _msx_date_badge(self, parent, d, tone, ground, small=False):
+        from prometheus_ui import primitives as pr
+        t = self.ui_theme
+        w, h = (46, 46) if small else (60, 60)
+        cv = tk.Canvas(parent, width=w, height=h, bg=ground, highlightthickness=0, bd=0)
+        strong, soft = t.tone(tone)
+        pr.round_rect(cv, 1, 1, w - 1, h - 1, radius=12, fill=soft)
+        cv.create_text(w / 2, h * 0.36, text=f"{d.day}", fill=t.tone_ink(tone),
+                       font=t.font("subtitle" if small else "title", "bold"))
+        cv.create_text(w / 2, h * 0.74, text=f"{d:%b}".upper(), fill=t.tone_ink(tone), font=t.font("micro", "bold"))
+        return cv
+
+    # ── Seasonality view ────────────────────────────────────────────────
+    def _msx_render_seasonality(self):
+        from prometheus_ui.widgets import Card, SegmentedControl
+        from prometheus_ui.charts import BarChart
+        t = self.ui_theme
+        v = self._msx["views"]["Seasonality"]
+        self._msx_clear(v)
+        base = getattr(self, "_msx_sea_base", self._ms_sel)
+        r = self._ms_results.get(base) or self._market_signals_for(base)
+        season = r["season"]
+        card = Card(v, t, radius="xl", pad=16, ground=t.c("bg"))
+        card.grid(row=0, column=0, sticky="ew", padx=6)
+        b = card.body
+        b.columnconfigure(0, weight=1)
+        head = tk.Frame(b, bg=card.fill)
+        head.grid(row=0, column=0, sticky="ew")
+        head.columnconfigure(0, weight=1)
+        self._msx_label(head, f"{base} — average CBOT move by calendar month", "subtitle", "bold"
+                        ).grid(row=0, column=0, sticky="w")
+        SegmentedControl(head, t, MARKET_SIGNAL_COMMODITIES, value=base, ground=card.fill,
+                         command=lambda x: (setattr(self, "_msx_sea_base", x), self._msx_render_seasonality())
+                         ).grid(row=0, column=1, sticky="e")
+        nxt = dt.date.today().month % 12 + 1
+        bars = []
+        for row in season["table"]:
+            avg = row["avg_pct"]
+            if avg is None:
+                bars.append((row["name"], 0.0, "sky"))
+                continue
+            tone = "brand" if row["month"] == nxt else ("rose" if avg > 0 else "mint")
+            bars.append((row["name"] + ("◀" if row["month"] == nxt else ""), avg, tone))
+        chart = BarChart(b, t, ground=card.fill, height=230, value_format=lambda x: f"{x:+.1f}%")
+        chart.grid(row=1, column=0, sticky="ew", pady=(12, 4))
+        chart.set_bars(bars)
+        self._msx_label(b, "Red = CBOT usually ROSE that month (buying earlier was better) · green = usually fell · "
+                           "purple = next month. Hover a bar for the value.", "caption", ink="ink_3"
+                        ).grid(row=2, column=0, sticky="w")
+        stats = tk.Frame(b, bg=card.fill)
+        stats.grid(row=3, column=0, sticky="ew", pady=(12, 0))
+        for i, row in enumerate(season["table"]):
+            stats.columnconfigure(i, weight=1, uniform="m")
+            f = tk.Frame(stats, bg=t.c("brand_soft") if row["month"] == nxt else card.fill)
+            f.grid(row=0, column=i, sticky="nsew", padx=2)
+            self._msx_label(f, row["name"], "micro", "bold", "ink_2", bg=f.cget("bg")).pack(anchor="center")
+            up = row["up_share"]
+            self._msx_label(f, f"{up:.0f}% up" if up is not None else "—", "micro", ink="ink_3",
+                            bg=f.cget("bg")).pack(anchor="center")
+            self._msx_label(f, f"{row['years']} yr" if row["years"] else "", "micro", ink="ink_3",
+                            bg=f.cget("bg")).pack(anchor="center")
+        note = (f"{season['months']} month-end closes over {season['years']} calendar year(s) of CBOT history."
+                + ("  With less than 3 years treat this as a hint — backfill more history in Setup → CBOT History."
+                   if season["years"] < 3 else ""))
+        self._msx_label(b, note, "caption", ink="amber" if season["years"] < 3 else "ink_3", wrap=1000
+                        ).grid(row=4, column=0, sticky="w", pady=(10, 0))
+
+    # ── Settings view (NASS key + WASDE numbers) ────────────────────────
+    def _msx_build_settings(self, v):
+        from prometheus_ui.widgets import Card, PillButton
+        t = self.ui_theme
+        k = Card(v, t, radius="lg", pad=16, ground=t.c("bg"))
+        k.grid(row=0, column=0, sticky="ew", padx=6)
+        kb = k.body
+        self._msx_label(kb, "USDA crop condition — free API key", "subtitle", "bold").grid(row=0, column=0,
+                                                                                          columnspan=4, sticky="w")
+        self._msx_label(kb, "Get it in 2 minutes (email only), paste it here and Save. Used for the weekly "
+                            "good/excellent crop rating (June–October).", "caption", ink="ink_3", wrap=900
+                        ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(2, 8))
+        ttk.Entry(kb, textvariable=self._ms_key_var, width=42, show="•").grid(row=2, column=0, sticky="w")
+        PillButton(kb, t, "Save & fetch", command=self._ms_save_key, size="caption", ground=k.fill
+                   ).grid(row=2, column=1, padx=8)
+        PillButton(kb, t, "Get a key", command=lambda: self._ms_open_link(MARKET_SOURCE_LINKS["NASS free API key"]),
+                   icon="🌐", variant="ghost", size="caption", ground=k.fill).grid(row=2, column=2)
+
+        w = Card(v, t, radius="lg", pad=16, ground=t.c("bg"))
+        w.grid(row=1, column=0, sticky="ew", padx=6, pady=(10, 0))
+        wb = w.body
+        self._msx["wasde_title"] = tk.StringVar()
+        tk.Label(wb, textvariable=self._msx["wasde_title"], bg=w.fill, fg=t.c("ink"),
+                 font=t.font("subtitle", "bold"), anchor="w").grid(row=0, column=0, columnspan=10, sticky="w")
+        self._msx_label(wb, "After each monthly WASDE report, copy the two 2026/27 'Ending Stocks' numbers (last "
+                            "month = left column, this month = right column). US in million bu (thousand short tons "
+                            "for meal); world in million t. Pick the commodity on the Signals view first.",
+                        "caption", ink="ink_3", wrap=900).grid(row=1, column=0, columnspan=10, sticky="w", pady=(2, 8))
+        self._ms_w_vars = {}
+        for j, (key, lab, wd) in enumerate((("month", "Report month", 10), ("us_this", "US this month", 9),
+                                            ("us_last", "US last month", 9), ("world_this", "World this month", 9),
+                                            ("world_last", "World last month", 9))):
+            self._msx_label(wb, lab, "caption", ink="ink_2").grid(row=2, column=2 * j, sticky="w")
+            var = tk.StringVar()
+            self._ms_w_vars[key] = var
+            ttk.Entry(wb, textvariable=var, width=wd).grid(row=2, column=2 * j + 1, sticky="w", padx=(4, 12))
+        PillButton(wb, t, "Save WASDE", command=self._ms_save_wasde, size="caption", ground=w.fill
+                   ).grid(row=2, column=10)
+        PillButton(wb, t, "Open WASDE", command=lambda: self._ms_open_link(MARKET_SOURCE_LINKS["WASDE (USDA)"]),
+                   icon="🌐", variant="ghost", size="caption", ground=w.fill).grid(row=2, column=11, padx=6)
+
+    def _msx_refresh(self, select=None):
+        try:
+            if select:
+                self._ms_sel = select
+            today = dt.date.today()
+            unpriced = self._ms_unpriced_by_commodity()
+            self._ms_results = {b: self._market_signals_for(b, today) for b in MARKET_SIGNAL_COMMODITIES}
+            r = self._ms_results.get(self._ms_sel) or next(iter(self._ms_results.values()))
+            glyph, text, tone = self._MSX_BIAS[r["bias"]]
+            ms = self._ms_state()
+            hero = self._msx["hero"]
+            hero.set_nav_index(MARKET_SIGNAL_COMMODITIES.index(self._ms_sel))
+            ups = [b for b, x in self._ms_results.items() if x["bias"] == "UP"]
+            hero.set_content(
+                eyebrow="MARKET SIGNALS · CFTC · USDA · CBOT CURVE · OWN HISTORY",
+                headline="Is the CBOT risk leaning up or down?",
+                support=("Risk of higher prices: " + ", ".join(ups) + "." if ups else
+                         "No commodity leans to higher prices right now.")
+                        + "  A weighted vote of 6 signals — a risk lean, not a price forecast.",
+                metric_label=f"{self._ms_sel} bias", metric_value=f"{glyph} {text}",
+                metric_delta=f"score {r['score']:+.1f} / ±{r['max_score']:.1f}",
+                metric_delta_tone=tone,
+                footnote=(f"Last fetched {ms['last_fetch'][:16].replace('T', ' ')}" if ms.get("last_fetch")
+                          else "Not fetched yet"))
+            if not self._ms_status_var.get():
+                self._ms_status_var.set(
+                    f"Last fetched {ms['last_fetch'][:16].replace('T', ' ')}" if ms.get("last_fetch")
+                    else "Not fetched yet — press ⟳ Fetch latest.")
+            self._msx_render_signals(unpriced)
+            self._msx_render_calendar(today, unpriced)
+            self._msx_render_seasonality()
+            wv = self._ms_state()["wasde"].get(self._ms_sel) or {}
+            self._msx["wasde_title"].set(f"WASDE ending stocks — {self._ms_sel}")
+            for key, var in self._ms_w_vars.items():
+                val = wv.get(key)
+                var.set("" if val in (None, "") else (f"{val:g}" if isinstance(val, (int, float)) else str(val)))
+        except Exception as e:
+            self._surface_error("_msx_refresh", e)
+
     def _build_market_signals(self):
+        if getattr(self, "ui_theme", None) is not None:
+            try:
+                return self._build_market_signals_modern()
+            except Exception as e:
+                log_exception(e, "_build_market_signals_modern")
+                self._msx = None
+                for w in self.tab_market_signals.winfo_children():
+                    w.destroy()
         p = self.tab_market_signals
         p.columnconfigure(0, weight=1)
         p.rowconfigure(2, weight=1)
@@ -32194,6 +32652,8 @@ class App(tk.Tk):
         self._ms_fetch()
 
     def _ms_selected(self):
+        if getattr(self, "_msx", None):
+            return getattr(self, "_ms_sel", "")
         sel = self._ms_over.selection() if hasattr(self, "_ms_over") else ()
         return sel[0] if sel else ""
 
@@ -32366,8 +32826,8 @@ class App(tk.Tk):
             self._ms_cal_vars[k].set("")
         self.refresh_market_signals()
 
-    def _ms_cal_hide(self):
-        sel = self._ms_cal.selection()
+    def _ms_cal_hide(self, key=None):
+        sel = [key] if key else (self._ms_cal.selection() if hasattr(self, "_ms_cal") else ())
         if not sel:
             return
         ms = self._ms_state()
@@ -32387,6 +32847,8 @@ class App(tk.Tk):
 
     # ── refresh ─────────────────────────────────────────────────────────
     def refresh_market_signals(self, select=None):
+        if getattr(self, "_msx", None):
+            return self._msx_refresh(select)
         if not hasattr(self, "_ms_over"):
             return
         try:

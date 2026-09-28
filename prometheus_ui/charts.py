@@ -20,7 +20,7 @@ from .theme import Theme, mix
 FILL_ALPHA = 0.26
 
 __all__ = ["Sparkline", "AreaChart", "BarChart", "DonutGauge", "RangeMeter",
-           "nice_ticks", "compact_number"]
+           "BiasGauge", "nice_ticks", "compact_number"]
 
 
 def nice_ticks(lo, hi, count=4):
@@ -447,3 +447,69 @@ class RangeMeter(_ChartBase):
         self.create_text(min(max(x, pad + 20), w - pad - 20), track_y - 16,
                          text=self._fmt(self._value), fill=t.c("ink"),
                          font=t.font("caption", "bold"))
+
+
+class BiasGauge(_ChartBase):
+    """Half-dial for a risk lean: left = risk of LOWER, right = risk of HIGHER.
+
+    ``set(score, max_score)`` places the needle at score / max_score. The
+    coloured zones mark the ±threshold where the lean becomes a call, so a
+    reader sees both *where* the needle is and *how far* it is from flipping.
+    """
+
+    def __init__(self, master, theme: Theme, ground=None, height=118,
+                 threshold=1.5, low_tone="mint", high_tone="rose", **kw):
+        super().__init__(master, theme, ground=ground, height=height, **kw)
+        self._score, self._max = 0.0, 1.0
+        self._threshold = threshold
+        self._low_tone, self._high_tone = low_tone, high_tone
+        self._caption = ""
+
+    def set(self, score, max_score, caption=""):
+        try:
+            self._score = float(score or 0.0)
+            self._max = max(1e-9, float(max_score or 0.0)) if max_score else 1.0
+        except (TypeError, ValueError):
+            self._score, self._max = 0.0, 1.0
+        self._caption = caption
+        self.redraw()
+
+    def _xy(self, cx, cy, r, frac):
+        # frac −1 … +1 → 180° … 0°
+        ang = math.radians(90 - 90 * max(-1.0, min(1.0, frac)))
+        return cx + r * math.cos(ang), cy - r * math.sin(ang)
+
+    def redraw(self):
+        self.delete("all")
+        w, h = self.winfo_width(), self.winfo_height()
+        if w <= 20 or h <= 20:
+            return
+        t = self.theme
+        thick = 14
+        r = min(w / 2 - 12, h - 30)
+        cx, cy = w / 2, h - 18
+        box = (cx - r, cy - r, cx + r, cy + r)
+        th = min(0.95, self._threshold / self._max) if self._max else 0.5
+        low, _ = t.tone(self._low_tone)
+        high, _ = t.tone(self._high_tone)
+        track = t.c("surface_3")
+        # zones: lower-risk | balanced | higher-risk
+        zones = ((-1.0, -th, mix(self._ground, low, 0.85)),
+                 (-th, th, track),
+                 (th, 1.0, mix(self._ground, high, 0.85)))
+        for a, b, col in zones:
+            start = 90 - 90 * b
+            extent = 90 * (b - a)
+            self.create_arc(*box, start=start, extent=extent, style="arc",
+                            outline=col, width=thick)
+        frac = self._score / self._max if self._max else 0.0
+        tip = self._xy(cx, cy, r - thick - 2, frac)
+        ink = t.c("ink")
+        self.create_line(cx, cy, *tip, fill=ink, width=3, capstyle="round")
+        pr.dot(self, cx, cy, 7, fill=ink)
+        pr.dot(self, cx, cy, 3, fill=self._ground)
+        self.create_text(cx - r, cy + 11, text="lower", fill=t.c("ink_3"), font=t.font("micro"))
+        self.create_text(cx + r, cy + 11, text="higher", fill=t.c("ink_3"), font=t.font("micro"))
+        if self._caption:
+            self.create_text(cx, cy - r * 0.42, text=self._caption, fill=t.c("ink"),
+                             font=t.font("subtitle", "bold"))
