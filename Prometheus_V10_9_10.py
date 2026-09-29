@@ -1661,7 +1661,7 @@ def fetch_cbot_daily_history(commodity, start_date_str="2025-12-01", timeout=20)
         (f"https://query2.finance.yahoo.com/v8/finance/chart/{symbol}"
          f"?interval=1d&period1={ts_start}&period2={ts_end}"),
         (f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
-         f"?interval=1d&range=2y"),
+         f"?interval=1d&range={'10y' if (today - start).days > 700 else '2y'}"),
     ]):
         try:
             req = urllib.request.Request(url, headers={
@@ -14704,6 +14704,9 @@ class App(tk.Tk):
         ttk.Button(cb2, text="↙  Backfill Dec 2025→Now",
                    command=self._cbot_manual_backfill).pack(
                    side="left", padx=(0,6))
+        ttk.Button(cb2, text="⏪  Backfill 10 years (seasonality)",
+                   command=lambda: self._cbot_manual_backfill(years=10)).pack(
+                   side="left", padx=(0,6))
         ttk.Button(cb2, text="🔄  Refresh",
                    command=self._refresh_cbot_history_trees).pack(side="left")
         ttk.Label(cb2, text="Order:").pack(side="left", padx=(12,4))
@@ -14827,8 +14830,12 @@ class App(tk.Tk):
                     f"✔  Fetched {len(e)} close(s) for {today_str}")))
         threading.Thread(target=_fetch, daemon=True).start()
 
-    def _cbot_manual_backfill(self):
-        self._cbot_status_var.set("Backfilling CBOT history from Dec 2025… please wait")
+    def _cbot_manual_backfill(self, years=None):
+        start = CBOT_HISTORY_START
+        if years:
+            t = dt.date.today()
+            start = dt.date(t.year - int(years), t.month, 1).isoformat()
+        self._cbot_status_var.set(f"Backfilling CBOT history from {start}… please wait (can take a minute)")
         self.update_idletasks()
         import threading
         ch = self.state_obj.get("cbot_history", []) or []
@@ -14838,7 +14845,7 @@ class App(tk.Tk):
             for comm in CBOT_HISTORY_COMMODITIES:
                 try:
                     entries = fetch_cbot_daily_history(
-                        comm, start_date_str=CBOT_HISTORY_START, timeout=20)
+                        comm, start_date_str=start, timeout=30)
                     new_entries.extend(
                         e for e in entries
                         if (e["date"], e["commodity"]) not in existing)

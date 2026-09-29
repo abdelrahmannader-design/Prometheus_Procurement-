@@ -1,3 +1,7 @@
+# 2026-09-29 — CBOT history: 10-year backfill
+
+- Setup & Data → FX & CBOT History: new "Backfill 10 years (seasonality)" button fetches up to 10 years of daily CBOT closes (Corn, Soybean, SBM) so Market Signals → Seasonality and the stress-test history have enough years to be meaningful. Existing closes are kept; only missing dates are added.
+
 # 2026-09-28 — Market Signals redesigned (Aurora look)
 
 - The Market Signals tab now uses the app's modern design kit, like the CBOT Desk:
