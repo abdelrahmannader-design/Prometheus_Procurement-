@@ -1,3 +1,7 @@
+# 2026-10-01 (b) — Fix: yield shown as "final, +0.0%" during the season
+
+- USDA also copies the latest forecast into the year's annual figure; the app now ignores that copy until it differs (the real final in January), so the card compares this month's forecast with last month's.
+
 # 2026-10-01 — Market Signals: full USDA crop data + Wheat
 
 - Your NASS key now also brings: planting/harvest progress (with last year and a 5-year average the app computes from USDA's last 5 seasons), yield & production forecasts (Crop Production), quarterly grain stocks, state-level crop condition for the main producing states, and the full excellent / good / fair / poor / very poor split.

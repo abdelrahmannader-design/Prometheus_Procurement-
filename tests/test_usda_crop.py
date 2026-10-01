@@ -62,6 +62,14 @@ class ForecastTests(unittest.TestCase):
         self.assertEqual(sig["direction"], 1)                      # cut 1.2 % → up risk
         self.assertIn("15.80 bn bu", sig["reading"])
 
+    def test_annual_copy_of_latest_forecast_is_ignored(self):
+        rows = [_fc(2026, "YEAR - AUG FORECAST", "180.7"), _fc(2026, "YEAR - SEP FORECAST", "178.5"),
+                _fc(2026, "YEAR", "178.5")]
+        y = forecast_summary(parse_forecasts(rows, "CORN", "YIELD"), 2026)
+        self.assertEqual((y["period"], y["prev_value"]), ("Sep forecast", 180.7))
+        final = forecast_summary(parse_forecasts(rows[:2] + [_fc(2026, "YEAR", "177.9")], "CORN", "YIELD"), 2026)
+        self.assertEqual((final["period"], final["value"], final["prev_value"]), ("final", 177.9, 178.5))
+
     def test_single_forecast_gives_no_signal(self):
         y = forecast_summary(parse_forecasts([_fc(2026, "YEAR - AUG FORECAST", "180")], "CORN", "YIELD"), 2026)
         self.assertIsNone(yield_signal(y))

@@ -202,6 +202,12 @@ def parse_forecasts(payload: Any, crop: str, stat: str) -> list[dict[str, Any]]:
 
 def forecast_summary(rows: list[dict[str, Any]], year: int) -> dict[str, Any] | None:
     cur = [r for r in rows if r["year"] == year]
+    # During the season Quick Stats also fills the annual ("YEAR") row with
+    # the latest forecast. That copy is not a new estimate: drop it while it
+    # equals the last monthly forecast, so the change is forecast vs forecast.
+    fc = [r for r in cur if r["order"] <= 12]
+    if fc:
+        cur = [r for r in cur if r["order"] <= 12 or abs(r["value"] - fc[-1]["value"]) > 1e-9]
     if not cur:
         return None
     last = cur[-1]
