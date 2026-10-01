@@ -1,3 +1,11 @@
+# 2026-10-01 — Market Signals: full USDA crop data + Wheat
+
+- Your NASS key now also brings: planting/harvest progress (with last year and a 5-year average the app computes from USDA's last 5 seasons), yield & production forecasts (Crop Production), quarterly grain stocks, state-level crop condition for the main producing states, and the full excellent / good / fair / poor / very poor split.
+- Three new signals in the bias: Crop progress, Yield forecast, Grain stocks (9 signals in total).
+- New "USDA crop" view: season chart of % good/excellent vs last year, condition split bar, state table with weekly change, progress bars vs average, yield and production with change vs the previous forecast, and a stocks bar chart by quarter.
+- Wheat added to Market Signals (CFTC, futures curve, USDA, history); the CBOT history now also stores Wheat (ZW=F).
+- Each USDA part loads independently; a part that fails is named in the status line and the others still show.
+
 # 2026-09-29 — CBOT history: 10-year backfill
 
 - Setup & Data → FX & CBOT History: new "Backfill 10 years (seasonality)" button fetches up to 10 years of daily CBOT closes (Corn, Soybean, SBM) so Market Signals → Seasonality and the stress-test history have enough years to be meaningful. Existing closes are kept; only missing dates are added.

@@ -124,19 +124,23 @@ Intake is either Direct *or* Indirect (never both). Clearance is always a separa
 - Exports a formula-based workbook with a CBOT-vs-Local premium bridge.
 
 ### Market Signals — is the risk that CBOT goes up or down?
-Not a forecast. Six signals each vote ▲ up-risk / ▼ down-risk / ● neutral with a weight; the **bias** is the total score (≥ +1.5 = risk of HIGHER, ≤ −1.5 = risk of LOWER, otherwise balanced).
+Not a forecast. Nine signals each vote ▲ up-risk / ▼ down-risk / ● neutral with a weight; the **bias** is the total score (≥ +1.5 = risk of HIGHER, ≤ −1.5 = risk of LOWER, otherwise balanced).
 
 | Signal | Source | Up-risk when… | Weight |
 |---|---|---|---|
 | Fund positioning | CFTC Commitments of Traders (managed money, fetched automatically) | funds' net position is in the lowest 10 % of 3 years (big short → short-covering risk) | 2 (1 if only a big weekly change) |
 | US crop condition | USDA NASS Crop Progress (needs a free API key) | good/excellent falls ≥ 2 pts on the week and/or is ≥ 5 pts below last year | 1.5 |
 | Supply & demand | USDA WASDE ending stocks (you type them monthly) | US change + ½ × world change ≤ −3 % vs last month | 2 |
+| Crop progress | USDA NASS (same key) | planting / harvest ≥ 5 pts behind the 5-year average for that report week (the app computes the average from USDA's last 5 seasons) | 1 |
+| Yield forecast | USDA NASS Crop Production (same key) | latest yield forecast ≥ 1 % below the previous one this season | 1.5 |
+| Grain stocks | USDA NASS quarterly Grain Stocks (same key) | latest stocks ≥ 10 % below the same quarter a year earlier | 1 |
 | Futures curve | CBOT front vs the contract ~5 months out (Yahoo) | deferred is > 1 % below the front (inverted = tight now) | 1 |
 | Price trend | the app's CBOT history | last close > 50-day avg > 200-day avg | 1 |
 | Seasonality | the app's CBOT history | next month rose on average ≥ 1.5 % and in ≥ 60 % of years | 0.5 |
 
 Down-risk is the mirror image. **Use this bias in the stress test** sets the Calculate stress CBOT shocks to `-5, 5, 10, 15` (UP), `-15, -10, -5, 5` (DOWN) or `-10, -5, 5, 10` (balanced).
 **Report calendar** lists the next 60 days of USDA/CFTC reports (WASDE dates are estimates around the 10th; the others follow fixed rules) plus your own events. The day before a High-impact report — and whenever the bias is UP — the Action Centre warns if you still have unpriced MT.
+**USDA crop** shows, for Corn, Soybeans (also used for SBM) and Wheat: the good/excellent rating through the season (this year vs last year) with the full excellent→very-poor split, the main producing states with their weekly change, planting/harvest progress vs last year and the 5-year average, the latest yield and production forecast vs the previous one, and the last quarterly stocks vs a year earlier.
 **CBOT seasonality** shows the average month-over-month change of the month-end CBOT close by calendar month.
 
 ### Budget vs Actual — are we buying at or below budget?

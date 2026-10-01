@@ -84,6 +84,18 @@ from prometheus_core.market_signals import (
     combine_signals as _core_combine_signals,
     report_calendar as _core_report_calendar,
 )
+from prometheus_core.usda_crop import (
+    pick_latest_class as _core_pick_latest_class,
+    parse_progress as _core_parse_progress,
+    progress_summary as _core_progress_summary,
+    progress_signal as _core_progress_signal,
+    parse_forecasts as _core_parse_forecasts,
+    forecast_summary as _core_forecast_summary,
+    yield_signal as _core_yield_signal,
+    parse_stocks as _core_parse_stocks,
+    stocks_signal as _core_stocks_signal,
+    parse_state_condition as _core_parse_state_condition,
+)
 from prometheus_core.budget import (
     budget_year_of as _core_budget_year_of,
     budget_year_label as _core_budget_year_label,
@@ -880,7 +892,7 @@ def fetch_yahoo_fx_rate(timeout=8):
 CFTC_COT_URL = "https://publicreporting.cftc.gov/resource/72hh-3qpy.json"
 NASS_API_URL = "https://quickstats.nass.usda.gov/api/api_GET/"
 NASS_COMMODITY = {"CORN": "CORN", "SOYBEAN": "SOYBEANS", "SBM": "SOYBEANS", "WHEAT": "WHEAT"}
-MARKET_SIGNAL_COMMODITIES = ["CORN", "SOYBEAN", "SBM"]
+MARKET_SIGNAL_COMMODITIES = ["CORN", "SOYBEAN", "SBM", "WHEAT"]
 MARKET_SOURCE_LINKS = {
     "WASDE (USDA)": "https://www.usda.gov/oce/commodity/wasde",
     "Crop Progress (USDA NASS)": "https://www.nass.usda.gov/Publications/National_Crop_Progress/",
@@ -909,25 +921,76 @@ def fetch_cftc_cot(commodity, weeks=160, timeout=15):
     return rows
 
 
+def nass_query(api_key, timeout=25, **params):
+    """One Quick Stats request → list of rows. 'No data' is an empty list,
+    not an error (USDA answers HTTP 400 for an empty selection)."""
+    q = urllib.parse.urlencode({"key": api_key, "source_desc": "SURVEY", "sector_desc": "CROPS",
+                                "format": "JSON", **params})
+    try:
+        payload = _http_get_json(f"{NASS_API_URL}?{q}", timeout=timeout)
+    except urllib.error.HTTPError as exc:
+        body = ""
+        try:
+            body = exc.read().decode("utf-8", errors="replace")
+        except Exception:
+            pass
+        if exc.code == 400 and "no data" in body.lower():
+            return []
+        if exc.code in (401, 403) or "key" in body.lower() and "invalid" in body.lower():
+            raise RuntimeError(f"USDA refused the API key (HTTP {exc.code})")
+        raise RuntimeError(f"HTTP {exc.code}: {body[:120]}")
+    if isinstance(payload, dict) and payload.get("error"):
+        err = str(payload.get("error"))
+        if "no data" in err.lower():
+            return []
+        raise RuntimeError(err)
+    return (payload or {}).get("data") or []
+
+
 def fetch_nass_condition(commodity, api_key, year, timeout=20):
-    """Weekly national good/excellent % for this year and last year."""
+    """Weekly national good/excellent % (+ fair/poor) for this year and last year."""
     name = NASS_COMMODITY.get((commodity or "").upper())
     if not name:
         raise RuntimeError(f"No USDA crop for {commodity}")
-    q = urllib.parse.urlencode({
-        "key": api_key, "source_desc": "SURVEY", "sector_desc": "CROPS", "commodity_desc": name,
-        "statisticcat_desc": "CONDITION", "agg_level_desc": "NATIONAL", "freq_desc": "WEEKLY",
-        "year__GE": int(year) - 1, "format": "JSON"})
-    payload = _http_get_json(f"{NASS_API_URL}?{q}", timeout=timeout)
-    if isinstance(payload, dict) and payload.get("error"):
-        raise RuntimeError(str(payload.get("error")))
-    data = (payload or {}).get("data") or []
+    data = nass_query(api_key, timeout, commodity_desc=name, statisticcat_desc="CONDITION",
+                      agg_level_desc="NATIONAL", freq_desc="WEEKLY", year__GE=int(year) - 1)
     by_year = {}
     for r in data:
         by_year.setdefault(str(r.get("year") or ""), []).append(r)
-    return (_core_parse_nass_condition(by_year.get(str(year), [])),
-            _core_parse_nass_condition(by_year.get(str(int(year) - 1), [])))
+    return (_core_parse_nass_condition(_core_pick_latest_class(by_year.get(str(year), []))),
+            _core_parse_nass_condition(_core_pick_latest_class(by_year.get(str(int(year) - 1), []))))
 
+
+def fetch_nass_crop_bundle(commodity, api_key, year, timeout=25):
+    """Everything else the free key gives for one crop. Each part is
+    independent: one failing part is reported, the others still load."""
+    name = NASS_COMMODITY.get((commodity or "").upper())
+    out, errors = {}, {}
+    parts = {
+        "progress": dict(statisticcat_desc="PROGRESS", agg_level_desc="NATIONAL", freq_desc="WEEKLY",
+                         year__GE=int(year) - 5),
+        "yield": dict(statisticcat_desc="YIELD", agg_level_desc="NATIONAL", year__GE=int(year) - 1),
+        "production": dict(statisticcat_desc="PRODUCTION", agg_level_desc="NATIONAL", year__GE=int(year) - 1),
+        "stocks": dict(statisticcat_desc="STOCKS", agg_level_desc="NATIONAL", year__GE=int(year) - 2),
+        "states": dict(statisticcat_desc="CONDITION", agg_level_desc="STATE", freq_desc="WEEKLY",
+                       year=int(year)),
+    }
+    for part, params in parts.items():
+        try:
+            rows = nass_query(api_key, timeout, commodity_desc=name, **params)
+            if part == "progress":
+                out[part] = _core_progress_summary(_core_parse_progress(rows), int(year))
+            elif part in ("yield", "production"):
+                out[part] = _core_forecast_summary(
+                    _core_parse_forecasts(rows, name, part.upper()), int(year))
+            elif part == "stocks":
+                out[part] = _core_parse_stocks(rows, name)[-12:]
+            else:
+                out[part] = _core_parse_state_condition(rows, name)
+        except Exception as exc:
+            errors[part] = str(exc)[:140]
+    out["errors"] = errors
+    return out
 
 
 def _http_get_text(url, timeout=12):
@@ -1462,8 +1525,8 @@ def fetch_fx_history_backfill(existing_dates, start_date_str="2025-12-01",
 
 
 # ── CBOT Daily History ─────────────────────────────────────────────────
-CBOT_HISTORY_COMMODITIES = ["CORN", "SBM", "SOYBEAN"]
-CBOT_YAHOO_SYMBOLS = {"CORN": "ZC=F", "SBM": "ZM=F", "SOYBEAN": "ZS=F"}
+CBOT_HISTORY_COMMODITIES = ["CORN", "SBM", "SOYBEAN", "WHEAT"]
+CBOT_YAHOO_SYMBOLS = {"CORN": "ZC=F", "SBM": "ZM=F", "SOYBEAN": "ZS=F", "WHEAT": "ZW=F"}
 
 # ── Hardcoded seed: daily CBOT closes Dec 2025 → Jun 2026 ─────────────
 # Front-month continuous contract. Source: reference-grade training data.
@@ -31956,6 +32019,19 @@ class App(tk.Tk):
                 sigs.append(_core_crop_condition_signal(weeks, nass.get("last_year") or []))
         else:
             missing.append("US crop condition (USDA) — add your free NASS key and fetch")
+        has_key = bool(nass)
+        s = _core_progress_signal(nass.get("progress") or [], today)
+        (sigs if s else missing).append(s or (
+            "Crop progress (USDA) — no planting or harvest under way right now" if has_key
+            else "Crop progress (USDA) — add your free NASS key and fetch"))
+        s = _core_yield_signal(nass.get("yield"), nass.get("production"))
+        (sigs if s else missing).append(s or (
+            "Yield forecast (USDA) — needs two forecasts this season (corn/soy Aug–Nov, wheat May–Aug)"
+            if has_key else "Yield forecast (USDA) — add your free NASS key and fetch"))
+        s = _core_stocks_signal(nass.get("stocks") or [], today)
+        (sigs if s else missing).append(s or (
+            "Grain stocks (USDA) — no quarterly report found yet" if has_key
+            else "Grain stocks (USDA) — add your free NASS key and fetch"))
         w = ms["wasde"].get(base) or {}
         s = _core_wasde_signal(w.get("us_this"), w.get("us_last"), w.get("world_this"),
                                w.get("world_last"), w.get("month", ""))
@@ -31972,7 +32048,8 @@ class App(tk.Tk):
         s = _core_seasonal_signal(season, today)
         (sigs if s else missing).append(s or "Seasonality — needs 2+ years of CBOT history")
         out = _core_combine_signals(sigs)
-        out.update({"commodity": base, "missing": missing, "season": season})
+        out.update({"commodity": base, "missing": missing, "season": season,
+                    "total_signals": len(sigs) + len(missing)})
         return out
 
     def _market_signal_alerts(self, today=None):
@@ -32028,6 +32105,7 @@ class App(tk.Tk):
     _MSX_BIAS = {"UP": ("▲", "Risk of HIGHER", "rose"), "DOWN": ("▼", "Risk of LOWER", "mint"),
                  "BALANCED": ("●", "Balanced", "sky")}
     _MSX_GLYPH = {"Fund positioning (CFTC)": "🏦", "US crop condition (USDA)": "🌽",
+                  "Crop progress (USDA)": "🚜", "Yield forecast (USDA)": "🌾", "Grain stocks (USDA)": "🏭",
                   "Supply & demand (WASDE)": "📊", "Futures curve": "📈", "Price trend": "〽",
                   "Seasonality (own history)": "📅"}
 
@@ -32064,12 +32142,12 @@ class App(tk.Tk):
         lbl.grid(row=0, column=1, sticky="ew")
         self._ms_status_var.trace_add("write", lambda *_a: self._msx_status_tone())
 
-        seg = SegmentedControl(root, t, ["Signals & bias", "Report calendar", "Seasonality", "Settings"],
+        seg = SegmentedControl(root, t, ["Signals & bias", "USDA crop", "Report calendar", "Seasonality", "Settings"],
                                command=self._msx_show_view, ground=t.c("bg"), height=38, pad_x=26)
         seg.grid(row=2, column=0, sticky="w", padx=8, pady=(12, 10))
         self._msx["seg"] = seg
         views = {}
-        for name in ("Signals & bias", "Report calendar", "Seasonality", "Settings"):
+        for name in ("Signals & bias", "USDA crop", "Report calendar", "Seasonality", "Settings"):
             f = tk.Frame(root, bg=t.c("bg"))
             f.columnconfigure(0, weight=1)
             views[name] = f
@@ -32138,7 +32216,7 @@ class App(tk.Tk):
             g.grid(row=1, column=0, sticky="ew", pady=(6, 2))
             g.set(r["score"], r["max_score"] or 1.0)
             self._msx_label(b, f"Score {r['score']:+.1f} of ±{r['max_score']:.1f}   ·   "
-                               f"{len(r['signals'])} of 6 signals", "caption", "bold", "ink_2"
+                               f"{len(r['signals'])} of {r['total_signals']} signals", "caption", "bold", "ink_2"
                             ).grid(row=2, column=0, sticky="w")
             mt = unpriced.get(base, 0.0)
             self._msx_label(b, f"{mt:,.0f} MT unpriced" if mt > 0 else "Nothing unpriced", "caption",
@@ -32243,6 +32321,190 @@ class App(tk.Tk):
     def _msx_select(self, base):
         self._ms_sel = base
         self.refresh_market_signals()
+
+    # ── USDA crop view (condition chart, progress, yield, stocks, states) ──
+    def _msx_render_usda(self):
+        from prometheus_ui.widgets import Card, Chip, ProgressTrack, SegmentedControl, PillButton
+        from prometheus_ui.charts import AreaChart, BarChart
+        t = self.ui_theme
+        v = self._msx["views"]["USDA crop"]
+        self._msx_clear(v)
+        base = self._ms_sel
+        nass = self._ms_state()["nass"].get(base) or {}
+        crop = NASS_COMMODITY.get(base, base).title()
+        head = tk.Frame(v, bg=t.c("bg"))
+        head.grid(row=0, column=0, sticky="ew", padx=6, pady=(0, 6))
+        head.columnconfigure(0, weight=1)
+        self._msx_label(head, f"US {crop} crop — USDA NASS"
+                        + (f"   (used for {base})" if crop.upper() != base else ""), "title", "bold", bg=t.c("bg")
+                        ).grid(row=0, column=0, sticky="w")
+        SegmentedControl(head, t, MARKET_SIGNAL_COMMODITIES, value=base, ground=t.c("bg"),
+                         command=self._msx_select).grid(row=0, column=1, sticky="e")
+        if not nass:
+            card = Card(v, t, radius="xl", pad=22, ground=t.c("bg"))
+            card.grid(row=1, column=0, sticky="ew", padx=6)
+            self._msx_label(card.body, "No USDA data yet", "subtitle", "bold").pack(anchor="w")
+            self._msx_label(card.body, "Add your free NASS API key in Settings and press Fetch latest. You then get "
+                                       "crop condition, planting/harvest progress, yield forecasts, quarterly stocks "
+                                       "and the main producing states.", ink="ink_2", wrap=900).pack(anchor="w",
+                                                                                                    pady=(4, 10))
+            PillButton(card.body, t, "Open Settings", command=lambda: (self._msx["seg"].set_value("Settings"),
+                                                                       self._msx_show_view("Settings")),
+                       ground=card.fill, size="caption").pack(anchor="w")
+            return
+
+        grid = tk.Frame(v, bg=t.c("bg"))
+        grid.grid(row=1, column=0, sticky="ew")
+        grid.columnconfigure(0, weight=3, uniform="u")
+        grid.columnconfigure(1, weight=2, uniform="u")
+
+        # 1. Condition through the season
+        weeks, ly = nass.get("weeks") or [], nass.get("last_year") or []
+        c1 = Card(grid, t, radius="xl", pad=16, ground=t.c("bg"))
+        c1.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
+        b = c1.body
+        b.columnconfigure(0, weight=1)
+        self._msx_label(b, "Crop condition — % good / excellent", "subtitle", "bold").grid(row=0, column=0,
+                                                                                         sticky="w")
+        if weeks:
+            pts, sec = [], []
+            for w in weeks:
+                d = parse_date_flex(w["week_ending"])
+                pts.append((f"{d:%d %b}" if d else w["week_ending"], w["ge"]))
+                if ly and d:
+                    near = min(ly, key=lambda x: abs((parse_date_flex(x["week_ending"]).replace(year=d.year) - d).days)
+                               if parse_date_flex(x["week_ending"]) else 999)
+                    sec.append((pts[-1][0], near["ge"]))
+            ch = AreaChart(b, t, ground=c1.fill, height=200, tone="mint", value_format=lambda x: f"{x:.0f}%")
+            ch.grid(row=1, column=0, sticky="ew", pady=(8, 4))
+            ch.set_series(pts, tone="mint", secondary=sec or None, secondary_tone="sky")
+            last = weeks[-1]
+            self._msx_label(b, f"Green = this year · blue = last year (same week).  Latest {last['week_ending']}: "
+                               f"{last['ge']:.0f}% good/excellent", "caption", ink="ink_3").grid(row=2, column=0,
+                                                                                               sticky="w")
+            if all(k in last for k in ("fair", "poor", "vpoor")):
+                bar = ProgressTrack(b, t, height=14, ground=c1.fill)
+                bar.grid(row=3, column=0, sticky="ew", pady=(10, 2))
+                bar.set_segments([(last["ex"] / 100, "mint"), (last["good"] / 100, "sky"),
+                                  (last["fair"] / 100, "amber"), ((last["poor"] + last["vpoor"]) / 100, "rose")])
+                self._msx_label(b, f"Excellent {last['ex']:.0f}% · Good {last['good']:.0f}% · Fair {last['fair']:.0f}% · "
+                                   f"Poor {last['poor']:.0f}% · Very poor {last['vpoor']:.0f}%", "caption",
+                                ink="ink_2").grid(row=4, column=0, sticky="w")
+        else:
+            self._msx_label(b, "No condition ratings this season yet (USDA rates crops about June–October; "
+                               "winter wheat also in spring).", ink="ink_3", wrap=600).grid(row=1, column=0,
+                                                                                           sticky="w", pady=8)
+
+        # 2. Key states
+        c2 = Card(grid, t, radius="xl", pad=16, ground=t.c("bg"))
+        c2.grid(row=0, column=1, sticky="nsew", padx=6, pady=6)
+        b = c2.body
+        b.columnconfigure(1, weight=1)
+        self._msx_label(b, "Main producing states", "subtitle", "bold").grid(row=0, column=0, columnspan=4,
+                                                                             sticky="w", pady=(0, 6))
+        states = nass.get("states") or []
+        if not states:
+            self._msx_label(b, "No state ratings this season yet.", ink="ink_3").grid(row=1, column=0, sticky="w")
+        for i, srow in enumerate(states, start=1):
+            self._msx_label(b, srow["name"], "body", "bold").grid(row=i, column=0, sticky="w", pady=3)
+            tr = ProgressTrack(b, t, height=10, ground=c2.fill)
+            tr.grid(row=i, column=1, sticky="ew", padx=10)
+            tr.set_value(srow["ge"] / 100.0, tone="mint" if srow["ge"] >= 60 else "amber" if srow["ge"] >= 45
+                         else "rose")
+            self._msx_label(b, f"{srow['ge']:.0f}%", "body", "bold").grid(row=i, column=2, sticky="e")
+            chg = srow.get("change")
+            if chg is not None:
+                Chip(b, t, f"{chg:+.0f}", tone="mint" if chg > 0 else "rose" if chg < 0 else "sky",
+                     ground=c2.fill).grid(row=i, column=3, padx=(8, 0))
+        if states:
+            self._msx_label(b, f"% good/excellent, week ending {states[0]['week_ending']}; chip = change on the week.",
+                            "micro", ink="ink_3").grid(row=len(states) + 1, column=0, columnspan=4, sticky="w",
+                                                       pady=(6, 0))
+
+        # 3. Field progress vs last year / 5-year average
+        c3 = Card(grid, t, radius="xl", pad=16, ground=t.c("bg"))
+        c3.grid(row=1, column=0, sticky="nsew", padx=6, pady=6)
+        b = c3.body
+        b.columnconfigure(1, weight=1)
+        self._msx_label(b, "Planting & harvest progress", "subtitle", "bold").grid(row=0, column=0, columnspan=4,
+                                                                                    sticky="w", pady=(0, 6))
+        prog = [p for p in (nass.get("progress") or []) if p.get("pct") is not None]
+        if not prog:
+            self._msx_label(b, "No progress reports this season yet.", ink="ink_3").grid(row=1, column=0, sticky="w")
+        for i, p in enumerate(prog[:8], start=1):
+            self._msx_label(b, p["stage"].title(), "body", "bold").grid(row=i, column=0, sticky="w", pady=4)
+            tr = ProgressTrack(b, t, height=12, ground=c3.fill)
+            tr.grid(row=i, column=1, sticky="ew", padx=10)
+            tr.set_value(p["pct"] / 100.0, tone="brand")
+            parts = [f"{p['pct']:.0f}%"]
+            if p.get("last_year") is not None:
+                parts.append(f"last yr {p['last_year']:.0f}%")
+            if p.get("avg5") is not None:
+                parts.append(f"5-yr avg {p['avg5']:.0f}%")
+            self._msx_label(b, " · ".join(parts), "caption", ink="ink_2").grid(row=i, column=2, sticky="w")
+            if p.get("avg5") is not None:
+                d = p["pct"] - p["avg5"]
+                Chip(b, t, f"{d:+.0f} vs avg", tone="rose" if d <= -5 else "mint" if d >= 5 else "sky",
+                     ground=c3.fill).grid(row=i, column=3, padx=(8, 0))
+        if prog:
+            self._msx_label(b, f"Latest week ending {prog[0]['week_ending']}. 5-year average calculated by the app "
+                               "from USDA's last 5 seasons (same report week). Behind the average = weather delays "
+                               "= support for prices.", "micro", ink="ink_3", wrap=620
+                            ).grid(row=10, column=0, columnspan=4, sticky="w", pady=(6, 0))
+
+        # 4. Yield, production and stocks
+        c4 = Card(grid, t, radius="xl", pad=16, ground=t.c("bg"))
+        c4.grid(row=1, column=1, sticky="nsew", padx=6, pady=6)
+        b = c4.body
+        b.columnconfigure(0, weight=1)
+        self._msx_label(b, "Crop size & stocks", "subtitle", "bold").grid(row=0, column=0, sticky="w", pady=(0, 6))
+        yl, pr_ = nass.get("yield"), nass.get("production")
+        r = 1
+        if yl:
+            chg = ((yl["value"] / yl["prev_value"] - 1) * 100) if yl.get("prev_value") else None
+            line = tk.Frame(b, bg=c4.fill)
+            line.grid(row=r, column=0, sticky="ew")
+            line.columnconfigure(0, weight=1)
+            self._msx_label(line, f"Yield {yl['value']:,.1f} bu/acre", "title", "bold").grid(row=0, column=0,
+                                                                                             sticky="w")
+            if chg is not None:
+                Chip(line, t, f"{chg:+.1f}% vs {yl['prev_period']}",
+                     tone="rose" if chg < 0 else "mint" if chg > 0 else "sky", ground=c4.fill
+                     ).grid(row=0, column=1, sticky="e")
+            sub = [f"USDA {yl['period']}"]
+            if yl.get("last_year"):
+                sub.append(f"last year {yl['last_year']:,.1f}")
+            if pr_ and pr_.get("value"):
+                sub.append(f"crop {pr_['value'] / 1e9:,.2f} bn bu"
+                           + (f" (last yr {pr_['last_year'] / 1e9:,.2f})" if pr_.get("last_year") else ""))
+            self._msx_label(b, " · ".join(sub), "caption", ink="ink_2", wrap=460).grid(row=r + 1, column=0,
+                                                                                      sticky="w")
+            r += 2
+        else:
+            self._msx_label(b, "No yield forecast for this season yet (corn & soybeans from August, wheat from May).",
+                            "caption", ink="ink_3", wrap=460).grid(row=r, column=0, sticky="w")
+            r += 1
+        stocks = nass.get("stocks") or []
+        if stocks:
+            last = stocks[-1]
+            self._msx_label(b, f"Stocks {last['period']} {last['year']}: {last['value'] / 1e9:,.2f} bn bu",
+                            "body", "bold").grid(row=r, column=0, sticky="w", pady=(14, 0))
+            bars = []
+            for srow in stocks[-8:]:
+                same = srow["quarter"] == last["quarter"]
+                bars.append((f"{srow['period'][2:]} {str(srow['year'])[2:]}", srow["value"] / 1e9,
+                             "brand" if same else "sky"))
+            bc = BarChart(b, t, ground=c4.fill, height=150, value_format=lambda x: f"{x:,.2f} bn bu")
+            bc.grid(row=r + 1, column=0, sticky="ew", pady=(4, 0))
+            bc.set_bars(bars)
+            self._msx_label(b, "Purple = same quarter as the latest report (compare year on year).", "micro",
+                            ink="ink_3").grid(row=r + 2, column=0, sticky="w")
+        err = {k: v for k, v in (self._ms_state().get("errors") or {}).items() if k.startswith("USDA")}
+        if err:
+            self._msx_label(v, "⚠ Some USDA parts could not be loaded: " + "; ".join(f"{k} ({e})" for k, e in
+                                                                                 err.items()),
+                            "caption", ink="rose", bg=t.c("bg"), wrap=1100).grid(row=2, column=0, sticky="w",
+                                                                                  padx=10, pady=(6, 0))
 
     # ── Calendar view ───────────────────────────────────────────────────
     def _msx_render_calendar(self, today, unpriced):
@@ -32453,7 +32715,7 @@ class App(tk.Tk):
                 headline="Is the CBOT risk leaning up or down?",
                 support=("Risk of higher prices: " + ", ".join(ups) + "." if ups else
                          "No commodity leans to higher prices right now.")
-                        + "  A weighted vote of 6 signals — a risk lean, not a price forecast.",
+                        + f"  A weighted vote of {r['total_signals']} signals — a risk lean, not a price forecast.",
                 metric_label=f"{self._ms_sel} bias", metric_value=f"{glyph} {text}",
                 metric_delta=f"score {r['score']:+.1f} / ±{r['max_score']:.1f}",
                 metric_delta_tone=tone,
@@ -32464,6 +32726,7 @@ class App(tk.Tk):
                     f"Last fetched {ms['last_fetch'][:16].replace('T', ' ')}" if ms.get("last_fetch")
                     else "Not fetched yet — press ⟳ Fetch latest.")
             self._msx_render_signals(unpriced)
+            self._msx_render_usda()
             self._msx_render_calendar(today, unpriced)
             self._msx_render_seasonality()
             wv = self._ms_state()["wasde"].get(self._ms_sel) or {}
@@ -32747,9 +33010,13 @@ class App(tk.Tk):
             weeks, ly = fetch_nass_condition(crop, key, today.year)
             if not weeks:
                 weeks, ly = ly, []  # before the new season starts: last year's final weeks
+            bundle = fetch_nass_crop_bundle(crop, key, today.year)
+            for part, err in (bundle.pop("errors", {}) or {}).items():
+                res["errors"][f"USDA {NASS_COMMODITY.get(crop, crop).title()} {part}"] = err
             for base in MARKET_SIGNAL_COMMODITIES:
                 if NASS_COMMODITY.get(base) == NASS_COMMODITY.get(crop):
-                    res["nass"][base] = {"weeks": weeks, "last_year": ly, "fetched": dt.datetime.now().isoformat()}
+                    res["nass"][base] = {"weeks": weeks, "last_year": ly, "fetched": dt.datetime.now().isoformat(),
+                                         **bundle}
 
         tasks = [(f"CFTC {b}", _cot, b) for b in MARKET_SIGNAL_COMMODITIES]
         tasks += [(f"Curve {b}", _curve, b) for b in MARKET_SIGNAL_COMMODITIES]
@@ -32871,7 +33138,7 @@ class App(tk.Tk):
                 label = {"UP": "▲ Risk of HIGHER", "DOWN": "▼ Risk of LOWER", "BALANCED": "● Balanced"}[r["bias"]]
                 tv.insert("", "end", iid=base, tags=(r["bias"],), values=(
                     base, label, f"{r['score']:+.1f} of ±{r['max_score']:.1f}",
-                    f"{len(r['signals'])} of 6", f"{unpriced.get(base, 0.0):,.0f}", r["advice"]))
+                    f"{len(r['signals'])} of {r['total_signals']}", f"{unpriced.get(base, 0.0):,.0f}", r["advice"]))
             if prev in self._ms_results:
                 tv.selection_set(prev)
             self._ms_show_detail()

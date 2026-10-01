@@ -102,9 +102,16 @@ def parse_nass_condition(payload: Any) -> list[dict[str, Any]]:
         slot = by_week.setdefault(wk, {})
         if "EXCELLENT" in unit:
             slot["ex"] = val
+        elif "VERY POOR" in unit:
+            slot["vpoor"] = val
+        elif "POOR" in unit:
+            slot["poor"] = val
+        elif "FAIR" in unit:
+            slot["fair"] = val
         elif "GOOD" in unit:
             slot["good"] = val
-    out = [{"week_ending": w, "ge": v["ex"] + v["good"]}
+    out = [{"week_ending": w, "ge": v["ex"] + v["good"],
+            **{k: v[k] for k in ("ex", "good", "fair", "poor", "vpoor") if k in v}}
            for w, v in by_week.items() if "ex" in v and "good" in v]
     out.sort(key=lambda x: x["week_ending"])
     return out
