@@ -25,15 +25,15 @@ from __future__ import annotations
 
 import json
 import re
+from urllib.parse import urljoin, urlsplit
 
 __all__ = ["CIB_DEFAULT_URL", "FX_SOURCE_FRANKFURTER", "FX_SOURCE_CIB",
-           "FX_SOURCE_MANUAL", "FX_SOURCES", "parse_bank_rates",
-           "pick_costing_rate"]
+           "FX_SOURCE_MANUAL", "FX_SOURCES", "discover_rate_urls",
+           "embedded_json_blobs", "parse_bank_rates", "pick_costing_rate"]
 
-#: Commercial International Bank's published rate page.  Editable in the app:
-#: if CIB moves it, point the setting at the new address rather than waiting
-#: for a new build.
-CIB_DEFAULT_URL = "https://www.cibeg.com/en/personal/rates-and-fees/exchange-rates"
+#: CIB's currency converter.  Editable in the app: if CIB moves it, point the
+#: setting at the new address rather than waiting for a new build.
+CIB_DEFAULT_URL = "https://www.cibeg.com/en/currency-converter"
 
 FX_SOURCE_FRANKFURTER = "Frankfurter (official mid)"
 FX_SOURCE_CIB = "CIB bank rate"
@@ -86,9 +86,13 @@ def _from_json(payload, currency):
 
     def walk(node):
         if isinstance(node, dict):
+            # A converter payload names the pair as from/to or base/target
+            # rather than carrying a "currency" field, so both shapes count.
             label = " ".join(
                 str(node.get(key, "")) for key in
-                ("currency", "code", "currencyCode", "symbol", "name")).upper()
+                ("currency", "code", "currencyCode", "symbol", "name",
+                 "from", "to", "base", "target", "fromCurrency",
+                 "toCurrency")).upper()
             if any(word in label for word in _USD_WORDS):
                 for key, value in node.items():
                     low = key.lower()
@@ -101,6 +105,12 @@ def _from_json(payload, currency):
                     if "buy" in low or "bid" in low:
                         found.setdefault("buy", number)
                     elif "sell" in low or "ask" in low or "offer" in low:
+                        found.setdefault("sell", number)
+                    elif low in ("rate", "value", "price", "amount", "result"):
+                        # A converter quotes one number — the rate a customer
+                        # is given.  Treated as the sell side, and the caller
+                        # shows an empty buy so the single-sided quote is
+                        # visible rather than implied.
                         found.setdefault("sell", number)
             for value in node.values():
                 walk(value)
@@ -167,6 +177,72 @@ def parse_bank_rates(text, currency="USD"):
     if buy > sell:
         buy, sell = sell, buy
     return {"buy": buy, "sell": sell, "line": line}
+
+
+# A converter page usually renders its rates in the browser, so the number is
+# not in the HTML at all — it arrives from a JSON call the page makes after
+# loading. These two helpers let the fetcher follow that one hop instead of
+# reporting an empty page.
+
+_SCRIPT = re.compile(r"(?is)<script[^>]*>(.*?)</script>")
+_JSON_BLOB = re.compile(r"(?s)([\[{].*[\]}])")
+_URLISH = re.compile(r"""["'](/[^"'\s]{3,200}|https?://[^"'\s]{5,300})["']""")
+_RATE_WORDS = ("rate", "currenc", "exchange", "fx", "convert")
+_NOT_ASSETS = (".js", ".css", ".png", ".jpg", ".jpeg", ".svg", ".gif",
+               ".woff", ".woff2", ".ico", ".mp4", ".pdf")
+
+
+def embedded_json_blobs(html):
+    """JSON payloads inlined into ``<script>`` tags, largest first.
+
+    Server-rendered frameworks drop the page's data into the markup this way
+    (``__NEXT_DATA__`` and friends), so the rate is often already in hand
+    without a second request.
+    """
+    blobs = []
+    for body in _SCRIPT.findall(html or ""):
+        text = body.strip()
+        if not text:
+            continue
+        candidates = [text] if text[:1] in "{[" else []
+        match = _JSON_BLOB.search(text)
+        if match:
+            candidates.append(match.group(1))
+        for candidate in candidates:
+            try:
+                json.loads(candidate)
+            except (ValueError, TypeError):
+                continue
+            blobs.append(candidate)
+    blobs.sort(key=len, reverse=True)
+    return blobs
+
+
+def discover_rate_urls(html, base_url, limit=6):
+    """Rate-looking endpoints referenced by the page, as absolute URLs.
+
+    Restricted to the host the page itself is on: a rate fetcher should not
+    follow a page off to an arbitrary third party, and an off-host match is
+    far more likely to be an analytics beacon than a rate feed.
+    """
+    host = urlsplit(base_url or "").netloc.lower()
+    seen, out = set(), []
+    for raw in _URLISH.findall(html or ""):
+        low = raw.lower()
+        if not any(word in low for word in _RATE_WORDS):
+            continue
+        if low.endswith(_NOT_ASSETS):
+            continue
+        absolute = urljoin(base_url or "", raw)
+        if urlsplit(absolute).netloc.lower() != host:
+            continue
+        if absolute in seen:
+            continue
+        seen.add(absolute)
+        out.append(absolute)
+        if len(out) >= limit:
+            break
+    return out
 
 
 def pick_costing_rate(buy, sell):

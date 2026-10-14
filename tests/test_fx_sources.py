@@ -90,3 +90,44 @@ class CostingRateTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class JavaScriptPageTests(unittest.TestCase):
+    """A converter page renders in the browser, so the rate is rarely in the
+    HTML. These cover the two ways to reach it anyway."""
+
+    def test_inline_json_is_found_when_the_markup_has_no_rate_row(self):
+        from prometheus_core.fx_sources import embedded_json_blobs
+        html = """<html><body><div id="app"></div>
+        <script id="__NEXT_DATA__" type="application/json">
+        {"props":{"rates":[{"currency":"USD","buy":47.25,"sell":47.35}]}}
+        </script></body></html>"""
+        self.assertIsNone(parse_bank_rates(html)["sell"])
+        blobs = embedded_json_blobs(html)
+        self.assertTrue(blobs)
+        self.assertAlmostEqual(parse_bank_rates(blobs[0])["sell"], 47.35)
+
+    def test_rate_endpoints_are_discovered_from_the_page(self):
+        from prometheus_core.fx_sources import discover_rate_urls
+        html = """<script src="/static/main.js"></script>
+        <script>var API="/api/v1/exchange-rates";var OTHER="/api/branches";</script>
+        <img src="/img/currency-banner.png">"""
+        urls = discover_rate_urls(html, "https://www.cibeg.com/en/currency-converter")
+        self.assertIn("https://www.cibeg.com/api/v1/exchange-rates", urls)
+        self.assertNotIn("https://www.cibeg.com/img/currency-banner.png", urls)
+
+    def test_discovery_stays_on_the_pages_own_host(self):
+        from prometheus_core.fx_sources import discover_rate_urls
+        html = '<script>var A="https://evil.example.com/api/rates";</script>'
+        self.assertEqual(
+            discover_rate_urls(html, "https://www.cibeg.com/en/currency-converter"), [])
+
+    def test_script_assets_are_not_mistaken_for_endpoints(self):
+        from prometheus_core.fx_sources import discover_rate_urls
+        html = '<script src="/assets/currency-converter.js"></script>'
+        self.assertEqual(
+            discover_rate_urls(html, "https://www.cibeg.com/en/currency-converter"), [])
+
+    def test_converter_shaped_json_with_a_single_rate(self):
+        payload = '{"from":"USD","to":"EGP","rate":47.35}'
+        self.assertAlmostEqual(parse_bank_rates(payload)["sell"], 47.35)
