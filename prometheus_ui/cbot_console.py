@@ -49,9 +49,25 @@ RANGES = {"30D": 30, "90D": 90, "6M": 182, "1Y": 365, "All": 100000}
 #: Commodities that actually price off a CBOT board.
 TRACKED_COMMODITIES = ["CORN", "SBM", "SOYBEAN", "WHEAT"]
 
+#: How far back a contracted premium may be and still describe today's basis.
+#: Beyond this it is history, not a reference, so the book fallback drops it.
+BASIS_RECENCY_DAYS = 90
+
 #: Display unit per board — corn/soybean/wheat trade in cents per bushel,
 #: soybean meal in dollars per short ton.
 UNITS = {"CORN": "¢/bu", "SOYBEAN": "¢/bu", "WHEAT": "¢/bu", "SBM": "$/st"}
+
+
+def _days_since(date_str):
+    """Whole days between ``date_str`` (YYYY-MM-DD) and today, or ``None``."""
+    text = str(date_str or "")[:10]
+    if not text:
+        return None
+    try:
+        then = dt.date.fromisoformat(text)
+    except ValueError:
+        return None
+    return (dt.date.today() - then).days
 
 
 def _f(value, default=None):
@@ -179,7 +195,7 @@ class CBOTFeed:
         step = len(series) / points
         return [series[min(len(series) - 1, int(i * step))] for i in range(points)]
 
-    def implied_usd_mt(self, commodity="CORN", premium=None):
+    def implied_usd_mt(self, commodity="CORN", premium=None, origin=None):
         """``(CBOT + premium) x factor`` in USD/MT, plus how it was sourced.
 
         Returns ``(value, note)``. ``value`` is ``None`` when the board quote
@@ -191,18 +207,37 @@ class CBOTFeed:
         if price is None or factor is None:
             return None, "no board quote stored"
         if premium is None:
-            premium = self.weighted_premium(commodity)
+            ref = self.basis_reference(commodity, origin)
+            premium = ref["value"]
+            label = ref["label"]
+        else:
+            label = "supplied"
         if premium is None:
             return price * factor, "flat (no defensible premium — zero basis)"
-        return (price + premium) * factor, f"includes {premium:,.1f} premium"
+        return (price + premium) * factor, f"includes {premium:,.1f} basis ({label})"
 
-    def replacement_egp_mt(self, commodity="CORN", premium=None):
-        """Indicative EGP/MT replacement cost at today's FX, excluding fees."""
-        usd, note = self.implied_usd_mt(commodity, premium)
+    def replacement_egp_mt(self, commodity="CORN", premium=None, origin=None):
+        """Replacement cost at the port, in EGP/MT — CIF only, no local fees."""
+        usd, note = self.implied_usd_mt(commodity, premium, origin)
         rate, _ts = self.fx()
         if usd is None or rate is None:
             return None, note if usd is None else "no FX rate stored"
         return usd * rate, note
+
+    def replacement_all_in_egp_mt(self, commodity="CORN", premium=None, origin=None):
+        """Replacement cost delivered, in EGP/MT — CIF plus the local fee stack.
+
+        The CIF-only figure was previously labelled "Replacement EGP/MT" and
+        sat next to inventory costs and local prices that both include local
+        fees, which made imports look several hundred EGP/MT cheaper than
+        they are.  The fee stack is the same at-port assumption Basis Tracker
+        uses, so the two screens cannot disagree.
+        """
+        cif, note = self.replacement_egp_mt(commodity, premium, origin)
+        if cif is None:
+            return None, note, 0.0
+        fees = self.basis_expenses_egp_mt()
+        return cif + fees, note, fees
 
     def local_all_in(self, commodity="CORN"):
         """Latest logged local price plus its transport, as ``(value, date)``."""
@@ -236,6 +271,175 @@ class CBOTFeed:
             num += premium * qty
             den += qty
         return (num / den) if den else None
+
+    # ------------------------------------------------------------------
+    # Basis
+    #
+    # Two different numbers share the word "basis" and must not be mixed:
+    #
+    #   traded basis    what a seller charges over the board.  This is what
+    #                   a replacement cost needs, because replacement asks
+    #                   what buying today would cost.
+    #   implied basis   what the local market is paying over the board,
+    #                   derived from the logged local price.
+    #
+    # Feeding the implied basis into replacement is circular — the board
+    # term cancels and replacement collapses back to the local price — so
+    # the implied figure is reported beside the traded one as a gap, never
+    # substituted for it.
+    # ------------------------------------------------------------------
+
+    def basis_expenses_egp_mt(self):
+        """At-port costs inside the local price, as Basis Tracker stores them."""
+        ui = self.state.get("ui", {}) or {}
+        return _f(ui.get("basis_expenses_egp_mt"), 0.0) or 0.0
+
+    def market_basis(self, commodity="CORN", origin=None):
+        """Newest hand-entered market basis for this commodity.
+
+        An entry whose origin matches always beats one that does not, so a
+        Brazilian quote is never answered with a Ukrainian one just because
+        the Ukrainian row is newer.
+        """
+        base = commodity_base(commodity)
+        want = (origin or "").strip().upper()
+        best = None
+        for row in self.state.get("market_basis", []) or []:
+            if commodity_base(row.get("commodity")) != base:
+                continue
+            value = _f(row.get("basis"))
+            date = str(row.get("date") or "")
+            if value is None or not date:
+                continue
+            row_origin = (row.get("origin") or "").strip().upper()
+            exact = bool(want) and row_origin == want
+            rank = (1 if exact else 0, date)
+            if best is None or rank > best[0]:
+                best = (rank, dict(row, basis=value, date=date,
+                                   origin=row_origin, origin_match=exact))
+        return best[1] if best else None
+
+    def weighted_premium(self, commodity=None, origin=None,
+                         within_days=BASIS_RECENCY_DAYS):
+        """Quantity-weighted contracted premium across open contracts.
+
+        Three rules the first version got wrong:
+
+        * origin is honoured, so Brazilian and Ukrainian basis stop being
+          averaged into one number that describes neither;
+        * a negative premium counts, instead of being dropped and biasing
+          the average upward every time a cargo prices under the board;
+        * a premium older than ``within_days`` is excluded, so a large old
+          cargo cannot anchor a figure presented as current.
+
+        A premium of exactly zero is still skipped: legacy records use it as
+        a blank placeholder for flat-priced contracts.
+        """
+        base = commodity_base(commodity) if commodity else None
+        want = (origin or "").strip().upper()
+        num = den = 0.0
+        used = 0
+        oldest = None
+        for contract in (self.state.get("contracts", {}) or {}).values():
+            if (contract.get("status") or "Open").strip().lower() != "open":
+                continue
+            if base and commodity_base(contract.get("commodity")) != base:
+                continue
+            if want and self._contract_origin(contract) != want:
+                continue
+            premium = _f(contract.get("premium_cents"))
+            qty = _f(contract.get("qty_mt"), 0.0) or 0.0
+            if premium is None or premium == 0 or qty <= 0:
+                continue
+            age = _days_since(contract.get("pricing_date")
+                              or contract.get("contract_date"))
+            if within_days is not None and age is not None and age > within_days:
+                continue
+            num += premium * qty
+            den += qty
+            used += 1
+            if age is not None and (oldest is None or age > oldest):
+                oldest = age
+        if not den:
+            return None
+        self._last_book_basis = {"contracts": used, "oldest_days": oldest}
+        return num / den
+
+    @staticmethod
+    def _contract_origin(contract):
+        """Origin from the explicit field, else the commodity suffix."""
+        origin = (contract.get("origin") or "").strip().upper()
+        if origin:
+            return origin
+        parts = (contract.get("commodity") or "").strip().upper().split("-", 1)
+        return parts[1] if len(parts) == 2 else ""
+
+    def basis_reference(self, commodity="CORN", origin=None):
+        """The traded basis to price a replacement with, and where it came from.
+
+        Order: a hand-entered market basis, then the open-book average, then
+        nothing.  ``None`` is returned as a value rather than a zero so the
+        caller can say the figure is missing instead of printing a flat
+        board price as though it were a landed cost.
+        """
+        entry = self.market_basis(commodity, origin)
+        if entry is not None:
+            age = _days_since(entry["date"])
+            where = entry.get("futures_month") or ""
+            label = " · ".join(x for x in (entry.get("origin") or "", where) if x)
+            return {
+                "value": entry["basis"], "source": "market",
+                "label": label or "market basis",
+                "age_days": age, "date": entry["date"],
+                "origin_match": entry.get("origin_match", False),
+                "detail": (f"entered {entry['date']}"
+                           + (f" · {entry.get('source')}" if entry.get("source") else "")),
+            }
+        self._last_book_basis = {}
+        book = self.weighted_premium(commodity, origin)
+        if book is not None:
+            info = getattr(self, "_last_book_basis", {}) or {}
+            oldest = info.get("oldest_days")
+            return {
+                "value": book, "source": "book",
+                "label": "book average",
+                "age_days": oldest, "date": "",
+                "origin_match": bool(origin),
+                "detail": (f"{info.get('contracts', 0)} open contract(s)"
+                           + (f", oldest {oldest:.0f}d" if oldest is not None else "")),
+            }
+        return {"value": None, "source": "none", "label": "no basis",
+                "age_days": None, "date": "", "origin_match": False,
+                "detail": "no market basis entered and no open premium contract"}
+
+    def implied_basis(self, commodity="CORN"):
+        """What the logged local price implies the market is paying over the board.
+
+        ``(local all-in − at-port expenses) / FX / factor − board``.  This is
+        the Basis Tracker calculation, surfaced here so the desk can see the
+        gap against the basis it is actually being quoted.
+
+        SBM is excluded on purpose: its local line is compared as a price
+        equivalent in USD per short ton and the board is never subtracted,
+        so no implied basis exists for it.
+        """
+        base = commodity_base(commodity)
+        if base == "SBM":
+            return {"value": None, "note": "no implied basis for SBM — "
+                                           "local is compared as a price equivalent"}
+        local, local_date = self.local_all_in(commodity)
+        board, _ts = self.quote(commodity)
+        rate, _fx_ts = self.fx()
+        factor = cbot_conv_factor(commodity, strict=True)
+        missing = [name for name, value in (("local price", local), ("board quote", board),
+                                            ("FX", rate), ("factor", factor))
+                   if value is None]
+        if missing or not rate or not factor:
+            return {"value": None, "note": "needs " + ", ".join(missing or ["FX"])}
+        expenses = self.basis_expenses_egp_mt()
+        value = ((local - expenses) / rate) / factor - board
+        return {"value": value, "local": local, "date": local_date,
+                "expenses": expenses, "note": f"from local {local:,.0f} · {local_date}"}
 
     def exposure(self, commodity=None):
         """Open-book price risk: MT, USD, priced split and FX cover."""
@@ -478,6 +682,7 @@ class CBOTCommandCenter(tk.Frame):
         specs = [
             ("board",       "Board price",      "◈", "brand"),
             ("replacement", "Replacement cost", "⇄", "violet"),
+            ("basis",       "Basis gap",        "≠", "mint"),
             ("unpriced",    "Unpriced tons",    "◔", "amber"),
             ("fx",          "USD / EGP",        "$", "sky"),
         ]
@@ -692,12 +897,15 @@ class CBOTCommandCenter(tk.Frame):
             delta_tone="mint" if (change_7 or 0) < 0 else "rose",
             spark=feed.spark(comm, 90))
 
-        replacement, note = feed.replacement_egp_mt(comm)
+        replacement, note, fees = feed.replacement_all_in_egp_mt(comm)
         self.tiles["replacement"].set(
             caption="Replacement EGP/MT",
             value=f"{replacement:,.0f}" if replacement is not None else "—",
-            hint=note,
+            hint=(f"delivered · {fees:,.0f} fees in" if replacement is not None
+                  and fees else note),
             delta="", spark=[])
+
+        self._refresh_basis_tile(comm)
 
         unpriced = exposure["unpriced_mt"]
         share = (unpriced / exposure["open_mt"] * 100.0) if exposure["open_mt"] else None
@@ -733,6 +941,47 @@ class CBOTCommandCenter(tk.Frame):
             f"{len(series)} stored closes · {self._range} · {unit}"
             if series else "No stored closes for this board yet")
         self.readout.configure(text="")
+
+    def _refresh_basis_tile(self, comm):
+        """What you are quoted over the board, against what local implies.
+
+        A negative gap means the local market is paying more over the board
+        than your basis costs — importing is cheap against local.  Positive
+        means the opposite.  The two numbers are deliberately kept apart:
+        deriving one from the other would cancel the board out entirely.
+        """
+        feed = self.feed
+        ref = feed.basis_reference(comm)
+        implied = feed.implied_basis(comm)
+        unit = UNITS.get(commodity_base(comm), "")
+        traded, market = ref["value"], implied["value"]
+
+        if traded is None:
+            self.tiles["basis"].set(
+                caption="Basis gap", value="—",
+                hint=ref["detail"][:60], delta="", spark=[])
+            return
+
+        stale = ref["age_days"] is not None and ref["age_days"] > BASIS_RECENCY_DAYS
+        age = (f"{ref['age_days']:.0f}d old" if ref["age_days"] is not None else "age unknown")
+        if market is None:
+            self.tiles["basis"].set(
+                caption=f"Basis  {unit}",
+                value=f"{traded:,.1f}",
+                hint=f"{ref['label']} · no implied basis",
+                delta="stale" if stale else "", delta_tone="rose" if stale else "sky",
+                spark=[])
+            return
+
+        gap = traded - market
+        self.tiles["basis"].set(
+            caption=f"Basis gap  {unit}",
+            value=f"{gap:+,.1f}",
+            hint=(f"{traded:,.1f} quoted vs {market:,.1f} implied · {age}"
+                  + (" · STALE" if stale else "")),
+            delta=("import cheap" if gap < 0 else "local cheap"),
+            delta_tone="mint" if gap < 0 else "rose",
+            spark=[])
 
     def _refresh_cover(self, exposure):
         open_mt = exposure["open_mt"]

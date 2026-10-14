@@ -9,7 +9,7 @@ from .cbot import carry_usd_mt, cbot_to_usd_mt
 from .numbers import to_float
 from .stress import run_stress_test
 
-DECISION_ENGINE_VERSION = "1.1-modular"
+DECISION_ENGINE_VERSION = "1.2-finance-reconciled"
 DECISION_ACTIONS = (
     "PRICE_100",
     "PRICE_PARTIAL",
@@ -202,24 +202,49 @@ def compute_decision(inputs: Mapping[str, Any]) -> dict[str, Any]:
 
     carry = carry_usd_mt(import_usd_mt, finance_days, rate)
     own_after_usd_mt = import_usd_mt + carry
-    own_after_egp_mt = own_after_usd_mt * fx if fx not in (None, 0) else None
-    saving_egp_mt = local - own_after_egp_mt if local is not None and own_after_egp_mt is not None else None
+    base_own_after_egp_mt = own_after_usd_mt * fx if fx not in (None, 0) else None
 
     direct_intake = to_float(inputs.get("supplier_direct_egp_mt"), None)
     indirect_intake = to_float(inputs.get("supplier_indirect_egp_mt"), None)
+    canonical_landed_fees = to_float(inputs.get("canonical_landed_fees_egp_mt"), None)
 
-    direct_own = own_after_egp_mt + direct_intake if own_after_egp_mt is not None and direct_intake is not None else None
-    indirect_own = own_after_egp_mt + indirect_intake if own_after_egp_mt is not None and indirect_intake is not None else None
-    direct_saving = local - direct_own if local is not None and direct_own is not None else None
-    indirect_saving = local - indirect_own if local is not None and indirect_own is not None else None
+    # Manual-mode landed fees that sit beside intake: clearance and inland
+    # freight.  Contract mode already folds both into canonical_landed_fees,
+    # so this only applies to the no-contract path.  Defaulting to zero keeps
+    # every saved calculation that predates the fields unchanged.
+    extra_landed = to_float(inputs.get("extra_landed_fees_egp_mt"), 0.0) or 0.0
+
+    # Selected-contract reconciliation path.  The portfolio/open-contracts table
+    # defines Own After as CIF×FX + discharge + clearance + effective freight.
+    # When the caller supplies canonical_landed_fees_egp_mt, use that exact
+    # all-in fee stack as the single source of truth instead of treating
+    # direct/indirect intake as alternative fee scenarios.
+    if canonical_landed_fees is not None and base_own_after_egp_mt is not None:
+        own_after_egp_mt = base_own_after_egp_mt + canonical_landed_fees
+        saving_egp_mt = local - own_after_egp_mt if local is not None else None
+        direct_own = own_after_egp_mt
+        indirect_own = own_after_egp_mt
+        direct_saving = saving_egp_mt
+        indirect_saving = saving_egp_mt
+    else:
+        own_after_egp_mt = base_own_after_egp_mt
+        saving_egp_mt = local - own_after_egp_mt if local is not None and own_after_egp_mt is not None else None
+        direct_own = own_after_egp_mt + direct_intake + extra_landed if own_after_egp_mt is not None and direct_intake is not None else None
+        indirect_own = own_after_egp_mt + indirect_intake + extra_landed if own_after_egp_mt is not None and indirect_intake is not None else None
+        direct_saving = local - direct_own if local is not None and direct_own is not None else None
+        indirect_saving = local - indirect_own if local is not None and indirect_own is not None else None
 
     break_even_fx_direct = None
     break_even_fx_indirect = None
     if own_after_usd_mt and local is not None:
-        if direct_intake is not None:
-            break_even_fx_direct = (local - direct_intake) / own_after_usd_mt
-        if indirect_intake is not None:
-            break_even_fx_indirect = (local - indirect_intake) / own_after_usd_mt
+        if canonical_landed_fees is not None:
+            break_even_fx_direct = (local - canonical_landed_fees) / own_after_usd_mt
+            break_even_fx_indirect = break_even_fx_direct
+        else:
+            if direct_intake is not None:
+                break_even_fx_direct = (local - direct_intake - extra_landed) / own_after_usd_mt
+            if indirect_intake is not None:
+                break_even_fx_indirect = (local - indirect_intake - extra_landed) / own_after_usd_mt
 
     hedge_pct_raw = to_float(inputs.get("hedge_pct"), 0.0) or 0.0
     hedge_pct = hedge_pct_raw / 100.0 if hedge_pct_raw > 1.0 else hedge_pct_raw
@@ -233,8 +258,12 @@ def compute_decision(inputs: Mapping[str, Any]) -> dict[str, Any]:
         blended_fx = hedge_pct * hedge_fx + (1.0 - hedge_pct) * fx
 
     hedged_own = own_after_usd_mt * blended_fx if blended_fx is not None else None
-    hedged_direct_own = hedged_own + (direct_intake or 0.0) if hedged_own is not None else None
-    hedged_indirect_own = hedged_own + (indirect_intake or 0.0) if hedged_own is not None else None
+    if canonical_landed_fees is not None:
+        hedged_direct_own = hedged_own + canonical_landed_fees if hedged_own is not None else None
+        hedged_indirect_own = hedged_direct_own
+    else:
+        hedged_direct_own = hedged_own + (direct_intake or 0.0) + extra_landed if hedged_own is not None else None
+        hedged_indirect_own = hedged_own + (indirect_intake or 0.0) + extra_landed if hedged_own is not None else None
     hedged_direct_saving = local - hedged_direct_own if local is not None and hedged_direct_own is not None else None
     hedged_indirect_saving = local - hedged_indirect_own if local is not None and hedged_indirect_own is not None else None
 
@@ -249,6 +278,7 @@ def compute_decision(inputs: Mapping[str, Any]) -> dict[str, Any]:
         "carry_usd_mt": carry,
         "own_after_usd_mt": own_after_usd_mt,
         "own_after_egp_mt": own_after_egp_mt,
+        "extra_landed_fees_egp_mt": extra_landed,
         "saving_egp_mt": saving_egp_mt,
         "direct_own_after_egp_mt": direct_own,
         "indirect_own_after_egp_mt": indirect_own,
