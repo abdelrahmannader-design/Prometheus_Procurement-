@@ -344,6 +344,7 @@ class DesktopSmokeTests(unittest.TestCase):
             "fx": 50.25,
             "cbot": 440,
             "implied_basis": 30,
+            "implied_basis_raw": 54,
             "data_status": "Complete",
         })
         self.assertEqual(contract[1], "C0042 Lot 1")
@@ -351,7 +352,8 @@ class DesktopSmokeTests(unittest.TestCase):
         self.assertEqual(contract[13], "At/below market")
         self.assertEqual(local[1], "CORN")
         self.assertEqual(local[2], "12,000")
-        self.assertEqual(local[6], "30.00")
+        self.assertEqual(local[6], "54.00")   # basis before the deduction
+        self.assertEqual(local[7], "30.00")   # basis after local expenses
 
     def test_argentina_and_brazil_share_the_same_basis_color(self):
         app = self.module.App.__new__(self.module.App)
@@ -385,7 +387,14 @@ class DesktopSmokeTests(unittest.TestCase):
         values = app._basis_purchase_row_values(row)
         self.assertEqual(values[1], 7)
         self.assertEqual(values[2], "Local Supplier")
-        self.assertEqual(values[8], f"{expected:,.2f}")
+        self.assertEqual(values[9], f"{expected:,.2f}")
+        # The raw column answers the same question with nothing deducted,
+        # so it must always sit above the net one by exactly the expenses.
+        raw = row["implied_basis_raw"]
+        self.assertEqual(values[8], f"{raw:,.2f}")
+        self.assertAlmostEqual(
+            raw - expected,
+            (row["expenses_egp_mt"] / row["fx"]) / row["factor"], places=8)
 
     def test_savings_tracker_has_filtered_basis_excel_export(self):
         source = self.path.read_text(encoding="utf-8")

@@ -23989,6 +23989,7 @@ class App(tk.Tk):
             cbot, cbot_date = self._basis_nearest_le(ch, d)
             fx, fx_date = self._basis_nearest_le(fxh, d)
             implied = None
+            implied_raw = None
             comparison_metric = "BASIS"
             if base == "SBM":
                 # Apple-to-apple SBM rule: the local line is the factory/local
@@ -24000,6 +24001,12 @@ class App(tk.Tk):
                     implied = (px / fx) / factor
             elif cbot is not None and fx is not None and factor:
                 implied = ((local_at_port - exp) / fx) / factor - cbot
+                # The same conversion with nothing taken out.  Whether the
+                # local expenses belong in the deduction depends on where
+                # the local price is measured, and that differs by who is
+                # quoting it — so both are shown instead of one being
+                # chosen silently.
+                implied_raw = (local_at_port / fx) / factor - cbot
             missing = []
             if fx is None:
                 missing.append("FX")
@@ -24018,6 +24025,7 @@ class App(tk.Tk):
                 "cbot": cbot, "cbot_date": cbot_date,
                 "cbot_source": "reference only" if base == "SBM" else ("nearest CBOT history" if cbot is not None else "missing"),
                 "factor": factor, "contract_basis": None, "implied_basis": implied,
+                "implied_basis_raw": implied_raw,
                 "comparison_metric": comparison_metric,
                 "spread": None, "cif_usd_mt": None, "own_after_egp_mt": None,
                 "detail": ("local base price converted to equivalent USD/ST; CBOT excluded"
@@ -24062,6 +24070,7 @@ class App(tk.Tk):
                 fx_source = "nearest FX history" if fx is not None else "missing"
 
             implied = None
+            implied_raw = None
             comparison_metric = "BASIS"
             if base == "SBM":
                 comparison_metric = "SBM_EQ_PRICE"
@@ -24069,6 +24078,12 @@ class App(tk.Tk):
                     implied = (px / fx) / factor
             elif local_at_port is not None and cbot is not None and fx is not None and factor:
                 implied = ((local_at_port - exp) / fx) / factor - cbot
+                # The same conversion with nothing taken out.  Whether the
+                # local expenses belong in the deduction depends on where
+                # the local price is measured, and that differs by who is
+                # quoting it — so both are shown instead of one being
+                # chosen silently.
+                implied_raw = (local_at_port / fx) / factor - cbot
             missing = []
             if not d:
                 missing.append("purchase date")
@@ -24094,6 +24109,7 @@ class App(tk.Tk):
                 "fx": fx, "fx_date": fx_date, "fx_source": fx_source,
                 "cbot": cbot, "cbot_date": cbot_date, "cbot_source": cbot_source,
                 "factor": factor, "contract_basis": None, "implied_basis": implied,
+                "implied_basis_raw": implied_raw,
                 "comparison_metric": comparison_metric,
                 "spread": None, "cif_usd_mt": None, "own_after_egp_mt": None,
                 "detail": (f"actual local purchase from {supplier} · base {fmt_num(px,0)} EGP/MT "
@@ -25504,7 +25520,8 @@ class App(tk.Tk):
                               "after conversion with FX and 1.1023. CBOT is not subtracted.")
             else:
                 market_msg = (
-                    f"The local quotation implies a market-equivalent basis of {fmt_num(r.get('implied_basis'),1)} after removing "
+                    f"The local quotation implies a market-equivalent basis of {fmt_num(r.get('implied_basis'),1)} "
+                    f"(raw, before any deduction: {fmt_num(r.get('implied_basis_raw'),1)}) after removing "
                     f"{fmt_num(r.get('expenses_egp_mt'),0)} EGP/MT of local expenses and converting with the available FX and CBOT references.")
             self.basis_detail_summary_var.set(market_msg)
             if hasattr(self, "basis_selected_brief_var"):
@@ -26192,7 +26209,8 @@ class App(tk.Tk):
             ("Date", 98, "w"), ("Commodity", 100, "w"),
             ("Local All-in EGP/MT", 145, "e"), ("Local Costs", 105, "e"),
             ("FX", 90, "e"), ("CBOT", 95, "e"),
-            ("Implied Basis", 115, "e"), ("Data Quality", 240, "w"),
+            ("Basis raw", 100, "e"), ("Implied Basis", 115, "e"),
+            ("Data Quality", 220, "w"),
         ]
         self.basis_local_tree = ttk.Treeview(
             local_table, columns=[c for c, _, _ in local_cols],
@@ -26238,8 +26256,8 @@ class App(tk.Tk):
             ("Date", 98, "w"), ("Purchase ID", 90, "w"), ("Supplier", 180, "w"),
             ("Commodity", 100, "w"), ("Qty MT", 95, "e"),
             ("Purchase All-in EGP/MT", 165, "e"), ("FX", 90, "e"),
-            ("CBOT", 95, "e"), ("Implied Basis", 115, "e"),
-            ("Data Quality", 220, "w"),
+            ("CBOT", 95, "e"), ("Basis raw", 100, "e"),
+            ("Implied Basis", 115, "e"), ("Data Quality", 200, "w"),
         ]
         self.basis_purchase_tree = ttk.Treeview(
             purchase_table, columns=[c for c, _, _ in purchase_cols],
@@ -26321,6 +26339,7 @@ class App(tk.Tk):
             if (r.get("transport_egp_mt") if r.get("comparison_metric") == "SBM_EQ_PRICE" else r.get("expenses_egp_mt")) is not None else "",
             fmt_num(r.get("fx"), 4) if r.get("fx") is not None else "",
             fmt_num(r.get("cbot"), 2) if r.get("cbot") is not None else "",
+            fmt_num(r.get("implied_basis_raw"), 2) if r.get("implied_basis_raw") is not None else "",
             fmt_num(r.get("implied_basis"), 2) if r.get("implied_basis") is not None else "",
             r.get("data_status", ""),
         )
@@ -26335,6 +26354,7 @@ class App(tk.Tk):
             fmt_num(r.get("local_egp_mt"), 0) if r.get("local_egp_mt") is not None else "",
             fmt_num(r.get("fx"), 4) if r.get("fx") is not None else "",
             fmt_num(r.get("cbot"), 2) if r.get("cbot") is not None else "",
+            fmt_num(r.get("implied_basis_raw"), 2) if r.get("implied_basis_raw") is not None else "",
             fmt_num(r.get("implied_basis"), 2) if r.get("implied_basis") is not None else "",
             r.get("data_status", ""),
         )
