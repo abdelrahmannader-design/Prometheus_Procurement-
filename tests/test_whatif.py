@@ -157,3 +157,70 @@ class LadderTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PremiumBridgeTests(unittest.TestCase):
+    """Attributing the mail-vs-app difference to the inputs that cause it."""
+
+    MAIL = {"local_price_egp_mt": 14350.0, "interest_rate_pct": 20.0,
+            "year_basis": 365.0, "carry_days": 0, "local_expenses_egp_mt": 450.0,
+            "fx_egp_usd": 53.0, "conversion": 0.3937, "cbot": 480.0}
+    APP = dict(MAIL, local_price_egp_mt=14697.0, local_expenses_egp_mt=500.0,
+               fx_egp_usd=52.9360, cbot=479.25)
+
+    def test_the_bridge_starts_and_ends_where_it_should(self):
+        from prometheus_core.whatif import premium_bridge
+        bridge = premium_bridge(self.MAIL, self.APP)
+        self.assertAlmostEqual(bridge["start_premium"], 186.15, places=2)
+        self.assertAlmostEqual(bridge["end_premium"], 201.96, places=2)
+
+    def test_the_steps_account_for_the_whole_gap(self):
+        """The point of sequential substitution: nothing goes missing."""
+        from prometheus_core.whatif import premium_bridge
+        bridge = premium_bridge(self.MAIL, self.APP)
+        self.assertAlmostEqual(sum(s["delta"] for s in bridge["steps"]),
+                               bridge["total_delta"], places=10)
+        self.assertAlmostEqual(bridge["total_delta"],
+                               bridge["end_premium"] - bridge["start_premium"],
+                               places=10)
+
+    def test_isolated_deltas_would_not_reconcile(self):
+        """Why one-at-a-time-from-the-start is the wrong way to do this.
+
+        The chain divides, so effects are not additive. Measuring each input
+        against the original leaves a residual that looks like an error.
+        """
+        from prometheus_core.whatif import premium_bridge
+        isolated = 0.0
+        base = premium_bridge(self.MAIL, self.MAIL)["start_premium"]
+        for field, value in self.APP.items():
+            if self.MAIL[field] == value:
+                continue
+            one = dict(self.MAIL)
+            one[field] = value
+            isolated += premium_bridge(self.MAIL, one)["total_delta"]
+        sequential = premium_bridge(self.MAIL, self.APP)["total_delta"]
+        self.assertNotAlmostEqual(isolated, sequential, places=6)
+        del base
+
+    def test_only_inputs_that_differ_become_steps(self):
+        from prometheus_core.whatif import premium_bridge
+        steps = premium_bridge(self.MAIL, self.APP)["steps"]
+        self.assertEqual([s["field"] for s in steps],
+                         ["local_price_egp_mt", "local_expenses_egp_mt",
+                          "fx_egp_usd", "cbot"])
+
+    def test_identical_inputs_give_an_empty_bridge(self):
+        from prometheus_core.whatif import premium_bridge
+        bridge = premium_bridge(self.MAIL, dict(self.MAIL))
+        self.assertEqual(bridge["steps"], [])
+        self.assertAlmostEqual(bridge["total_delta"], 0.0)
+
+    def test_local_price_is_the_dominant_term(self):
+        """What the reconciliation is meant to reveal."""
+        from prometheus_core.whatif import premium_bridge
+        steps = {s["field"]: abs(s["delta"])
+                 for s in premium_bridge(self.MAIL, self.APP)["steps"]}
+        self.assertGreater(steps["local_price_egp_mt"],
+                           sum(v for k, v in steps.items()
+                               if k != "local_price_egp_mt"))

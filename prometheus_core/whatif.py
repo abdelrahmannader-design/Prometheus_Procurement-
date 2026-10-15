@@ -253,3 +253,77 @@ def offer_comparison(offers, local_price_egp_mt, fx_egp_usd, conversion, cbot,
             "scenario": scenario,
         })
     return rows
+
+
+#: The order inputs are swapped when bridging one premium to another. Local
+#: price first because it is the largest and the most argued-about; the board
+#: last because it is the one nobody disputes.
+BRIDGE_ORDER = ("local_price_egp_mt", "local_expenses_egp_mt", "carry_days",
+                "interest_rate_pct", "year_basis", "fx_egp_usd",
+                "conversion", "cbot")
+
+BRIDGE_LABELS = {
+    "local_price_egp_mt": "Local price EGP/MT",
+    "local_expenses_egp_mt": "Local expenses EGP/MT",
+    "carry_days": "Carry days",
+    "interest_rate_pct": "Interest %/annum",
+    "year_basis": "Year basis",
+    "fx_egp_usd": "FX EGP/USD",
+    "conversion": "Conversion",
+    "cbot": "CBOT",
+}
+
+
+def premium_bridge(base, target, order=BRIDGE_ORDER):
+    """Why two premiums differ, one input at a time, adding up exactly.
+
+    Two desks quoting the same market reach different premiums because they
+    disagree about several inputs at once, and an argument about the total
+    goes nowhere. Swapping one input at a time and recomputing after each
+    attributes the whole difference without any of it going missing: the
+    deltas sum to the gap by construction, because each is measured against
+    the figure the previous swap produced rather than against the start.
+
+    That matters here because the chain divides. Taking each input's effect
+    in isolation and adding them up would not reconcile, and the residual
+    would look like a mistake in one of the inputs when it is only an
+    artefact of the arithmetic.
+
+    ``base`` and ``target`` are whatif_scenario kwargs. Returns the starting
+    premium, a step per input that actually differs, and the ending premium.
+    """
+    def premium_of(values):
+        return whatif_scenario(
+            values.get("local_price_egp_mt"), values.get("fx_egp_usd"),
+            values.get("conversion"), values.get("cbot"),
+            interest_rate_pct=values.get("interest_rate_pct", 0.0),
+            carry_days=values.get("carry_days", 0),
+            local_expenses_egp_mt=values.get("local_expenses_egp_mt", 0.0),
+            year_basis=values.get("year_basis", DEFAULT_YEAR_BASIS))["premium"]
+
+    running = dict(base)
+    start = premium_of(running)
+    previous = start
+    steps = []
+    for field in order:
+        if field not in target:
+            continue
+        was = to_float(running.get(field), None)
+        now = to_float(target.get(field), None)
+        if was is None or now is None or abs(was - now) < 1e-12:
+            continue
+        running[field] = target[field]
+        current = premium_of(running)
+        steps.append({
+            "field": field,
+            "label": BRIDGE_LABELS.get(field, field),
+            "from": was,
+            "to": now,
+            "delta": (current - previous) if (current is not None
+                                              and previous is not None) else None,
+            "premium_after": current,
+        })
+        previous = current
+    return {"start_premium": start, "end_premium": previous, "steps": steps,
+            "total_delta": (previous - start) if (previous is not None
+                                                  and start is not None) else None}
