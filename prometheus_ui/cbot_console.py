@@ -57,6 +57,13 @@ BASIS_SOURCE_MARKET = "market"
 BASIS_SOURCE_BOOK = "book"
 BASIS_SOURCES = (BASIS_SOURCE_LOCAL, BASIS_SOURCE_MARKET, BASIS_SOURCE_BOOK)
 
+#: Which basis prices the import leg of replacement. "auto" prefers a real
+#: quote and falls back to the book average; the rest pin it, so the desk
+#: can hold one basis still and watch the rest of the market move.
+REPLACEMENT_BASIS_AUTO = "auto"
+REPLACEMENT_BASIS_CHOICES = (REPLACEMENT_BASIS_AUTO, BASIS_SOURCE_MARKET,
+                             BASIS_SOURCE_BOOK, BASIS_SOURCE_LOCAL)
+
 #: How far back a contracted premium may be and still describe today's basis.
 #: Beyond this it is history, not a reference, so the book fallback drops it.
 BASIS_RECENCY_DAYS = 90
@@ -247,6 +254,62 @@ class CBOTFeed:
         fees = self.basis_expenses_egp_mt()
         return cif + fees, note, fees
 
+    def basis_candidates(self, commodity="CORN", origin=None):
+        """Every basis the app can offer, so the desk can compare them.
+
+        One number cannot show how much of a verdict rests on the basis
+        chosen. Listing them together makes the spread between a quoted
+        offer, the book average and what local implies plain.
+        """
+        out = []
+        entry = self.market_basis(commodity, origin)
+        if entry is not None:
+            where = entry.get("futures_month") or ""
+            label = " · ".join(x for x in (entry.get("origin") or "", where) if x)
+            out.append({"source": BASIS_SOURCE_MARKET,
+                        "label": label or "market quote",
+                        "value": entry["basis"],
+                        "age_days": _days_since(entry["date"])})
+        self._last_book_basis = {}
+        book = self.weighted_premium(commodity, origin)
+        if book is not None:
+            info = getattr(self, "_last_book_basis", {}) or {}
+            out.append({"source": BASIS_SOURCE_BOOK, "label": "book average",
+                        "value": book, "age_days": info.get("oldest_days")})
+        implied = self.local_implied_basis(commodity)
+        if implied["value"] is not None:
+            out.append({"source": BASIS_SOURCE_LOCAL, "label": "local-derived",
+                        "value": implied["value"],
+                        "age_days": _days_since(implied.get("date"))})
+        return out
+
+    def replacement_basis_choice(self):
+        ui = self.state.get("ui", {}) or {}
+        name = str(ui.get("replacement_basis") or "").strip().lower()
+        return name if name in REPLACEMENT_BASIS_CHOICES else REPLACEMENT_BASIS_AUTO
+
+    def replacement_variants(self, commodity="CORN", origin=None):
+        """The import leg priced at each available basis, cheapest first.
+
+        The local-derived row is kept even though it returns the local
+        price plus costs by construction: seeing that identity beside the
+        others is the clearest way to understand why it cannot be used to
+        decide between them.
+        """
+        costs = self.basis_expenses_egp_mt()
+        board, _ts = self.quote(commodity)
+        rate, _fx = self.fx()
+        factor = cbot_conv_factor(commodity, strict=True)
+        if None in (board, rate, factor):
+            return []
+        rows = []
+        for candidate in self.basis_candidates(commodity, origin):
+            rows.append(dict(candidate,
+                             value=(board + candidate["value"]) * factor * rate + costs,
+                             basis=candidate["value"],
+                             circular=candidate["source"] == BASIS_SOURCE_LOCAL))
+        return sorted(rows, key=lambda r: r["value"])
+
     def replacement_routes(self, commodity="CORN", origin=None):
         """What the next tonne costs, by each route that could supply it.
 
@@ -266,7 +329,15 @@ class CBOTFeed:
         leave the two legs as one number, which can never prefer importing.
         """
         costs = self.basis_expenses_egp_mt()
-        quoted = self.traded_basis(commodity, origin)
+        choice = self.replacement_basis_choice()
+        if choice == REPLACEMENT_BASIS_AUTO:
+            quoted = self.traded_basis(commodity, origin)
+        else:
+            picked = next((c for c in self.basis_candidates(commodity, origin)
+                           if c["source"] == choice), None)
+            quoted = (dict(picked) if picked is not None else
+                      {"value": None, "source": choice, "label": choice,
+                       "age_days": None})
         board, _ts = self.quote(commodity)
         rate, _fx = self.fx()
         factor = cbot_conv_factor(commodity, strict=True)
@@ -276,7 +347,9 @@ class CBOTFeed:
                "age_days": quoted.get("age_days"),
                # A book average is the desk's own history, not an offer. The
                # leg still computes, but the caller has to be able to say so.
-               "fallback": quoted["source"] != "market",
+               "fallback": quoted["source"] != BASIS_SOURCE_MARKET,
+               "circular": quoted["source"] == BASIS_SOURCE_LOCAL,
+               "choice": choice,
                "note": ""}
         if None in (board, rate, factor) or quoted["value"] is None:
             missing = [n for n, v in (("board quote", board), ("FX", rate),
@@ -883,6 +956,21 @@ class CBOTCommandCenter(tk.Frame):
                      "  (delivered, no costs added)")
         else:
             head += f"\n    local   =  {loc['note']}"
+
+        # The same import leg at every basis the app holds. How much of the
+        # verdict rests on which basis was picked is otherwise invisible.
+        variants = feed.replacement_variants(comm)
+        if len(variants) > 1:
+            active = imp.get("source")
+            parts = []
+            for row in variants:
+                mark = " ←" if row["source"] == active else ""
+                parts.append(f"{row['label']} {row['basis']:,.1f} → "
+                             f"{row['value']:,.0f}{mark}")
+            head += "\n    import at each basis:  " + "   |   ".join(parts)
+            if any(r["circular"] for r in variants):
+                head += "   (local-derived returns the local price plus costs "
+                head += "by construction)"
         self.formula_var.set(head)
 
     def _build_main(self):

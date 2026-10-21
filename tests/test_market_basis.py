@@ -302,3 +302,78 @@ class ReplacementRouteTests(unittest.TestCase):
         r = CBOTFeed(state()).replacement_routes("CORN")
         self.assertIsNone(r["value"])
         self.assertIsNone(r["binding"])
+
+
+class ReplacementBasisChoiceTests(unittest.TestCase):
+    """Pricing the import leg at each basis the app holds."""
+
+    def _feed(self, choice=None, market=190.0, book=185.45, local=14300.0):
+        s = state(local_prices=[{"date": days_ago(0), "commodity": "CORN",
+                                 "price_egp_mt": local, "transport_egp_mt": 323.13}])
+        s["ui"].update({"basis_expenses_egp_mt": 500.0, "basis_source": "local",
+                        "basis_local_use_transport": False})
+        if choice:
+            s["ui"]["replacement_basis"] = choice
+        s["market_data"] = {"cbot_quotes": {"CORN": {"price": 459.0}},
+                            "fx": {"price": 54.1500}}
+        if market is not None:
+            s["market_basis"] = [{"commodity": "CORN", "basis": market,
+                                  "date": days_ago(1)}]
+        if book is not None:
+            s["contracts"] = {"a": {"status": "Open", "commodity": "CORN",
+                                    "qty_mt": 16000, "premium_cents": book,
+                                    "contract_date": days_ago(21)}}
+        return CBOTFeed(s)
+
+    def test_all_three_bases_are_offered(self):
+        sources = [c["source"] for c in self._feed().basis_candidates("CORN")]
+        self.assertEqual(sorted(sources), ["book", "local", "market"])
+
+    def test_variants_price_the_leg_at_each_and_sort_cheapest_first(self):
+        rows = self._feed().replacement_variants("CORN")
+        values = [r["value"] for r in rows]
+        self.assertEqual(values, sorted(values))
+        by = {r["source"]: r for r in rows}
+        self.assertAlmostEqual(by["book"]["value"],
+                               (459.0 + 185.45) * 0.3937 * 54.15 + 500, places=4)
+        self.assertAlmostEqual(by["market"]["value"],
+                               (459.0 + 190.0) * 0.3937 * 54.15 + 500, places=4)
+
+    def test_the_local_variant_returns_local_plus_costs(self):
+        """The identity, visible beside the others rather than hidden."""
+        by = {r["source"]: r for r in self._feed().replacement_variants("CORN")}
+        self.assertAlmostEqual(by["local"]["value"], 14300.0 + 500.0, places=4)
+        self.assertTrue(by["local"]["circular"])
+
+    def test_auto_prefers_a_quote_over_the_book(self):
+        leg = self._feed().replacement_routes("CORN")["import"]
+        self.assertEqual(leg["source"], "market")
+        self.assertFalse(leg["fallback"])
+
+    def test_auto_falls_back_to_the_book_when_no_quote_exists(self):
+        leg = self._feed(market=None).replacement_routes("CORN")["import"]
+        self.assertEqual(leg["source"], "book")
+        self.assertTrue(leg["fallback"])
+
+    def test_pinning_the_book_ignores_an_available_quote(self):
+        leg = self._feed(choice="book").replacement_routes("CORN")["import"]
+        self.assertEqual(leg["source"], "book")
+        self.assertAlmostEqual(leg["basis"], 185.45)
+
+    def test_pinning_local_is_allowed_and_marked_circular(self):
+        routes = self._feed(choice="local").replacement_routes("CORN")
+        self.assertTrue(routes["import"]["circular"])
+        self.assertAlmostEqual(routes["import"]["value"], 14800.0, places=4)
+        self.assertEqual(routes["binding"], "local")
+
+    def test_pinning_a_basis_that_does_not_exist_prices_nothing(self):
+        """Better an empty leg than a silent substitution."""
+        leg = self._feed(choice="market", market=None).replacement_routes("CORN")["import"]
+        self.assertIsNone(leg["value"])
+        self.assertIn("traded basis", leg["note"])
+
+    def test_the_choice_changes_which_route_binds(self):
+        quote = self._feed(choice="market").replacement_routes("CORN")
+        book = self._feed(choice="book").replacement_routes("CORN")
+        self.assertEqual(quote["binding"], "local")
+        self.assertEqual(book["binding"], "import")
