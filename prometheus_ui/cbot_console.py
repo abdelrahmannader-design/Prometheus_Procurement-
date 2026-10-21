@@ -255,23 +255,6 @@ class CBOTFeed:
                 best = (date, total)
         return (best[1], best[0]) if best else (None, "")
 
-    def weighted_premium(self, commodity=None):
-        """Quantity-weighted premium across open contracts, or ``None``."""
-        base = commodity_base(commodity) if commodity else None
-        num = den = 0.0
-        for contract in (self.state.get("contracts", {}) or {}).values():
-            if (contract.get("status") or "Open").strip().lower() != "open":
-                continue
-            if base and commodity_base(contract.get("commodity")) != base:
-                continue
-            premium = _f(contract.get("premium_cents"))
-            qty = _f(contract.get("qty_mt"), 0.0) or 0.0
-            if premium is None or premium <= 0 or qty <= 0:
-                continue
-            num += premium * qty
-            den += qty
-        return (num / den) if den else None
-
     # ------------------------------------------------------------------
     # Basis
     #
