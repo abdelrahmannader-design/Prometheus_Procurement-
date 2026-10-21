@@ -247,6 +247,57 @@ class CBOTFeed:
         fees = self.basis_expenses_egp_mt()
         return cif + fees, note, fees
 
+    def replacement_routes(self, commodity="CORN", origin=None):
+        """What the next tonne costs, by each route that could supply it.
+
+        Replacement cost is the cheapest way to obtain the next tonne, and
+        there are two: buy a cargo, or buy local. Pricing only one of them
+        answers a narrower question than the tile claims to.
+
+        Both legs are quoted delivered to the yard, because that is where
+        the grain is actually taken and it is the only point at which the
+        two are the same good. The import leg therefore carries the local
+        cost stack — discharge, clearance, the run inland — that a cargo
+        pays and local grain does not; nothing is deducted from the local
+        leg, which is already a delivered price.
+
+        The import leg uses a *traded* basis, never one derived from the
+        local price. Deriving it from local would cancel the board out and
+        leave the two legs as one number, which can never prefer importing.
+        """
+        costs = self.basis_expenses_egp_mt()
+        quoted = self.traded_basis(commodity, origin)
+        board, _ts = self.quote(commodity)
+        rate, _fx = self.fx()
+        factor = cbot_conv_factor(commodity, strict=True)
+
+        imp = {"value": None, "basis": quoted["value"], "label": quoted["label"],
+               "source": quoted["source"], "costs": costs,
+               "age_days": quoted.get("age_days"),
+               # A book average is the desk's own history, not an offer. The
+               # leg still computes, but the caller has to be able to say so.
+               "fallback": quoted["source"] != "market",
+               "note": ""}
+        if None in (board, rate, factor) or quoted["value"] is None:
+            missing = [n for n, v in (("board quote", board), ("FX", rate),
+                                      ("factor", factor),
+                                      ("traded basis", quoted["value"])) if v is None]
+            imp["note"] = "needs " + ", ".join(missing)
+        else:
+            imp["value"] = (board + quoted["value"]) * factor * rate + costs
+
+        local_price, local_date = self.local_quote(commodity)
+        loc = {"value": local_price, "date": local_date,
+               "note": "" if local_price is not None else "no local price logged"}
+
+        options = [(name, leg["value"]) for name, leg in
+                   (("import", imp), ("local", loc)) if leg["value"] is not None]
+        binding, value = (min(options, key=lambda x: x[1]) if options else (None, None))
+        edge = (abs(imp["value"] - loc["value"])
+                if imp["value"] is not None and loc["value"] is not None else None)
+        return {"import": imp, "local": loc, "binding": binding,
+                "value": value, "edge": edge}
+
     def local_all_in(self, commodity="CORN"):
         """Latest logged local price plus its transport, as ``(value, date)``."""
         base = commodity_base(commodity)
@@ -802,29 +853,37 @@ class CBOTCommandCenter(tk.Frame):
         bind_wraplength(self.formula_label, pad=36)
 
     def _refresh_formula_bar(self, comm):
-        """Spell out how the replacement tile got its number."""
+        """Both routes, their arithmetic, and which one binds."""
         feed = self.feed
+        routes = feed.replacement_routes(comm)
+        imp, loc = routes["import"], routes["local"]
+        if routes["value"] is None:
+            self.formula_var.set("Replacement  —  " +
+                                 (imp["note"] or loc["note"] or "nothing priced yet"))
+            return
         board, _ts = feed.quote(comm)
         rate, _fx = feed.fx()
         factor = cbot_conv_factor(comm, strict=True)
-        ref = feed.basis_reference(comm)
-        basis = ref["value"]
-        fees = feed.basis_expenses_egp_mt()
-        value, _note, _f = feed.replacement_all_in_egp_mt(comm)
-        if None in (board, rate, factor, basis) or value is None:
-            self.formula_var.set(
-                "Replacement needs a board quote, FX and a basis — "
-                + ref.get("detail", ""))
-            return
         unit = UNITS.get(commodity_base(comm), "")
-        self.formula_var.set(
-            f"Replacement  =  (CBOT {board:,.2f}{unit} + basis {basis:,.2f} "
-            f"[{ref['label']}])  ×  {factor}  ×  FX {rate:,.4f}"
-            + (f"  +  {fees:,.0f} local fees" if fees else "")
-            + f"   =   {value:,.0f} EGP/MT"
-            + ("     · basis is derived from the local price, so the board "
-               "cancels and this is that price plus fees"
-               if ref.get("circular") else ""))
+
+        head = (f"Replacement  =  cheaper of the two routes, delivered  =  "
+                f"{routes['value']:,.0f} EGP/MT   ·   {routes['binding'].upper()} binding"
+                + (f", by {routes['edge']:,.0f} EGP/MT" if routes["edge"] else ""))
+        if imp["value"] is not None:
+            head += (f"\n    import  =  (CBOT {board:,.2f}{unit} + basis "
+                     f"{imp['basis']:,.2f} [{imp['label']}])  ×  {factor}  ×  "
+                     f"FX {rate:,.4f}"
+                     + (f"  +  {imp['costs']:,.0f} import costs" if imp["costs"] else "")
+                     + f"  =  {imp['value']:,.0f}"
+                     + ("   ← book average, not a quoted offer" if imp["fallback"] else ""))
+        else:
+            head += f"\n    import  =  {imp['note']}"
+        if loc["value"] is not None:
+            head += (f"\n    local   =  {loc['value']:,.0f}  logged {loc['date']}"
+                     "  (delivered, no costs added)")
+        else:
+            head += f"\n    local   =  {loc['note']}"
+        self.formula_var.set(head)
 
     def _build_main(self):
         t = self.theme
@@ -1031,27 +1090,25 @@ class CBOTCommandCenter(tk.Frame):
             delta_tone="mint" if (change_7 or 0) < 0 else "rose",
             spark=feed.spark(comm, 90))
 
-        replacement, note, fees = feed.replacement_all_in_egp_mt(comm)
-        circular = feed.basis_reference(comm).get("circular")
-        # With a local-derived basis the board cancels out of the round
-        # trip, so this is the local price plus the fee stack and nothing
-        # more. Spelling that out stops it being read as a second, independent
-        # estimate that happens to agree with local.
-        local_price, _local_date = feed.local_quote(comm)
-        if circular and local_price is not None:
-            hint = (f"local {local_price:,.0f}"
-                    + (f" + {fees:,.0f} fees" if fees else "")
-                    + " · basis is local-derived")
-        elif replacement is not None and fees:
-            hint = f"delivered · {fees:,.0f} fees in"
+        routes = feed.replacement_routes(comm)
+        imp, loc = routes["import"], routes["local"]
+        if routes["value"] is None:
+            hint = imp["note"] or loc["note"] or "no route priced"
+            delta, tone = "", "sky"
         else:
-            hint = note
+            other = loc["value"] if routes["binding"] == "import" else imp["value"]
+            hint = (f"import {imp['value']:,.0f} · local {loc['value']:,.0f}"
+                    if None not in (imp["value"], loc["value"])
+                    else (imp["note"] or loc["note"]))
+            if routes["binding"] == "import" and imp["fallback"]:
+                # Cheapest on a basis nobody has quoted is worth knowing.
+                hint += "  · basis is a book average"
+            delta = f"{routes['binding']} cheaper" if other is not None else routes["binding"]
+            tone = "mint" if routes["binding"] == "import" else "rose"
         self.tiles["replacement"].set(
             caption="Replacement EGP/MT",
-            value=f"{replacement:,.0f}" if replacement is not None else "—",
-            hint=hint,
-            delta="local-derived" if circular else "",
-            delta_tone="amber" if circular else "sky", spark=[])
+            value=f"{routes['value']:,.0f}" if routes["value"] is not None else "—",
+            hint=hint, delta=delta, delta_tone=tone, spark=[])
 
         self._refresh_basis_tile(comm)
 

@@ -226,3 +226,79 @@ class LocalDerivedBasisTests(unittest.TestCase):
         ref = CBOTFeed(s).basis_reference("CORN")
         self.assertEqual(ref["source"], "book")
         self.assertAlmostEqual(ref["value"], 185.5)
+
+
+class ReplacementRouteTests(unittest.TestCase):
+    """Replacement as the cheaper of buying a cargo or buying local."""
+
+    def _feed(self, local=14300.0, traded=190.0, costs=500.0, **over):
+        s = state(local_prices=[{"date": days_ago(0), "commodity": "CORN",
+                                 "price_egp_mt": local, "transport_egp_mt": 323.13}])
+        s["ui"].update({"basis_expenses_egp_mt": costs, "basis_source": "local",
+                        "basis_local_use_transport": False})
+        s["market_data"] = {"cbot_quotes": {"CORN": {"price": 460.25}},
+                            "fx": {"price": 54.0580}}
+        if traded is not None:
+            s["market_basis"] = [{"commodity": "CORN", "basis": traded,
+                                  "date": days_ago(1)}]
+        s.update(over)
+        return CBOTFeed(s)
+
+    def test_import_leg_carries_the_cost_stack(self):
+        r = self._feed().replacement_routes("CORN")
+        self.assertAlmostEqual(
+            r["import"]["value"], (460.25 + 190.0) * 0.3937 * 54.0580 + 500.0,
+            places=4)
+
+    def test_local_leg_is_the_price_with_nothing_added(self):
+        r = self._feed().replacement_routes("CORN")
+        self.assertAlmostEqual(r["local"]["value"], 14300.0)
+
+    def test_replacement_is_the_cheaper_route(self):
+        r = self._feed().replacement_routes("CORN")
+        self.assertEqual(r["binding"], "local")
+        self.assertAlmostEqual(r["value"], 14300.0)
+        self.assertAlmostEqual(r["edge"], r["import"]["value"] - 14300.0, places=6)
+
+    def test_the_binding_route_flips_with_the_basis(self):
+        """A wider basis makes the cargo dearer and hands it to local."""
+        cheap = self._feed(traded=150.0).replacement_routes("CORN")
+        dear = self._feed(traded=260.0).replacement_routes("CORN")
+        self.assertEqual(cheap["binding"], "import")
+        self.assertEqual(dear["binding"], "local")
+
+    def test_the_import_leg_never_uses_a_local_derived_basis(self):
+        """Otherwise the board cancels and the two legs collapse into one."""
+        feed = self._feed()
+        # The displayed basis is local-derived...
+        self.assertEqual(feed.basis_reference("CORN")["source"], "local")
+        # ...while the import leg prices off the quoted one regardless.
+        leg = feed.replacement_routes("CORN")["import"]
+        self.assertEqual(leg["source"], "market")
+        self.assertAlmostEqual(leg["basis"], 190.0)
+        self.assertNotAlmostEqual(leg["basis"],
+                                  feed.basis_reference("CORN")["value"], places=2)
+
+    def test_a_book_average_is_flagged_as_not_a_quote(self):
+        feed = self._feed(traded=None, contracts={
+            "a": {"status": "Open", "commodity": "CORN", "qty_mt": 1000,
+                  "premium_cents": 185.5, "contract_date": days_ago(5)}})
+        leg = feed.replacement_routes("CORN")["import"]
+        self.assertEqual(leg["source"], "book")
+        self.assertTrue(leg["fallback"])
+
+    def test_a_quoted_basis_is_not_flagged(self):
+        self.assertFalse(self._feed().replacement_routes("CORN")["import"]["fallback"])
+
+    def test_a_missing_leg_does_not_sink_the_other(self):
+        feed = self._feed(traded=None)          # no basis at all
+        r = feed.replacement_routes("CORN")
+        self.assertIsNone(r["import"]["value"])
+        self.assertEqual(r["binding"], "local")
+        self.assertAlmostEqual(r["value"], 14300.0)
+        self.assertIsNone(r["edge"])
+
+    def test_no_data_at_all_reports_rather_than_guessing(self):
+        r = CBOTFeed(state()).replacement_routes("CORN")
+        self.assertIsNone(r["value"])
+        self.assertIsNone(r["binding"])
