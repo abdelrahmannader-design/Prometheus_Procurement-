@@ -49,6 +49,14 @@ RANGES = {"30D": 30, "90D": 90, "6M": 182, "1Y": 365, "All": 100000}
 #: Commodities that actually price off a CBOT board.
 TRACKED_COMMODITIES = ["CORN", "SBM", "SOYBEAN", "WHEAT"]
 
+#: Where the basis comes from. "local" derives it from the logged local
+#: price, which is what the desk reads off the market daily; "market" uses a
+#: hand-entered quote; "book" averages the open contracts.
+BASIS_SOURCE_LOCAL = "local"
+BASIS_SOURCE_MARKET = "market"
+BASIS_SOURCE_BOOK = "book"
+BASIS_SOURCES = (BASIS_SOURCE_LOCAL, BASIS_SOURCE_MARKET, BASIS_SOURCE_BOOK)
+
 #: How far back a contracted premium may be and still describe today's basis.
 #: Beyond this it is history, not a reference, so the book fallback drops it.
 BASIS_RECENCY_DAYS = 90
@@ -272,6 +280,69 @@ class CBOTFeed:
     # substituted for it.
     # ------------------------------------------------------------------
 
+    def basis_source(self):
+        """Which basis the desk has chosen to price off."""
+        ui = self.state.get("ui", {}) or {}
+        name = str(ui.get("basis_source") or "").strip().lower()
+        return name if name in BASIS_SOURCES else BASIS_SOURCE_LOCAL
+
+    def local_basis_uses_transport(self):
+        """Whether the logged transport is added before converting.
+
+        The local figure the desk quotes is a complete market price, not a
+        base to add haulage to, so this is off. It stays configurable because
+        a site logging an ex-yard base price genuinely does need the leg
+        added, and silently assuming either way moves the basis by about
+        fifteen cents a bushel.
+        """
+        ui = self.state.get("ui", {}) or {}
+        return bool(ui.get("basis_local_use_transport", False))
+
+    def local_quote(self, commodity="CORN"):
+        """Newest logged local price, honouring the transport setting."""
+        base = commodity_base(commodity)
+        with_transport = self.local_basis_uses_transport()
+        best = None
+        for row in self.state.get("local_prices", []) or []:
+            if commodity_base(row.get("commodity")) != base:
+                continue
+            date = str(row.get("date") or "")
+            price = _f(row.get("price_egp_mt"))
+            if not date or price is None:
+                continue
+            total = price + ((_f(row.get("transport_egp_mt"), 0.0) or 0.0)
+                             if with_transport else 0.0)
+            if best is None or date > best[0]:
+                best = (date, total, price)
+        return (best[1], best[0]) if best else (None, "")
+
+    def local_implied_basis(self, commodity="CORN", expenses=None):
+        """The basis the local market is paying, from the logged price.
+
+            ((local - expenses) / FX) / factor - board
+
+        Expenses default to zero because the quoted local price is already
+        net of them; pass a figure only when the quote is a delivered one
+        that still carries the costs an import would pay separately.
+        """
+        base = commodity_base(commodity)
+        if base == "SBM":
+            return {"value": None, "note": "no implied basis for SBM — "
+                                           "local is compared as a price equivalent"}
+        local, local_date = self.local_quote(commodity)
+        board, _ts = self.quote(commodity)
+        rate, _fx_ts = self.fx()
+        factor = cbot_conv_factor(commodity, strict=True)
+        deduct = _f(expenses, 0.0) or 0.0
+        missing = [name for name, value in (("local price", local), ("board quote", board),
+                                            ("FX", rate), ("factor", factor))
+                   if value is None]
+        if missing or not rate or not factor:
+            return {"value": None, "note": "needs " + ", ".join(missing or ["FX"])}
+        return {"value": ((local - deduct) / rate) / factor - board,
+                "local": local, "date": local_date, "expenses": deduct,
+                "note": f"from local {local:,.0f} · {local_date}"}
+
     def basis_expenses_egp_mt(self):
         """At-port costs inside the local price, as Basis Tracker stores them."""
         ui = self.state.get("ui", {}) or {}
@@ -360,18 +431,34 @@ class CBOTFeed:
     def basis_reference(self, commodity="CORN", origin=None):
         """The traded basis to price a replacement with, and where it came from.
 
-        Order: a hand-entered market basis, then the open-book average, then
-        nothing.  ``None`` is returned as a value rather than a zero so the
-        caller can say the figure is missing instead of printing a flat
-        board price as though it were a landed cost.
+        The desk picks the source. On "local" the basis is derived from the
+        logged local price, which makes the replacement cost equal that
+        price by construction — the board term cancels out of the round
+        trip. That is the intended behaviour when local is the reference,
+        but it means the figure is not independent corroboration of the
+        local price, so the result says so and the screens that use it
+        repeat the warning rather than presenting the two as agreeing.
         """
+        if self.basis_source() == BASIS_SOURCE_LOCAL:
+            implied = self.local_implied_basis(commodity)
+            if implied["value"] is not None:
+                return {
+                    "value": implied["value"], "source": "local",
+                    "label": "local-implied",
+                    "age_days": _days_since(implied.get("date")),
+                    "date": implied.get("date", ""), "origin_match": False,
+                    "circular": True,
+                    "detail": implied["note"] + " — replacement equals this "
+                              "local price by construction",
+                }
+
         entry = self.market_basis(commodity, origin)
         if entry is not None:
             age = _days_since(entry["date"])
             where = entry.get("futures_month") or ""
             label = " · ".join(x for x in (entry.get("origin") or "", where) if x)
             return {
-                "value": entry["basis"], "source": "market",
+                "value": entry["basis"], "source": "market", "circular": False,
                 "label": label or "market basis",
                 "age_days": age, "date": entry["date"],
                 "origin_match": entry.get("origin_match", False),
@@ -384,7 +471,7 @@ class CBOTFeed:
             info = getattr(self, "_last_book_basis", {}) or {}
             oldest = info.get("oldest_days")
             return {
-                "value": book, "source": "book",
+                "value": book, "source": "book", "circular": False,
                 "label": "book average",
                 "age_days": oldest, "date": "",
                 "origin_match": bool(origin),
@@ -393,7 +480,31 @@ class CBOTFeed:
             }
         return {"value": None, "source": "none", "label": "no basis",
                 "age_days": None, "date": "", "origin_match": False,
+                "circular": False,
                 "detail": "no market basis entered and no open premium contract"}
+
+    def traded_basis(self, commodity="CORN", origin=None):
+        """A basis someone is actually quoting — never derived from local.
+
+        Kept separate from basis_reference so the gap tile has something
+        real to compare the local-implied figure against when the desk has
+        chosen local as its pricing source.
+        """
+        entry = self.market_basis(commodity, origin)
+        if entry is not None:
+            where = entry.get("futures_month") or ""
+            label = " · ".join(x for x in (entry.get("origin") or "", where) if x)
+            return {"value": entry["basis"], "source": "market",
+                    "label": label or "market basis",
+                    "age_days": _days_since(entry["date"])}
+        self._last_book_basis = {}
+        book = self.weighted_premium(commodity, origin)
+        if book is not None:
+            info = getattr(self, "_last_book_basis", {}) or {}
+            return {"value": book, "source": "book", "label": "book average",
+                    "age_days": info.get("oldest_days")}
+        return {"value": None, "source": "none", "label": "no traded basis",
+                "age_days": None}
 
     def implied_basis(self, commodity="CORN"):
         """What the logged local price implies the market is paying over the board.
@@ -881,12 +992,26 @@ class CBOTCommandCenter(tk.Frame):
             spark=feed.spark(comm, 90))
 
         replacement, note, fees = feed.replacement_all_in_egp_mt(comm)
+        circular = feed.basis_reference(comm).get("circular")
+        # With a local-derived basis the board cancels out of the round
+        # trip, so this is the local price plus the fee stack and nothing
+        # more. Spelling that out stops it being read as a second, independent
+        # estimate that happens to agree with local.
+        local_price, _local_date = feed.local_quote(comm)
+        if circular and local_price is not None:
+            hint = (f"local {local_price:,.0f}"
+                    + (f" + {fees:,.0f} fees" if fees else "")
+                    + " · basis is local-derived")
+        elif replacement is not None and fees:
+            hint = f"delivered · {fees:,.0f} fees in"
+        else:
+            hint = note
         self.tiles["replacement"].set(
             caption="Replacement EGP/MT",
             value=f"{replacement:,.0f}" if replacement is not None else "—",
-            hint=(f"delivered · {fees:,.0f} fees in" if replacement is not None
-                  and fees else note),
-            delta="", spark=[])
+            hint=hint,
+            delta="local-derived" if circular else "",
+            delta_tone="amber" if circular else "sky", spark=[])
 
         self._refresh_basis_tile(comm)
 
@@ -935,8 +1060,15 @@ class CBOTCommandCenter(tk.Frame):
         """
         feed = self.feed
         ref = feed.basis_reference(comm)
-        implied = feed.implied_basis(comm)
         unit = UNITS.get(commodity_base(comm), "")
+        if ref.get("circular"):
+            # The chosen basis IS the local figure, so comparing it with the
+            # local-implied one reads zero forever. Compare it against a
+            # basis someone is actually quoting instead — which is the
+            # question the desk wanted answering all along.
+            self._refresh_local_vs_traded_tile(comm, ref, unit)
+            return
+        implied = feed.implied_basis(comm)
         traded, market = ref["value"], implied["value"]
 
         if traded is None:
@@ -965,6 +1097,28 @@ class CBOTCommandCenter(tk.Frame):
             delta=("import cheap" if gap < 0 else "local cheap"),
             delta_tone="mint" if gap < 0 else "rose",
             spark=[])
+
+    def _refresh_local_vs_traded_tile(self, comm, ref, unit):
+        """Local-implied basis against one a supplier is quoting."""
+        quoted = self.feed.traded_basis(comm)
+        local_basis, offer = ref["value"], quoted["value"]
+        if offer is None:
+            self.tiles["basis"].set(
+                caption=f"Local basis  {unit}",
+                value=f"{local_basis:,.1f}",
+                hint=f"{ref['detail'][:70]} — no quoted basis to compare",
+                delta="", spark=[])
+            return
+        # Positive: local costs more over the board than the offer does.
+        gap = local_basis - offer
+        self.tiles["basis"].set(
+            caption=f"Local vs quoted  {unit}",
+            value=f"{gap:+,.1f}",
+            hint=(f"local {local_basis:,.1f} vs {quoted['label']} {offer:,.1f}"
+                  + (f" · {quoted['age_days']:.0f}d old"
+                     if quoted.get("age_days") is not None else "")),
+            delta=("import cheap" if gap > 0 else "local cheap"),
+            delta_tone="mint" if gap > 0 else "rose", spark=[])
 
     def _refresh_cover(self, exposure):
         open_mt = exposure["open_mt"]

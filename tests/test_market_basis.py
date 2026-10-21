@@ -148,3 +148,81 @@ class ReplacementTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LocalDerivedBasisTests(unittest.TestCase):
+    """basis = (local price / FX) / factor - board, with the desk's settings."""
+
+    def _state(self, **ui):
+        base = state(local_prices=[{"date": days_ago(1), "commodity": "CORN",
+                                    "price_egp_mt": 14300.0,
+                                    "transport_egp_mt": 323.13}])
+        base["ui"].update({"basis_source": "local"})
+        base["ui"].update(ui)
+        return base
+
+    def test_transport_is_not_added_by_default(self):
+        """The quoted local figure is a whole price, not a base plus haulage."""
+        feed = CBOTFeed(self._state())
+        local, _date = feed.local_quote("CORN")
+        self.assertAlmostEqual(local, 14300.0)
+
+    def test_transport_is_added_when_the_desk_asks_for_it(self):
+        feed = CBOTFeed(self._state(basis_local_use_transport=True))
+        local, _date = feed.local_quote("CORN")
+        self.assertAlmostEqual(local, 14623.13)
+
+    def test_the_formula(self):
+        feed = CBOTFeed(self._state())
+        expected = (14300.0 / 52.6910) / 0.3937 - 483.0
+        self.assertAlmostEqual(feed.local_implied_basis("CORN")["value"],
+                               expected, places=8)
+
+    def test_no_expenses_are_deducted_unless_asked(self):
+        feed = CBOTFeed(self._state())
+        plain = feed.local_implied_basis("CORN")["value"]
+        deducted = feed.local_implied_basis("CORN", expenses=500)["value"]
+        self.assertAlmostEqual(plain - deducted, (500 / 52.6910) / 0.3937, places=8)
+
+    def test_that_setting_drives_basis_reference(self):
+        ref = CBOTFeed(self._state()).basis_reference("CORN")
+        self.assertEqual(ref["source"], "local")
+        self.assertTrue(ref["circular"])
+
+    def test_replacement_equals_the_local_price_and_says_so(self):
+        """The round trip cancels the board — intended, and flagged."""
+        feed = CBOTFeed(self._state())
+        # no at-port fee stack, so the identity is exact
+        feed.state["ui"]["basis_expenses_egp_mt"] = 0.0
+        allin, _note, fees = feed.replacement_all_in_egp_mt("CORN")
+        self.assertAlmostEqual(allin, 14300.0, places=4)
+        self.assertEqual(fees, 0.0)
+        self.assertTrue(feed.basis_reference("CORN")["circular"])
+
+    def test_other_sources_are_not_marked_circular(self):
+        s = self._state()
+        s["ui"]["basis_source"] = "market"
+        s["market_basis"] = [{"commodity": "CORN", "basis": 190.0,
+                              "date": days_ago(1)}]
+        ref = CBOTFeed(s).basis_reference("CORN")
+        self.assertEqual(ref["source"], "market")
+        self.assertFalse(ref["circular"])
+
+    def test_traded_basis_never_comes_from_local(self):
+        """What the gap tile falls back on when the basis is local-derived."""
+        s = self._state()
+        s["market_basis"] = [{"commodity": "CORN", "basis": 190.0,
+                              "date": days_ago(1)}]
+        feed = CBOTFeed(s)
+        self.assertEqual(feed.basis_reference("CORN")["source"], "local")
+        self.assertEqual(feed.traded_basis("CORN")["source"], "market")
+        self.assertAlmostEqual(feed.traded_basis("CORN")["value"], 190.0)
+
+    def test_local_source_falls_through_when_there_is_no_local_price(self):
+        s = state(contracts={"a": {"status": "Open", "commodity": "CORN",
+                                   "qty_mt": 1000, "premium_cents": 185.5,
+                                   "contract_date": days_ago(5)}})
+        s["ui"]["basis_source"] = "local"
+        ref = CBOTFeed(s).basis_reference("CORN")
+        self.assertEqual(ref["source"], "book")
+        self.assertAlmostEqual(ref["value"], 185.5)
