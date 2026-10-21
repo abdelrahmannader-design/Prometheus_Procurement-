@@ -680,6 +680,7 @@ class CBOTCommandCenter(tk.Frame):
 
         self._build_board_strip()
         self._build_tiles()
+        self._build_formula_bar()
         self._build_main()
         self._build_lower()
 
@@ -787,10 +788,48 @@ class CBOTCommandCenter(tk.Frame):
             tile.grid(row=0, column=col, sticky="nsew", padx=(0 if col == 0 else 6, 0))
             self.tiles[key] = tile
 
+    def _build_formula_bar(self):
+        t = self.theme
+        bar = tk.Frame(self, bg=t.c("surface"), highlightthickness=1,
+                       highlightbackground=t.c("stroke_soft"))
+        bar.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        self.formula_var = tk.StringVar(value="")
+        self.formula_label = tk.Label(
+            bar, textvariable=self.formula_var, bg=t.c("surface"),
+            fg=t.c("ink_2"), font=t.font("caption"), anchor="w",
+            justify="left", padx=12, pady=7)
+        self.formula_label.pack(fill="x")
+        bind_wraplength(self.formula_label, pad=36)
+
+    def _refresh_formula_bar(self, comm):
+        """Spell out how the replacement tile got its number."""
+        feed = self.feed
+        board, _ts = feed.quote(comm)
+        rate, _fx = feed.fx()
+        factor = cbot_conv_factor(comm, strict=True)
+        ref = feed.basis_reference(comm)
+        basis = ref["value"]
+        fees = feed.basis_expenses_egp_mt()
+        value, _note, _f = feed.replacement_all_in_egp_mt(comm)
+        if None in (board, rate, factor, basis) or value is None:
+            self.formula_var.set(
+                "Replacement needs a board quote, FX and a basis — "
+                + ref.get("detail", ""))
+            return
+        unit = UNITS.get(commodity_base(comm), "")
+        self.formula_var.set(
+            f"Replacement  =  (CBOT {board:,.2f}{unit} + basis {basis:,.2f} "
+            f"[{ref['label']}])  ×  {factor}  ×  FX {rate:,.4f}"
+            + (f"  +  {fees:,.0f} local fees" if fees else "")
+            + f"   =   {value:,.0f} EGP/MT"
+            + ("     · basis is derived from the local price, so the board "
+               "cancels and this is that price plus fees"
+               if ref.get("circular") else ""))
+
     def _build_main(self):
         t = self.theme
         main = tk.Frame(self, bg=t.c("bg"))
-        main.grid(row=3, column=0, sticky="nsew", pady=(12, 0))
+        main.grid(row=4, column=0, sticky="nsew", pady=(12, 0))
         main.columnconfigure(0, weight=3, uniform="main")
         main.columnconfigure(1, weight=2, uniform="main")
         main.rowconfigure(0, weight=1)
@@ -885,7 +924,7 @@ class CBOTCommandCenter(tk.Frame):
     def _build_lower(self):
         t = self.theme
         lower = tk.Frame(self, bg=t.c("bg"))
-        lower.grid(row=4, column=0, sticky="nsew", pady=(12, 8))
+        lower.grid(row=5, column=0, sticky="nsew", pady=(12, 8))
         lower.columnconfigure(0, weight=3, uniform="lower")
         lower.columnconfigure(1, weight=2, uniform="lower")
         lower.rowconfigure(0, weight=1)
@@ -974,6 +1013,7 @@ class CBOTCommandCenter(tk.Frame):
 
         self._refresh_board_strip()
         self._refresh_tiles(comm, price, change_30, exposure)
+        self._refresh_formula_bar(comm)
         self._refresh_chart(comm, unit)
         self._refresh_cover(exposure)
         self._refresh_band(comm, unit)
