@@ -413,7 +413,9 @@ class CBOTFeed:
         out = {"basis": None, "egp": local, "local": local,
                "local_date": local_date, "board": board, "fx": rate,
                "factor": factor, "quoted": None, "quoted_label": "",
-               "quoted_source": "", "quoted_age": None, "gap": None, "note": ""}
+               "quoted_source": "", "quoted_age": None, "gap": None,
+               "egp_at_quote": None, "usd_at_quote": None,
+               "egp_vs_local": None, "note": ""}
         missing = [n for n, v in (("local price", local), ("board quote", board),
                                   ("FX", rate), ("factor", factor)) if v is None]
         if missing or not rate or not factor:
@@ -423,12 +425,18 @@ class CBOTFeed:
 
         quoted = self.comparison_basis(commodity, origin)
         if quoted["value"] is not None:
+            # The money figure: what a cargo costs at the basis actually on
+            # offer. Parity converted back only ever returns the local price,
+            # so it is the quoted basis that gives a cost worth reading.
+            egp = (board + quoted["value"]) * factor * rate
             out.update(quoted=quoted["value"], quoted_label=quoted["label"],
                        quoted_source=quoted["source"],
                        quoted_age=quoted.get("age_days"),
                        # Negative: you are quoted below parity, so a cargo
                        # lands under the local price.
-                       gap=quoted["value"] - out["basis"])
+                       gap=quoted["value"] - out["basis"],
+                       egp_at_quote=egp, usd_at_quote=(board + quoted["value"]) * factor,
+                       egp_vs_local=egp - local)
         return out
 
     def comparison_basis(self, commodity="CORN", origin=None):
@@ -1129,21 +1137,29 @@ class CBOTCommandCenter(tk.Frame):
             self.formula_var.set("Replacement basis  —  " + (par["note"] or "nothing priced yet"))
             return
         unit = UNITS.get(commodity_base(comm), "")
-        head = (f"Replacement basis  =  (local {par['local']:,.0f}  ÷  FX "
-                f"{par['fx']:,.4f}  ÷  {par['factor']})  −  CBOT "
-                f"{par['board']:,.2f}{unit}   =   {par['basis']:,.2f}{unit}"
-                f"\n    that basis converted back  =  {par['egp']:,.0f} EGP/MT, the local "
-                f"price itself — the two steps are inverses, so the basis is the figure "
-                f"that carries the information")
+        if par["egp_at_quote"] is not None:
+            head = (f"Replacement  =  (CBOT {par['board']:,.2f}{unit} + basis "
+                    f"{par['quoted']:,.2f} [{par['quoted_label']}])  ×  {par['factor']}"
+                    f"  ×  FX {par['fx']:,.4f}  =  {par['usd_at_quote']:,.2f} USD/MT"
+                    f"  =  {par['egp_at_quote']:,.0f} EGP/MT")
+        else:
+            head = ("Replacement  —  no quoted basis stored, so there is no cost to "
+                    "price; type one in the box above or tick the latest contract")
+        head += (f"\n    parity basis  =  (local {par['local']:,.0f}  ÷  FX "
+                 f"{par['fx']:,.4f}  ÷  {par['factor']})  −  CBOT "
+                 f"{par['board']:,.2f}{unit}   =   {par['basis']:,.2f}{unit}"
+                 f"   ·   the basis at which a cargo matches local")
         if par["gap"] is not None:
             verdict = ("a cargo lands below local" if par["gap"] < 0
                        else "a cargo lands above local" if par["gap"] > 0
                        else "level with local")
-            head += (f"\n    you are quoted  {par['quoted']:,.2f} [{par['quoted_label']}]"
+            head += (f"\n    quoted {par['quoted']:,.2f} [{par['quoted_label']}]"
                      + (f", {par['quoted_age']:.0f}d old" if par["quoted_age"] is not None else "")
                      + f"   ·   {abs(par['gap']):,.2f}{unit} "
                      + ("below" if par["gap"] < 0 else "above" if par["gap"] > 0 else "at")
-                     + f" parity   ·   {verdict}")
+                     + f" parity   ·   {abs(par['egp_vs_local']):,.0f} EGP/MT "
+                     + ("below" if par["egp_vs_local"] < 0 else "above")
+                     + f" local {par['local']:,.0f}   ·   {verdict}")
         else:
             head += "\n    no quoted basis stored — type one in the box above to compare"
 
@@ -1370,20 +1386,24 @@ class CBOTCommandCenter(tk.Frame):
         par = feed.replacement_parity(comm)
         unit = UNITS.get(commodity_base(comm), "")
         if par["basis"] is None:
-            hint, delta, tone = par["note"], "", "sky"
-        elif par["gap"] is None:
-            hint = f"= {par['egp']:,.0f} EGP/MT · your local price"
-            delta, tone = "no quote to compare", "sky"
+            value, hint, delta, tone = "—", par["note"], "", "sky"
+        elif par["egp_at_quote"] is None:
+            # Nothing quoted, so there is no cost to report — only the level
+            # at which one would match local.
+            value = f"{par['local']:,.0f}"
+            hint = f"parity basis {par['basis']:,.1f}{unit} · no quoted basis stored"
+            delta, tone = "= local price", "amber"
         else:
-            hint = (f"= {par['egp']:,.0f} EGP/MT · quoted "
-                    f"{par['quoted']:,.1f} [{par['quoted_label']}]")
-            delta = (f"{abs(par['gap']):,.1f} below" if par["gap"] < 0
-                     else f"{par['gap']:,.1f} above" if par["gap"] > 0 else "at parity")
-            tone = "mint" if par["gap"] < 0 else "rose" if par["gap"] > 0 else "sky"
+            value = f"{par['egp_at_quote']:,.0f}"
+            hint = (f"at basis {par['quoted']:,.1f} [{par['quoted_label']}]"
+                    f" · parity {par['basis']:,.1f}{unit} · local {par['local']:,.0f}")
+            against = par["egp_vs_local"]
+            delta = (f"{abs(against):,.0f} below local" if against < 0
+                     else f"{abs(against):,.0f} above local" if against > 0 else "level")
+            tone = "mint" if against < 0 else "rose" if against > 0 else "sky"
         self.tiles["replacement"].set(
-            caption=f"Replacement basis  {unit}",
-            value=f"{par['basis']:,.1f}" if par["basis"] is not None else "—",
-            hint=hint, delta=delta, delta_tone=tone, spark=[])
+            caption="Replacement EGP/MT",
+            value=value, hint=hint, delta=delta, delta_tone=tone, spark=[])
 
         self._refresh_basis_tile(comm)
 

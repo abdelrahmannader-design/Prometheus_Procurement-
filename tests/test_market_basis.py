@@ -452,3 +452,58 @@ class LatestContractBasisTests(unittest.TestCase):
         a = self._feed().replacement_parity("CORN")["basis"]
         b = self._feed(choice="latest").replacement_parity("CORN")["basis"]
         self.assertAlmostEqual(a, b, places=10)
+
+
+class ReplacementEgpTests(unittest.TestCase):
+    """The money figure: what a cargo costs at the basis on offer."""
+
+    def _feed(self, quoted=190.0, local=14600.0, board=465.0, fx=54.3250):
+        s = state(local_prices=[{"date": days_ago(0), "commodity": "CORN",
+                                 "price_egp_mt": local, "transport_egp_mt": 323.13}])
+        s["ui"].update({"basis_local_use_transport": False,
+                        "basis_expenses_egp_mt": 500.0})
+        s["market_data"] = {"cbot_quotes": {"CORN": {"price": board}},
+                            "fx": {"price": fx}}
+        if quoted is not None:
+            s["market_basis"] = [{"commodity": "CORN", "basis": quoted,
+                                  "date": days_ago(1)}]
+        return CBOTFeed(s)
+
+    def test_it_prices_off_the_quoted_basis_not_parity(self):
+        par = self._feed().replacement_parity("CORN")
+        self.assertAlmostEqual(par["egp_at_quote"],
+                               (465.0 + 190.0) * 0.3937 * 54.3250, places=4)
+        self.assertAlmostEqual(par["egp_at_quote"], 14008.98, places=2)
+
+    def test_the_usd_step_is_reported_too(self):
+        par = self._feed().replacement_parity("CORN")
+        self.assertAlmostEqual(par["usd_at_quote"], (465.0 + 190.0) * 0.3937, places=6)
+        self.assertAlmostEqual(par["usd_at_quote"] * 54.3250,
+                               par["egp_at_quote"], places=6)
+
+    def test_it_is_compared_with_the_local_price(self):
+        par = self._feed().replacement_parity("CORN")
+        self.assertAlmostEqual(par["egp_vs_local"], par["egp_at_quote"] - 14600.0,
+                               places=8)
+        self.assertLess(par["egp_vs_local"], 0)
+
+    def test_no_cost_stack_enters_it(self):
+        feed = self._feed()
+        before = feed.replacement_parity("CORN")["egp_at_quote"]
+        feed.state["ui"]["basis_expenses_egp_mt"] = 900.0
+        self.assertAlmostEqual(feed.replacement_parity("CORN")["egp_at_quote"],
+                               before, places=8)
+
+    def test_at_parity_the_cost_equals_the_local_price(self):
+        """A quote exactly at parity must land on local, by definition."""
+        feed = self._feed(quoted=None)
+        parity = feed.replacement_parity("CORN")["basis"]
+        at_parity = self._feed(quoted=parity).replacement_parity("CORN")
+        self.assertAlmostEqual(at_parity["egp_at_quote"], 14600.0, places=4)
+        self.assertAlmostEqual(at_parity["egp_vs_local"], 0.0, places=4)
+
+    def test_without_a_quote_there_is_no_cost(self):
+        par = self._feed(quoted=None, local=14600.0).replacement_parity("CORN")
+        par_feed = CBOTFeed(dict(self._feed(quoted=None).state, contracts={}))
+        self.assertIsNone(par_feed.replacement_parity("CORN")["egp_at_quote"])
+        self.assertIsNotNone(par["basis"])
