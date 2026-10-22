@@ -235,7 +235,8 @@ class ReplacementRouteTests(unittest.TestCase):
         s = state(local_prices=[{"date": days_ago(0), "commodity": "CORN",
                                  "price_egp_mt": local, "transport_egp_mt": 323.13}])
         s["ui"].update({"basis_expenses_egp_mt": costs, "basis_source": "local",
-                        "basis_local_use_transport": False})
+                        "basis_local_use_transport": False,
+                        "replacement_basis": "auto"})
         s["market_data"] = {"cbot_quotes": {"CORN": {"price": 460.25}},
                             "fx": {"price": 54.0580}}
         if traded is not None:
@@ -307,13 +308,17 @@ class ReplacementRouteTests(unittest.TestCase):
 class ReplacementBasisChoiceTests(unittest.TestCase):
     """Pricing the import leg at each basis the app holds."""
 
+    def test_the_default_is_the_local_derived_basis(self):
+        """The desk prices off the market it reads daily, not old contracts."""
+        s = state()
+        self.assertEqual(CBOTFeed(s).replacement_basis_choice(), "local")
+
     def _feed(self, choice=None, market=190.0, book=185.45, local=14300.0):
         s = state(local_prices=[{"date": days_ago(0), "commodity": "CORN",
                                  "price_egp_mt": local, "transport_egp_mt": 323.13}])
         s["ui"].update({"basis_expenses_egp_mt": 500.0, "basis_source": "local",
                         "basis_local_use_transport": False})
-        if choice:
-            s["ui"]["replacement_basis"] = choice
+        s["ui"]["replacement_basis"] = choice or "auto"
         s["market_data"] = {"cbot_quotes": {"CORN": {"price": 459.0}},
                             "fx": {"price": 54.1500}}
         if market is not None:
@@ -377,3 +382,71 @@ class ReplacementBasisChoiceTests(unittest.TestCase):
         book = self._feed(choice="book").replacement_routes("CORN")
         self.assertEqual(quote["binding"], "local")
         self.assertEqual(book["binding"], "import")
+
+
+class ManualBasisTests(unittest.TestCase):
+    """A basis typed on the desk, held per board."""
+
+    def _feed(self):
+        s = state(local_prices=[{"date": days_ago(0), "commodity": "CORN",
+                                 "price_egp_mt": 14300.0, "transport_egp_mt": 323.13}])
+        s["ui"].update({"basis_expenses_egp_mt": 500.0,
+                        "basis_local_use_transport": False})
+        s["market_data"] = {"cbot_quotes": {"CORN": {"price": 459.0},
+                                            "SBM": {"price": 345.9}},
+                            "fx": {"price": 54.1500}}
+        return CBOTFeed(s)
+
+    def test_setting_and_reading_back(self):
+        feed = self._feed()
+        self.assertIsNone(feed.manual_basis("CORN"))
+        feed.set_manual_basis("CORN", 195.0)
+        self.assertAlmostEqual(feed.manual_basis("CORN"), 195.0)
+
+    def test_it_is_held_per_board(self):
+        """One shared number would show a corn basis against meal."""
+        feed = self._feed()
+        feed.set_manual_basis("CORN", 195.0)
+        self.assertIsNone(feed.manual_basis("SBM"))
+        feed.set_manual_basis("SBM", 42.0)
+        self.assertAlmostEqual(feed.manual_basis("CORN"), 195.0)
+        self.assertAlmostEqual(feed.manual_basis("SBM"), 42.0)
+
+    def test_origin_suffixes_share_the_boards_value(self):
+        feed = self._feed()
+        feed.set_manual_basis("CORN", 195.0)
+        self.assertAlmostEqual(feed.manual_basis("CORN-BRZ"), 195.0)
+
+    def test_clearing_removes_it(self):
+        feed = self._feed()
+        feed.set_manual_basis("CORN", 195.0)
+        feed.set_manual_basis("CORN", None)
+        self.assertIsNone(feed.manual_basis("CORN"))
+
+    def test_it_joins_the_variant_list(self):
+        feed = self._feed()
+        feed.set_manual_basis("CORN", 195.0)
+        row = next(r for r in feed.replacement_variants("CORN")
+                   if r["source"] == "manual")
+        self.assertAlmostEqual(row["basis"], 195.0)
+        self.assertAlmostEqual(row["value"],
+                               (459.0 + 195.0) * 0.3937 * 54.15 + 500, places=4)
+
+    def test_choosing_manual_prices_the_import_leg_off_it(self):
+        feed = self._feed()
+        feed.set_manual_basis("CORN", 195.0)
+        feed.state["ui"]["replacement_basis"] = "manual"
+        leg = feed.replacement_routes("CORN")["import"]
+        self.assertEqual(leg["source"], "manual")
+        self.assertAlmostEqual(leg["basis"], 195.0)
+
+    def test_choosing_manual_with_nothing_typed_prices_nothing(self):
+        feed = self._feed()
+        feed.state["ui"]["replacement_basis"] = "manual"
+        leg = feed.replacement_routes("CORN")["import"]
+        self.assertIsNone(leg["value"])
+
+    def test_a_corrupt_stored_value_does_not_crash_the_desk(self):
+        feed = self._feed()
+        feed.state["ui"]["replacement_manual_basis"] = "not a dict"
+        self.assertIsNone(feed.manual_basis("CORN"))

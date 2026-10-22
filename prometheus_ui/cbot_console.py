@@ -61,8 +61,17 @@ BASIS_SOURCES = (BASIS_SOURCE_LOCAL, BASIS_SOURCE_MARKET, BASIS_SOURCE_BOOK)
 #: quote and falls back to the book average; the rest pin it, so the desk
 #: can hold one basis still and watch the rest of the market move.
 REPLACEMENT_BASIS_AUTO = "auto"
+REPLACEMENT_BASIS_MANUAL = "manual"
 REPLACEMENT_BASIS_CHOICES = (REPLACEMENT_BASIS_AUTO, BASIS_SOURCE_MARKET,
-                             BASIS_SOURCE_BOOK, BASIS_SOURCE_LOCAL)
+                             BASIS_SOURCE_BOOK, BASIS_SOURCE_LOCAL,
+                             REPLACEMENT_BASIS_MANUAL)
+
+#: Short labels for the desk's own picker, in the order it shows them.
+REPLACEMENT_PICKER = (("Local", BASIS_SOURCE_LOCAL),
+                      ("Quote", BASIS_SOURCE_MARKET),
+                      ("Book", BASIS_SOURCE_BOOK),
+                      ("Manual", REPLACEMENT_BASIS_MANUAL),
+                      ("Auto", REPLACEMENT_BASIS_AUTO))
 
 #: How far back a contracted premium may be and still describe today's basis.
 #: Beyond this it is history, not a reference, so the book fallback drops it.
@@ -281,12 +290,46 @@ class CBOTFeed:
             out.append({"source": BASIS_SOURCE_LOCAL, "label": "local-derived",
                         "value": implied["value"],
                         "age_days": _days_since(implied.get("date"))})
+        typed = self.manual_basis(commodity)
+        if typed is not None:
+            out.append({"source": REPLACEMENT_BASIS_MANUAL, "label": "manual",
+                        "value": typed, "age_days": None})
         return out
 
     def replacement_basis_choice(self):
         ui = self.state.get("ui", {}) or {}
         name = str(ui.get("replacement_basis") or "").strip().lower()
-        return name if name in REPLACEMENT_BASIS_CHOICES else REPLACEMENT_BASIS_AUTO
+        # Local by default: the desk prices off the local market it reads
+        # every morning, not off contracts signed weeks ago.
+        return name if name in REPLACEMENT_BASIS_CHOICES else BASIS_SOURCE_LOCAL
+
+    def manual_basis(self, commodity="CORN"):
+        """A basis typed on the desk, held per board.
+
+        Per commodity because one number shared across four boards would
+        show a corn basis against soybean meal the moment the board is
+        switched, which is worse than showing nothing.
+        """
+        ui = self.state.get("ui", {}) or {}
+        stored = ui.get("replacement_manual_basis") or {}
+        if not isinstance(stored, dict):
+            return None
+        return _f(stored.get(commodity_base(commodity)))
+
+    def set_manual_basis(self, commodity, value):
+        """Store or clear the typed basis; returns what is now held."""
+        ui = self.state.setdefault("ui", {})
+        stored = ui.get("replacement_manual_basis")
+        if not isinstance(stored, dict):
+            stored = {}
+        base = commodity_base(commodity)
+        number = _f(value)
+        if number is None:
+            stored.pop(base, None)
+        else:
+            stored[base] = number
+        ui["replacement_manual_basis"] = stored
+        return number
 
     def replacement_variants(self, commodity="CORN", origin=None):
         """The import leg priced at each available basis, cheapest first.
@@ -917,6 +960,31 @@ class CBOTCommandCenter(tk.Frame):
         bar = tk.Frame(self, bg=t.c("surface"), highlightthickness=1,
                        highlightbackground=t.c("stroke_soft"))
         bar.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+
+        # The basis picker sits with the arithmetic it governs. Burying it in
+        # Setup would mean leaving the screen to answer "and at 195?".
+        controls = tk.Frame(bar, bg=t.c("surface"))
+        controls.pack(fill="x", padx=12, pady=(8, 0))
+        tk.Label(controls, text="Replacement basis", bg=t.c("surface"),
+                 fg=t.c("ink_2"), font=t.font("caption", "bold")).pack(side="left")
+        self.basis_pick = SegmentedControl(
+            controls, t, [label for label, _key in REPLACEMENT_PICKER],
+            command=self._on_basis_pick, ground=t.c("surface"))
+        self.basis_pick.pack(side="left", padx=(10, 14))
+
+        tk.Label(controls, text="manual", bg=t.c("surface"), fg=t.c("ink_2"),
+                 font=t.font("caption")).pack(side="left")
+        self.manual_basis_var = tk.StringVar(value="")
+        entry = tk.Entry(controls, textvariable=self.manual_basis_var, width=9,
+                         font=t.font("caption"), relief="solid", bd=1,
+                         highlightthickness=0)
+        entry.pack(side="left", padx=(6, 6))
+        entry.bind("<Return>", lambda _e: self._apply_manual_basis())
+        PillButton(controls, t, "Set", self._apply_manual_basis,
+                   variant="soft", size="caption", pad_x=12, pad_y=5).pack(side="left")
+        PillButton(controls, t, "Clear", self._clear_manual_basis,
+                   variant="ghost", size="caption", pad_x=12, pad_y=5).pack(side="left", padx=(6, 0))
+
         self.formula_var = tk.StringVar(value="")
         self.formula_label = tk.Label(
             bar, textvariable=self.formula_var, bg=t.c("surface"),
@@ -924,6 +992,71 @@ class CBOTCommandCenter(tk.Frame):
             justify="left", padx=12, pady=7)
         self.formula_label.pack(fill="x")
         bind_wraplength(self.formula_label, pad=36)
+
+    def _on_basis_pick(self, label):
+        key = dict((lab, k) for lab, k in REPLACEMENT_PICKER).get(label)
+        if key is None:
+            return
+        self.feed.state.setdefault("ui", {})["replacement_basis"] = key
+        self._persist()
+        self.refresh()
+
+    def _apply_manual_basis(self):
+        """Take the typed basis and price off it straight away."""
+        raw = (self.manual_basis_var.get() or "").strip()
+        if not raw:
+            self._clear_manual_basis()
+            return
+        value = _f(raw)
+        if value is None:
+            self.formula_var.set(f"Replacement basis — {raw!r} is not a number.")
+            return
+        self.feed.set_manual_basis(self._commodity, value)
+        self.feed.state.setdefault("ui", {})["replacement_basis"] = REPLACEMENT_BASIS_MANUAL
+        self._persist()
+        self.refresh()
+
+    def _clear_manual_basis(self):
+        self.feed.set_manual_basis(self._commodity, None)
+        ui = self.feed.state.setdefault("ui", {})
+        if ui.get("replacement_basis") == REPLACEMENT_BASIS_MANUAL:
+            ui["replacement_basis"] = REPLACEMENT_BASIS_AUTO
+        self.manual_basis_var.set("")
+        self._persist()
+        self.refresh()
+
+    def _persist(self):
+        """Save through the host app when there is one to save through."""
+        saver = getattr(self, "on_state_change", None)
+        if callable(saver):
+            try:
+                saver()
+            except Exception:
+                pass
+
+    @staticmethod
+    def _basis_caveat(leg, short=False):
+        """Why this basis is not an offer, in its own terms."""
+        if not leg.get("fallback"):
+            return ""
+        reasons = {
+            BASIS_SOURCE_BOOK: "book average of your open contracts, not a quoted offer",
+            BASIS_SOURCE_LOCAL: "derived from the local price, so this is that price plus costs",
+            REPLACEMENT_BASIS_MANUAL: "typed by hand, not a quoted offer",
+        }
+        text = reasons.get(leg.get("source"), "not a quoted offer")
+        return text if short else "   ← " + text
+
+    def _refresh_basis_controls(self, comm):
+        """Show the stored choice and whatever manual basis this board holds."""
+        if not hasattr(self, "basis_pick"):
+            return
+        key = self.feed.replacement_basis_choice()
+        label = next((lab for lab, k in REPLACEMENT_PICKER if k == key), None)
+        if label is not None:
+            self.basis_pick.set_value(label)
+        typed = self.feed.manual_basis(comm)
+        self.manual_basis_var.set("" if typed is None else f"{typed:g}")
 
     def _refresh_formula_bar(self, comm):
         """Both routes, their arithmetic, and which one binds."""
@@ -948,7 +1081,7 @@ class CBOTCommandCenter(tk.Frame):
                      f"FX {rate:,.4f}"
                      + (f"  +  {imp['costs']:,.0f} import costs" if imp["costs"] else "")
                      + f"  =  {imp['value']:,.0f}"
-                     + ("   ← book average, not a quoted offer" if imp["fallback"] else ""))
+                     + self._basis_caveat(imp))
         else:
             head += f"\n    import  =  {imp['note']}"
         if loc["value"] is not None:
@@ -1160,6 +1293,7 @@ class CBOTCommandCenter(tk.Frame):
 
         self._refresh_board_strip()
         self._refresh_tiles(comm, price, change_30, exposure)
+        self._refresh_basis_controls(comm)
         self._refresh_formula_bar(comm)
         self._refresh_chart(comm, unit)
         self._refresh_cover(exposure)
@@ -1190,7 +1324,7 @@ class CBOTCommandCenter(tk.Frame):
                     else (imp["note"] or loc["note"]))
             if routes["binding"] == "import" and imp["fallback"]:
                 # Cheapest on a basis nobody has quoted is worth knowing.
-                hint += "  · basis is a book average"
+                hint += "  · " + self._basis_caveat(imp, short=True).strip(" ←·")
             delta = f"{routes['binding']} cheaper" if other is not None else routes["binding"]
             tone = "mint" if routes["binding"] == "import" else "rose"
         self.tiles["replacement"].set(
