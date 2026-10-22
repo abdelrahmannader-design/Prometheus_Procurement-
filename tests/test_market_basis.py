@@ -228,82 +228,75 @@ class LocalDerivedBasisTests(unittest.TestCase):
         self.assertAlmostEqual(ref["value"], 185.5)
 
 
-class ReplacementRouteTests(unittest.TestCase):
-    """Replacement as the cheaper of buying a cargo or buying local."""
+class ReplacementCostTests(unittest.TestCase):
+    """Replacement = (board + basis) x conversion x FX, and nothing else.
 
-    def _feed(self, local=14300.0, traded=190.0, costs=500.0, **over):
+    No local cost stack is added. The local price it is read against does
+    not carry one either, and loading it onto one side alone is what made
+    the old comparison wrong.
+    """
+
+    def _feed(self, choice="book", local=14600.0, board=465.0, fx=54.3250,
+              market=None, book=185.5):
         s = state(local_prices=[{"date": days_ago(0), "commodity": "CORN",
                                  "price_egp_mt": local, "transport_egp_mt": 323.13}])
-        s["ui"].update({"basis_expenses_egp_mt": costs, "basis_source": "local",
+        s["ui"].update({"basis_expenses_egp_mt": 500.0,
                         "basis_local_use_transport": False,
-                        "replacement_basis": "auto"})
-        s["market_data"] = {"cbot_quotes": {"CORN": {"price": 460.25}},
-                            "fx": {"price": 54.0580}}
-        if traded is not None:
-            s["market_basis"] = [{"commodity": "CORN", "basis": traded,
+                        "replacement_basis": choice})
+        s["market_data"] = {"cbot_quotes": {"CORN": {"price": board}},
+                            "fx": {"price": fx}}
+        if market is not None:
+            s["market_basis"] = [{"commodity": "CORN", "basis": market,
                                   "date": days_ago(1)}]
-        s.update(over)
+        if book is not None:
+            s["contracts"] = {"a": {"status": "Open", "commodity": "CORN",
+                                    "qty_mt": 16000, "premium_cents": book,
+                                    "contract_date": days_ago(21)}}
         return CBOTFeed(s)
 
-    def test_import_leg_carries_the_cost_stack(self):
-        r = self._feed().replacement_routes("CORN")
-        self.assertAlmostEqual(
-            r["import"]["value"], (460.25 + 190.0) * 0.3937 * 54.0580 + 500.0,
-            places=4)
+    def test_the_formula_has_no_cost_term(self):
+        r = self._feed().replacement_cost("CORN")
+        self.assertAlmostEqual(r["value"], (465.0 + 185.5) * 0.3937 * 54.3250,
+                               places=4)
 
-    def test_local_leg_is_the_price_with_nothing_added(self):
-        r = self._feed().replacement_routes("CORN")
-        self.assertAlmostEqual(r["local"]["value"], 14300.0)
+    def test_the_cost_setting_does_not_move_it(self):
+        """Proof the stack is genuinely off, not merely zero today."""
+        a = self._feed()
+        b = self._feed()
+        b.state["ui"]["basis_expenses_egp_mt"] = 900.0
+        self.assertAlmostEqual(a.replacement_cost("CORN")["value"],
+                               b.replacement_cost("CORN")["value"], places=8)
 
-    def test_replacement_is_the_cheaper_route(self):
-        r = self._feed().replacement_routes("CORN")
-        self.assertEqual(r["binding"], "local")
-        self.assertAlmostEqual(r["value"], 14300.0)
-        self.assertAlmostEqual(r["edge"], r["import"]["value"] - 14300.0, places=6)
+    def test_it_is_compared_against_the_local_price(self):
+        r = self._feed().replacement_cost("CORN")
+        self.assertAlmostEqual(r["local"], 14600.0)
+        self.assertAlmostEqual(r["vs_local"], r["value"] - 14600.0, places=8)
+        self.assertLess(r["vs_local"], 0)       # a cargo at 185.5 beats local
 
-    def test_the_binding_route_flips_with_the_basis(self):
-        """A wider basis makes the cargo dearer and hands it to local."""
-        cheap = self._feed(traded=150.0).replacement_routes("CORN")
-        dear = self._feed(traded=260.0).replacement_routes("CORN")
-        self.assertEqual(cheap["binding"], "import")
-        self.assertEqual(dear["binding"], "local")
+    def test_a_wider_basis_turns_the_comparison_round(self):
+        self.assertGreater(
+            self._feed(choice="market", market=260.0).replacement_cost("CORN")["vs_local"], 0)
 
-    def test_the_import_leg_never_uses_a_local_derived_basis(self):
-        """Otherwise the board cancels and the two legs collapse into one."""
-        feed = self._feed()
-        # The displayed basis is local-derived...
-        self.assertEqual(feed.basis_reference("CORN")["source"], "local")
-        # ...while the import leg prices off the quoted one regardless.
-        leg = feed.replacement_routes("CORN")["import"]
-        self.assertEqual(leg["source"], "market")
-        self.assertAlmostEqual(leg["basis"], 190.0)
-        self.assertNotAlmostEqual(leg["basis"],
-                                  feed.basis_reference("CORN")["value"], places=2)
+    def test_a_local_derived_basis_returns_the_local_price_exactly(self):
+        r = self._feed(choice="local").replacement_cost("CORN")
+        self.assertAlmostEqual(r["value"], 14600.0, places=6)
+        self.assertAlmostEqual(r["vs_local"], 0.0, places=6)
+        self.assertTrue(r["circular"])
 
-    def test_a_book_average_is_flagged_as_not_a_quote(self):
-        feed = self._feed(traded=None, contracts={
-            "a": {"status": "Open", "commodity": "CORN", "qty_mt": 1000,
-                  "premium_cents": 185.5, "contract_date": days_ago(5)}})
-        leg = feed.replacement_routes("CORN")["import"]
-        self.assertEqual(leg["source"], "book")
-        self.assertTrue(leg["fallback"])
+    def test_there_is_no_second_route_to_choose_between(self):
+        r = self._feed().replacement_cost("CORN")
+        for gone in ("binding", "edge", "import"):
+            self.assertNotIn(gone, r)
 
-    def test_a_quoted_basis_is_not_flagged(self):
-        self.assertFalse(self._feed().replacement_routes("CORN")["import"]["fallback"])
+    def test_a_quoted_basis_is_not_flagged_as_a_fallback(self):
+        self.assertFalse(
+            self._feed(choice="market", market=190.0).replacement_cost("CORN")["fallback"])
+        self.assertTrue(self._feed(choice="book").replacement_cost("CORN")["fallback"])
 
-    def test_a_missing_leg_does_not_sink_the_other(self):
-        feed = self._feed(traded=None)          # no basis at all
-        r = feed.replacement_routes("CORN")
-        self.assertIsNone(r["import"]["value"])
-        self.assertEqual(r["binding"], "local")
-        self.assertAlmostEqual(r["value"], 14300.0)
-        self.assertIsNone(r["edge"])
-
-    def test_no_data_at_all_reports_rather_than_guessing(self):
-        r = CBOTFeed(state()).replacement_routes("CORN")
+    def test_missing_inputs_are_named(self):
+        r = self._feed(choice="market", market=None).replacement_cost("CORN")
         self.assertIsNone(r["value"])
-        self.assertIsNone(r["binding"])
-
+        self.assertIn("basis", r["note"])
 
 class ReplacementBasisChoiceTests(unittest.TestCase):
     """Pricing the import leg at each basis the app holds."""
@@ -340,48 +333,46 @@ class ReplacementBasisChoiceTests(unittest.TestCase):
         self.assertEqual(values, sorted(values))
         by = {r["source"]: r for r in rows}
         self.assertAlmostEqual(by["book"]["value"],
-                               (459.0 + 185.45) * 0.3937 * 54.15 + 500, places=4)
+                               (459.0 + 185.45) * 0.3937 * 54.15, places=4)
         self.assertAlmostEqual(by["market"]["value"],
-                               (459.0 + 190.0) * 0.3937 * 54.15 + 500, places=4)
+                               (459.0 + 190.0) * 0.3937 * 54.15, places=4)
 
-    def test_the_local_variant_returns_local_plus_costs(self):
+    def test_the_local_variant_returns_the_local_price_itself(self):
         """The identity, visible beside the others rather than hidden."""
         by = {r["source"]: r for r in self._feed().replacement_variants("CORN")}
-        self.assertAlmostEqual(by["local"]["value"], 14300.0 + 500.0, places=4)
+        self.assertAlmostEqual(by["local"]["value"], 14300.0, places=4)
         self.assertTrue(by["local"]["circular"])
 
     def test_auto_prefers_a_quote_over_the_book(self):
-        leg = self._feed().replacement_routes("CORN")["import"]
+        leg = self._feed().replacement_cost("CORN")
         self.assertEqual(leg["source"], "market")
         self.assertFalse(leg["fallback"])
 
     def test_auto_falls_back_to_the_book_when_no_quote_exists(self):
-        leg = self._feed(market=None).replacement_routes("CORN")["import"]
+        leg = self._feed(market=None).replacement_cost("CORN")
         self.assertEqual(leg["source"], "book")
         self.assertTrue(leg["fallback"])
 
     def test_pinning_the_book_ignores_an_available_quote(self):
-        leg = self._feed(choice="book").replacement_routes("CORN")["import"]
+        leg = self._feed(choice="book").replacement_cost("CORN")
         self.assertEqual(leg["source"], "book")
         self.assertAlmostEqual(leg["basis"], 185.45)
 
     def test_pinning_local_is_allowed_and_marked_circular(self):
-        routes = self._feed(choice="local").replacement_routes("CORN")
-        self.assertTrue(routes["import"]["circular"])
-        self.assertAlmostEqual(routes["import"]["value"], 14800.0, places=4)
-        self.assertEqual(routes["binding"], "local")
+        r = self._feed(choice="local").replacement_cost("CORN")
+        self.assertTrue(r["circular"])
+        self.assertAlmostEqual(r["value"], 14300.0, places=4)
 
     def test_pinning_a_basis_that_does_not_exist_prices_nothing(self):
         """Better an empty leg than a silent substitution."""
-        leg = self._feed(choice="market", market=None).replacement_routes("CORN")["import"]
+        leg = self._feed(choice="market", market=None).replacement_cost("CORN")
         self.assertIsNone(leg["value"])
-        self.assertIn("traded basis", leg["note"])
+        self.assertIn("basis", leg["note"])
 
-    def test_the_choice_changes_which_route_binds(self):
-        quote = self._feed(choice="market").replacement_routes("CORN")
-        book = self._feed(choice="book").replacement_routes("CORN")
-        self.assertEqual(quote["binding"], "local")
-        self.assertEqual(book["binding"], "import")
+    def test_the_choice_moves_the_number(self):
+        quote = self._feed(choice="market").replacement_cost("CORN")
+        book = self._feed(choice="book").replacement_cost("CORN")
+        self.assertGreater(quote["value"], book["value"])
 
 
 class ManualBasisTests(unittest.TestCase):
@@ -430,20 +421,20 @@ class ManualBasisTests(unittest.TestCase):
                    if r["source"] == "manual")
         self.assertAlmostEqual(row["basis"], 195.0)
         self.assertAlmostEqual(row["value"],
-                               (459.0 + 195.0) * 0.3937 * 54.15 + 500, places=4)
+                               (459.0 + 195.0) * 0.3937 * 54.15, places=4)
 
     def test_choosing_manual_prices_the_import_leg_off_it(self):
         feed = self._feed()
         feed.set_manual_basis("CORN", 195.0)
         feed.state["ui"]["replacement_basis"] = "manual"
-        leg = feed.replacement_routes("CORN")["import"]
+        leg = feed.replacement_cost("CORN")
         self.assertEqual(leg["source"], "manual")
         self.assertAlmostEqual(leg["basis"], 195.0)
 
     def test_choosing_manual_with_nothing_typed_prices_nothing(self):
         feed = self._feed()
         feed.state["ui"]["replacement_basis"] = "manual"
-        leg = feed.replacement_routes("CORN")["import"]
+        leg = feed.replacement_cost("CORN")
         self.assertIsNone(leg["value"])
 
     def test_a_corrupt_stored_value_does_not_crash_the_desk(self):
