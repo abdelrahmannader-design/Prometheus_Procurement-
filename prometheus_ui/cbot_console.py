@@ -352,53 +352,67 @@ class CBOTFeed:
                              circular=candidate["source"] == BASIS_SOURCE_LOCAL))
         return sorted(rows, key=lambda r: r["value"])
 
-    def replacement_cost(self, commodity="CORN", origin=None):
-        """What a cargo costs today, in EGP per tonne, before local costs.
+    def replacement_parity(self, commodity="CORN", origin=None):
+        """The basis at which an import matches the local price.
 
-            (board + basis) x conversion x FX
+            basis = (local / FX) / conversion - board
 
-        No discharge, clearance or inland run is added. The local price it
-        gets read against does not carry them either, so leaving them off
-        both sides is what makes the two directly comparable; adding them to
-        one alone was the thing that made the comparison wrong.
+        This is the whole of it. No other basis feeds this figure, and no
+        local cost stack is added, because the question is where the two
+        meet, not what either costs after handling.
 
-        With a local-derived basis the board and FX cancel and this returns
-        the local price itself. That is the identity, not a bug, and the
-        caller is told so — it is the right answer to "what basis matches
-        local" and the wrong one to "is importing cheaper".
+        Converting that basis back through the board returns the local
+        price exactly — the two operations are inverses. So the EGP figure
+        is reported as what it is, the input coming back, and the basis is
+        the output worth reading: a quote below it beats buying local, a
+        quote above it does not.
         """
         board, _ts = self.quote(commodity)
         rate, _fx = self.fx()
         factor = cbot_conv_factor(commodity, strict=True)
-        choice = self.replacement_basis_choice()
-        if choice == REPLACEMENT_BASIS_AUTO:
-            picked = self.traded_basis(commodity, origin)
-        else:
-            found = next((c for c in self.basis_candidates(commodity, origin)
-                          if c["source"] == choice), None)
-            picked = (dict(found) if found is not None else
-                      {"value": None, "source": choice, "label": choice,
-                       "age_days": None})
-
         local, local_date = self.local_quote(commodity)
-        out = {"value": None, "basis": picked["value"], "label": picked["label"],
-               "source": picked["source"], "age_days": picked.get("age_days"),
-               "choice": choice, "local": local, "local_date": local_date,
-               "vs_local": None,
-               "circular": picked["source"] == BASIS_SOURCE_LOCAL,
-               "fallback": picked["source"] != BASIS_SOURCE_MARKET,
-               "board": board, "fx": rate, "factor": factor, "note": ""}
-        if None in (board, rate, factor) or picked["value"] is None:
-            missing = [n for n, v in (("board quote", board), ("FX", rate),
-                                      ("factor", factor), ("basis", picked["value"]))
-                       if v is None]
-            out["note"] = "needs " + ", ".join(missing)
+        out = {"basis": None, "egp": local, "local": local,
+               "local_date": local_date, "board": board, "fx": rate,
+               "factor": factor, "quoted": None, "quoted_label": "",
+               "quoted_source": "", "quoted_age": None, "gap": None, "note": ""}
+        missing = [n for n, v in (("local price", local), ("board quote", board),
+                                  ("FX", rate), ("factor", factor)) if v is None]
+        if missing or not rate or not factor:
+            out["note"] = "needs " + ", ".join(missing or ["FX"])
             return out
-        out["value"] = (board + picked["value"]) * factor * rate
-        if local is not None:
-            # Positive: the cargo costs more than buying local.
-            out["vs_local"] = out["value"] - local
+        out["basis"] = ((local / rate) / factor) - board
+
+        quoted = self.comparison_basis(commodity, origin)
+        if quoted["value"] is not None:
+            out.update(quoted=quoted["value"], quoted_label=quoted["label"],
+                       quoted_source=quoted["source"],
+                       quoted_age=quoted.get("age_days"),
+                       # Negative: you are quoted below parity, so a cargo
+                       # lands under the local price.
+                       gap=quoted["value"] - out["basis"])
         return out
+
+    def comparison_basis(self, commodity="CORN", origin=None):
+        """The quoted basis to hold parity up against.
+
+        A hand-typed figure wins, because someone typing one is telling the
+        screen what they have just been offered. Otherwise the newest
+        market row, then the open-contract average.
+        """
+        choice = self.replacement_basis_choice()
+        candidates = [c for c in self.basis_candidates(commodity, origin)
+                      if c["source"] != BASIS_SOURCE_LOCAL]
+        if choice not in (REPLACEMENT_BASIS_AUTO, BASIS_SOURCE_LOCAL):
+            found = next((c for c in candidates if c["source"] == choice), None)
+            if found is not None:
+                return found
+        order = (REPLACEMENT_BASIS_MANUAL, BASIS_SOURCE_MARKET, BASIS_SOURCE_BOOK)
+        for source in order:
+            found = next((c for c in candidates if c["source"] == source), None)
+            if found is not None:
+                return found
+        return {"value": None, "source": "none", "label": "no quoted basis",
+                "age_days": None}
 
     def local_all_in(self, commodity="CORN"):
         """Latest logged local price plus its transport, as ``(value, date)``."""
@@ -951,7 +965,7 @@ class CBOTCommandCenter(tk.Frame):
         # Setup would mean leaving the screen to answer "and at 195?".
         controls = tk.Frame(bar, bg=t.c("surface"))
         controls.pack(fill="x", padx=12, pady=(8, 0))
-        tk.Label(controls, text="Replacement basis", bg=t.c("surface"),
+        tk.Label(controls, text="Compare with", bg=t.c("surface"),
                  fg=t.c("ink_2"), font=t.font("caption", "bold")).pack(side="left")
         self.basis_pick = SegmentedControl(
             controls, t, [label for label, _key in REPLACEMENT_PICKER],
@@ -1047,38 +1061,41 @@ class CBOTCommandCenter(tk.Frame):
     def _refresh_formula_bar(self, comm):
         """Both routes, their arithmetic, and which one binds."""
         feed = self.feed
-        repl = feed.replacement_cost(comm)
-        if repl["value"] is None:
-            self.formula_var.set("Replacement  —  " + (repl["note"] or "nothing priced yet"))
+        par = feed.replacement_parity(comm)
+        if par["basis"] is None:
+            self.formula_var.set("Replacement basis  —  " + (par["note"] or "nothing priced yet"))
             return
         unit = UNITS.get(commodity_base(comm), "")
-        head = (f"Replacement  =  (CBOT {repl['board']:,.2f}{unit} + basis "
-                f"{repl['basis']:,.2f} [{repl['label']}])  ×  {repl['factor']}  ×  "
-                f"FX {repl['fx']:,.4f}  =  {repl['value']:,.0f} EGP/MT"
-                + self._basis_caveat(repl))
-        if repl["local"] is not None:
-            gap = repl["vs_local"]
-            head += (f"\n    local price  =  {repl['local']:,.0f}  logged "
-                     f"{repl['local_date']}"
-                     + (f"   ·   replacement is {abs(gap):,.0f} EGP/MT "
-                        + ("above" if gap > 0 else "below") + " it"
-                        if gap and abs(gap) >= 0.5 else
-                        "   ·   the same figure, as a local-derived basis must give"))
+        head = (f"Replacement basis  =  (local {par['local']:,.0f}  ÷  FX "
+                f"{par['fx']:,.4f}  ÷  {par['factor']})  −  CBOT "
+                f"{par['board']:,.2f}{unit}   =   {par['basis']:,.2f}{unit}"
+                f"\n    that basis converted back  =  {par['egp']:,.0f} EGP/MT, the local "
+                f"price itself — the two steps are inverses, so the basis is the figure "
+                f"that carries the information")
+        if par["gap"] is not None:
+            verdict = ("a cargo lands below local" if par["gap"] < 0
+                       else "a cargo lands above local" if par["gap"] > 0
+                       else "level with local")
+            head += (f"\n    you are quoted  {par['quoted']:,.2f} [{par['quoted_label']}]"
+                     + (f", {par['quoted_age']:.0f}d old" if par["quoted_age"] is not None else "")
+                     + f"   ·   {abs(par['gap']):,.2f}{unit} "
+                     + ("below" if par["gap"] < 0 else "above" if par["gap"] > 0 else "at")
+                     + f" parity   ·   {verdict}")
+        else:
+            head += "\n    no quoted basis stored — type one in the box above to compare"
 
         # The same import leg at every basis the app holds. How much of the
         # verdict rests on which basis was picked is otherwise invisible.
-        variants = feed.replacement_variants(comm)
-        if len(variants) > 1:
-            active = repl.get("source")
+        others = [r for r in feed.basis_candidates(comm)
+                  if r["source"] != BASIS_SOURCE_LOCAL]
+        if others:
             parts = []
-            for row in variants:
-                mark = " ←" if row["source"] == active else ""
-                parts.append(f"{row['label']} {row['basis']:,.1f} → "
-                             f"{row['value']:,.0f}{mark}")
-            head += "\n    import at each basis:  " + "   |   ".join(parts)
-            if any(r["circular"] for r in variants):
-                head += "   (local-derived returns the local price itself, "
-                head += "by construction)"
+            for row in others:
+                against = row["value"] - par["basis"]
+                mark = " ←" if row["source"] == par["quoted_source"] else ""
+                parts.append(f"{row['label']} {row['value']:,.1f} "
+                             f"({against:+,.1f} vs parity){mark}")
+            head += "\n    every basis you hold:  " + "   |   ".join(parts)
         self.formula_var.set(head)
 
     def _build_main(self):
@@ -1287,25 +1304,22 @@ class CBOTCommandCenter(tk.Frame):
             delta_tone="mint" if (change_7 or 0) < 0 else "rose",
             spark=feed.spark(comm, 90))
 
-        repl = feed.replacement_cost(comm)
-        gap = repl["vs_local"]
-        if repl["value"] is None:
-            hint, delta, tone = repl["note"], "", "sky"
-        elif repl["circular"]:
-            # Equal to local by construction; calling that "level" would
-            # read as a market observation, which it is not.
-            hint = f"basis {repl['basis']:,.1f} · = local by construction"
-            delta, tone = "local-derived", "amber"
-        elif gap is None:
-            hint, delta, tone = f"basis {repl['basis']:,.1f} [{repl['label']}]", "", "sky"
+        par = feed.replacement_parity(comm)
+        unit = UNITS.get(commodity_base(comm), "")
+        if par["basis"] is None:
+            hint, delta, tone = par["note"], "", "sky"
+        elif par["gap"] is None:
+            hint = f"= {par['egp']:,.0f} EGP/MT · your local price"
+            delta, tone = "no quote to compare", "sky"
         else:
-            hint = f"basis {repl['basis']:,.1f} · local {repl['local']:,.0f}"
-            delta = ("import cheaper" if gap < 0 else "local cheaper"
-                     if gap > 0 else "level")
-            tone = "mint" if gap < 0 else "rose" if gap > 0 else "sky"
+            hint = (f"= {par['egp']:,.0f} EGP/MT · quoted "
+                    f"{par['quoted']:,.1f} [{par['quoted_label']}]")
+            delta = (f"{abs(par['gap']):,.1f} below" if par["gap"] < 0
+                     else f"{par['gap']:,.1f} above" if par["gap"] > 0 else "at parity")
+            tone = "mint" if par["gap"] < 0 else "rose" if par["gap"] > 0 else "sky"
         self.tiles["replacement"].set(
-            caption="Replacement EGP/MT",
-            value=f"{repl['value']:,.0f}" if repl["value"] is not None else "—",
+            caption=f"Replacement basis  {unit}",
+            value=f"{par['basis']:,.1f}" if par["basis"] is not None else "—",
             hint=hint, delta=delta, delta_tone=tone, spark=[])
 
         self._refresh_basis_tile(comm)
