@@ -62,14 +62,17 @@ BASIS_SOURCES = (BASIS_SOURCE_LOCAL, BASIS_SOURCE_MARKET, BASIS_SOURCE_BOOK)
 #: can hold one basis still and watch the rest of the market move.
 REPLACEMENT_BASIS_AUTO = "auto"
 REPLACEMENT_BASIS_MANUAL = "manual"
+#: The premium on the single most recently priced open contract, as opposed
+#: to the average across them all.
+REPLACEMENT_BASIS_LATEST = "latest"
 REPLACEMENT_BASIS_CHOICES = (REPLACEMENT_BASIS_AUTO, BASIS_SOURCE_MARKET,
                              BASIS_SOURCE_BOOK, BASIS_SOURCE_LOCAL,
-                             REPLACEMENT_BASIS_MANUAL)
+                             REPLACEMENT_BASIS_MANUAL, REPLACEMENT_BASIS_LATEST)
 
 #: Short labels for the desk's own picker, in the order it shows them.
-REPLACEMENT_PICKER = (("Local", BASIS_SOURCE_LOCAL),
-                      ("Quote", BASIS_SOURCE_MARKET),
+REPLACEMENT_PICKER = (("Quote", BASIS_SOURCE_MARKET),
                       ("Book", BASIS_SOURCE_BOOK),
+                      ("Latest", REPLACEMENT_BASIS_LATEST),
                       ("Manual", REPLACEMENT_BASIS_MANUAL),
                       ("Auto", REPLACEMENT_BASIS_AUTO))
 
@@ -290,11 +293,47 @@ class CBOTFeed:
             out.append({"source": BASIS_SOURCE_LOCAL, "label": "local-derived",
                         "value": implied["value"],
                         "age_days": _days_since(implied.get("date"))})
+        latest = self.latest_contract_basis(commodity, origin)
+        if latest is not None:
+            out.append(latest)
         typed = self.manual_basis(commodity)
         if typed is not None:
             out.append({"source": REPLACEMENT_BASIS_MANUAL, "label": "manual",
                         "value": typed, "age_days": None})
         return out
+
+    def latest_contract_basis(self, commodity="CORN", origin=None):
+        """The premium on the most recently priced open contract.
+
+        The book average smooths across everything still open, which is the
+        right shape for a book-wide figure and the wrong one for "what are
+        we getting now" — an old, large cargo can hold the average far from
+        where the last deal was struck. This returns that last deal.
+        """
+        base = commodity_base(commodity)
+        want = (origin or "").strip().upper()
+        best = None
+        for contract in (self.state.get("contracts", {}) or {}).values():
+            if (contract.get("status") or "Open").strip().lower() != "open":
+                continue
+            if commodity_base(contract.get("commodity")) != base:
+                continue
+            if want and self._contract_origin(contract) != want:
+                continue
+            premium = _f(contract.get("premium_cents"))
+            if premium is None or premium == 0:
+                continue
+            date = str(contract.get("pricing_date")
+                       or contract.get("contract_date") or "")[:10]
+            if best is None or date > best[0]:
+                best = (date, premium, contract)
+        if best is None:
+            return None
+        date, premium, contract = best
+        name = (contract.get("name") or contract.get("contract_ref") or "").strip()
+        return {"source": REPLACEMENT_BASIS_LATEST, "value": premium,
+                "label": "latest contract" + (f" · {name}" if name else ""),
+                "age_days": _days_since(date), "date": date}
 
     def replacement_basis_choice(self):
         ui = self.state.get("ui", {}) or {}
@@ -406,6 +445,9 @@ class CBOTFeed:
             found = next((c for c in candidates if c["source"] == choice), None)
             if found is not None:
                 return found
+        # The latest contract is opt-in, not part of the automatic chain:
+        # switching the desk's default comparison without being asked would
+        # move numbers people had already read.
         order = (REPLACEMENT_BASIS_MANUAL, BASIS_SOURCE_MARKET, BASIS_SOURCE_BOOK)
         for source in order:
             found = next((c for c in candidates if c["source"] == source), None)
@@ -985,6 +1027,15 @@ class CBOTCommandCenter(tk.Frame):
         PillButton(controls, t, "Clear", self._clear_manual_basis,
                    variant="ghost", size="caption", pad_x=12, pad_y=5).pack(side="left", padx=(6, 0))
 
+        self.use_latest_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(
+            controls, text="use latest stored contract premium",
+            variable=self.use_latest_var, command=self._toggle_latest,
+            bg=t.c("surface"), fg=t.c("ink_2"), activebackground=t.c("surface"),
+            activeforeground=t.c("ink"), selectcolor=t.c("surface"),
+            font=t.font("caption"), bd=0, highlightthickness=0,
+            cursor="hand2").pack(side="left", padx=(16, 0))
+
         self.formula_var = tk.StringVar(value="")
         self.formula_label = tk.Label(
             bar, textvariable=self.formula_var, bg=t.c("surface"),
@@ -998,6 +1049,16 @@ class CBOTCommandCenter(tk.Frame):
         if key is None:
             return
         self.feed.state.setdefault("ui", {})["replacement_basis"] = key
+        self._persist()
+        self.refresh()
+
+    def _toggle_latest(self):
+        """Switch the comparison between the last deal and everything else."""
+        ui = self.feed.state.setdefault("ui", {})
+        if self.use_latest_var.get():
+            ui["replacement_basis"] = REPLACEMENT_BASIS_LATEST
+        elif ui.get("replacement_basis") == REPLACEMENT_BASIS_LATEST:
+            ui["replacement_basis"] = REPLACEMENT_BASIS_AUTO
         self._persist()
         self.refresh()
 
@@ -1057,6 +1118,8 @@ class CBOTCommandCenter(tk.Frame):
             self.basis_pick.set_value(label)
         typed = self.feed.manual_basis(comm)
         self.manual_basis_var.set("" if typed is None else f"{typed:g}")
+        if hasattr(self, "use_latest_var"):
+            self.use_latest_var.set(key == REPLACEMENT_BASIS_LATEST)
 
     def _refresh_formula_bar(self, comm):
         """Both routes, their arithmetic, and which one binds."""

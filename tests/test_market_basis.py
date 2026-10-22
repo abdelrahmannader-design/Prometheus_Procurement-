@@ -372,3 +372,83 @@ class ManualBasisTests(unittest.TestCase):
         feed = self._feed()
         feed.state["ui"]["replacement_manual_basis"] = "not a dict"
         self.assertIsNone(feed.manual_basis("CORN"))
+
+
+class LatestContractBasisTests(unittest.TestCase):
+    """The premium on the last deal struck, as opposed to the average."""
+
+    def _feed(self, choice=None, contracts=None):
+        s = state(local_prices=[{"date": days_ago(0), "commodity": "CORN",
+                                 "price_egp_mt": 14600.0, "transport_egp_mt": 323.13}])
+        s["ui"].update({"basis_local_use_transport": False})
+        if choice:
+            s["ui"]["replacement_basis"] = choice
+        s["market_data"] = {"cbot_quotes": {"CORN": {"price": 465.0}},
+                            "fx": {"price": 54.3250}}
+        s["contracts"] = contracts if contracts is not None else {
+            "old": {"status": "Open", "commodity": "CORN", "qty_mt": 10000,
+                    "premium_cents": 240.0, "contract_date": days_ago(60),
+                    "name": "Sep cargo"},
+            "new": {"status": "Open", "commodity": "CORN", "qty_mt": 2000,
+                    "premium_cents": 190.0, "contract_date": days_ago(3),
+                    "name": "Dec corn"},
+        }
+        return CBOTFeed(s)
+
+    def test_it_is_the_newest_not_the_average(self):
+        """A big old cargo drags the average away from the last deal."""
+        feed = self._feed()
+        latest = feed.latest_contract_basis("CORN")
+        self.assertAlmostEqual(latest["value"], 190.0)
+        self.assertNotAlmostEqual(feed.weighted_premium("CORN"), 190.0, places=1)
+
+    def test_it_names_the_contract_and_its_age(self):
+        latest = self._feed().latest_contract_basis("CORN")
+        self.assertIn("Dec corn", latest["label"])
+        self.assertEqual(latest["age_days"], 3)
+
+    def test_pricing_date_wins_over_contract_date(self):
+        feed = self._feed(contracts={
+            "a": {"status": "Open", "commodity": "CORN", "qty_mt": 1000,
+                  "premium_cents": 200.0, "contract_date": days_ago(1)},
+            "b": {"status": "Open", "commodity": "CORN", "qty_mt": 1000,
+                  "premium_cents": 175.0, "contract_date": days_ago(40),
+                  "pricing_date": days_ago(0)},
+        })
+        self.assertAlmostEqual(feed.latest_contract_basis("CORN")["value"], 175.0)
+
+    def test_closed_contracts_are_ignored(self):
+        feed = self._feed(contracts={
+            "shut": {"status": "Closed", "commodity": "CORN", "qty_mt": 1000,
+                     "premium_cents": 300.0, "contract_date": days_ago(0)},
+            "open": {"status": "Open", "commodity": "CORN", "qty_mt": 1000,
+                     "premium_cents": 190.0, "contract_date": days_ago(9)},
+        })
+        self.assertAlmostEqual(feed.latest_contract_basis("CORN")["value"], 190.0)
+
+    def test_it_ignores_the_ninety_day_window(self):
+        """The last deal is the last deal, however long ago it was."""
+        feed = self._feed(contracts={
+            "old": {"status": "Open", "commodity": "CORN", "qty_mt": 1000,
+                    "premium_cents": 205.0, "contract_date": days_ago(200)},
+        })
+        self.assertIsNone(feed.weighted_premium("CORN"))
+        self.assertAlmostEqual(feed.latest_contract_basis("CORN")["value"], 205.0)
+
+    def test_no_open_contract_gives_nothing(self):
+        self.assertIsNone(self._feed(contracts={}).latest_contract_basis("CORN"))
+
+    def test_choosing_it_makes_it_the_comparison(self):
+        par = self._feed(choice="latest").replacement_parity("CORN")
+        self.assertEqual(par["quoted_source"], "latest")
+        self.assertAlmostEqual(par["quoted"], 190.0)
+
+    def test_it_stays_out_of_the_automatic_chain(self):
+        """Opt-in: auto must not quietly switch to it."""
+        par = self._feed().replacement_parity("CORN")
+        self.assertEqual(par["quoted_source"], "book")
+
+    def test_it_never_touches_the_parity_figure(self):
+        a = self._feed().replacement_parity("CORN")["basis"]
+        b = self._feed(choice="latest").replacement_parity("CORN")["basis"]
+        self.assertAlmostEqual(a, b, places=10)
