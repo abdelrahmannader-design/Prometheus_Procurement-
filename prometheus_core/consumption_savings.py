@@ -58,6 +58,21 @@ def _base(commodity):
     return (commodity or "").strip().upper().split("-")[0]
 
 
+def _origin(row):
+    """Origin of a lot: the explicit field, else the commodity suffix.
+
+    A consumption entry says CORN, never CORN-BRZ — the yard records what
+    was burned, not whose cargo it came out of. FIFO answers that, so the
+    origin belongs to the layer the tonne was drawn from, which is why it
+    is resolved here and not from the event.
+    """
+    explicit = (row.get("origin") or "").strip().upper()
+    if explicit:
+        return explicit
+    parts = (row.get("commodity") or "").strip().upper().split("-", 1)
+    return parts[1] if len(parts) == 2 else ""
+
+
 def series_from_rows(rows, date_key="date", value_key="price_egp_mt",
                      commodity=None, extra=None):
     """A ``{date: value}`` map from logged rows, newest wins per date.
@@ -99,7 +114,8 @@ def nearest_on_or_before(series, date):
     return series[best], best, (date - best).days
 
 
-def consumption_draws(lots, events, commodity=None, start=None, end=None):
+def consumption_draws(lots, events, commodity=None, start=None, end=None,
+                     origin=None):
     """Walk consumption FIFO and record every draw against its layer.
 
     The app's inventory walk returns the layers that survive; this returns
@@ -108,6 +124,7 @@ def consumption_draws(lots, events, commodity=None, start=None, end=None):
     saving needs.
     """
     want = _base(commodity) if commodity else None
+    want_origin = (origin or "").strip().upper() or None
     first, last = _date(start), _date(end)
 
     layers = []
@@ -127,6 +144,8 @@ def consumption_draws(lots, events, commodity=None, start=None, end=None):
             "lot_id": lot.get("lot_id") or lot.get("contract_id") or "",
             "ref": (lot.get("contract_ref") or lot.get("name")
                     or lot.get("contract_id") or "").strip(),
+            "origin": _origin(lot),
+            "supplier": (lot.get("supplier") or "").strip(),
         })
     layers.sort(key=lambda x: (x["date"], str(x["lot_id"])))
 
@@ -162,6 +181,8 @@ def consumption_draws(lots, events, commodity=None, start=None, end=None):
                 "date": use["date"], "commodity": use["base"], "mt": take,
                 "cost_egp_mt": layer["cost"], "lot_id": layer["lot_id"],
                 "contract_ref": layer["ref"],
+                "origin": layer["origin"] or "(no origin)",
+                "supplier": layer["supplier"],
                 "landed": layer["date"].isoformat(),
             })
         if outstanding > 1e-9:
@@ -170,9 +191,14 @@ def consumption_draws(lots, events, commodity=None, start=None, end=None):
             draws.append({
                 "date": use["date"], "commodity": use["base"], "mt": outstanding,
                 "cost_egp_mt": None, "lot_id": "", "contract_ref": "(unsourced)",
-                "landed": "",
+                "origin": "(unsourced)", "supplier": "", "landed": "",
             })
 
+    if want_origin:
+        # Filtered after the walk, not before: dropping a cargo from the
+        # queue first would hand its tonnes to the wrong layer and change
+        # what every later draw cost.
+        draws = [d for d in draws if d.get("origin") == want_origin]
     if first or last:
         draws = [d for d in draws
                  if (not first or d["date"] >= first)
@@ -242,16 +268,17 @@ def _totals(rows):
 def savings_report(lots, events, commodity=None, start=None, end=None,
                    local_series=None, cbot_series=None, fx_series=None,
                    basis_for=None, factor=0.3937,
-                   stale_days=DEFAULT_STALE_DAYS):
-    """Draws, the same rolled up by day and by contract, and the totals."""
-    draws = consumption_draws(lots, events, commodity, start, end)
+                   stale_days=DEFAULT_STALE_DAYS, origin=None):
+    """Draws, the same rolled up by day, cargo and origin, and the totals."""
+    draws = consumption_draws(lots, events, commodity, start, end, origin)
     rows = value_draws(draws, local_series, cbot_series, fx_series,
                        basis_for, factor, stale_days)
 
-    by_day, by_contract = {}, {}
+    by_day, by_contract, by_origin = {}, {}, {}
     for row in rows:
         for bucket, key in ((by_day, row["date"].isoformat()),
-                            (by_contract, row.get("contract_ref") or "(unsourced)")):
+                            (by_contract, row.get("contract_ref") or "(unsourced)"),
+                            (by_origin, row.get("origin") or "(no origin)")):
             bucket.setdefault(key, []).append(row)
 
     return {
@@ -260,6 +287,8 @@ def savings_report(lots, events, commodity=None, start=None, end=None,
                    for k, v in sorted(by_day.items())],
         "by_contract": [{"key": k, "rows": v, **_totals(v)}
                         for k, v in sorted(by_contract.items())],
+        "by_origin": [{"key": k, "rows": v, **_totals(v)}
+                      for k, v in sorted(by_origin.items())],
         "totals": _totals(rows),
         "version": CONSUMPTION_SAVINGS_VERSION,
     }

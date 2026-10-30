@@ -181,5 +181,70 @@ class RollupTests(unittest.TestCase):
         self.assertAlmostEqual(dec["mt"], 2000.0)
 
 
+MIXED = [
+    {"lot_id": "A", "contract_ref": "Brz cargo", "commodity": "CORN-BRZ",
+     "supplier": "Nagi", "delivery_date": "2026-09-01",
+     "original_mt": 2000, "cost_egp_mt": 14000.0},
+    {"lot_id": "B", "contract_ref": "Arg cargo", "commodity": "CORN-ARG",
+     "supplier": "Hassan", "delivery_date": "2026-10-01",
+     "original_mt": 2000, "cost_egp_mt": 14800.0},
+]
+
+
+class OriginTests(unittest.TestCase):
+    def test_the_origin_rides_along_from_the_layer_not_the_event(self):
+        """The yard logs CORN; which cargo it came out of is FIFO's answer."""
+        draws = consumption_draws(MIXED, EVENTS, "CORN")
+        self.assertEqual([d["origin"] for d in draws], ["BRZ", "BRZ", "ARG"])
+        self.assertEqual([d["supplier"] for d in draws],
+                         ["Nagi", "Nagi", "Hassan"])
+
+    def test_an_explicit_origin_field_beats_the_commodity_suffix(self):
+        lots = [dict(MIXED[0], origin="ukr")]
+        draws = consumption_draws(lots, EVENTS[:1], "CORN")
+        self.assertEqual([d["origin"] for d in draws], ["UKR"])
+
+    def test_a_layer_with_no_origin_is_bucketed_not_dropped(self):
+        draws = consumption_draws(LOTS, EVENTS, "CORN")
+        self.assertEqual({d["origin"] for d in draws}, {"(no origin)"})
+
+    def test_filtering_by_origin_keeps_the_cost_the_full_queue_gave(self):
+        """ARG only supplies the tail of the October draw, not all of it.
+
+        Filtering the queue before the walk would have handed the ARG layer
+        the whole 1,000 MT at its own cost.
+        """
+        arg = consumption_draws(MIXED, EVENTS, "CORN", origin="ARG")
+        self.assertEqual(len(arg), 1)
+        self.assertAlmostEqual(arg[0]["mt"], 500.0)
+        self.assertAlmostEqual(arg[0]["cost_egp_mt"], 14800.0)
+
+    def test_the_origins_together_are_the_whole_consumption(self):
+        whole = consumption_draws(MIXED, EVENTS, "CORN")
+        parts = []
+        for origin in ("BRZ", "ARG"):
+            parts += consumption_draws(MIXED, EVENTS, "CORN", origin=origin)
+        self.assertAlmostEqual(sum(d["mt"] for d in parts),
+                               sum(d["mt"] for d in whole))
+
+    def test_an_origin_nobody_shipped_yields_nothing(self):
+        self.assertEqual(consumption_draws(MIXED, EVENTS, "CORN",
+                                           origin="UKR"), [])
+
+    def test_the_by_origin_rollup_adds_back_to_the_total(self):
+        rep = report(lots=MIXED)
+        self.assertEqual([g["key"] for g in rep["by_origin"]], ["ARG", "BRZ"])
+        self.assertAlmostEqual(
+            sum(g["saving_vs_local_egp"] for g in rep["by_origin"]),
+            rep["totals"]["saving_vs_local_egp"], places=6)
+        self.assertAlmostEqual(sum(g["mt"] for g in rep["by_origin"]),
+                               rep["totals"]["mt"], places=6)
+
+    def test_a_report_narrowed_to_one_origin_only_counts_that_origin(self):
+        rep = report(lots=MIXED, origin="BRZ")
+        self.assertEqual([g["key"] for g in rep["by_origin"]], ["BRZ"])
+        self.assertAlmostEqual(rep["totals"]["mt"], 2000.0)
+
+
 if __name__ == "__main__":
     unittest.main()
