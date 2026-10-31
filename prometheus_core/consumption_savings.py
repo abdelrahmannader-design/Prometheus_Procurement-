@@ -36,7 +36,7 @@ __all__ = ["CONSUMPTION_SAVINGS_VERSION", "DEFAULT_STALE_DAYS",
            "consumption_draws", "value_draws", "savings_report",
            "nearest_on_or_before", "series_from_rows"]
 
-CONSUMPTION_SAVINGS_VERSION = "1.0"
+CONSUMPTION_SAVINGS_VERSION = "1.1"
 
 #: A reference price older than this is still used — refusing to value a
 #: tonne helps nobody — but the row is marked so a total built largely on
@@ -114,19 +114,24 @@ def nearest_on_or_before(series, date):
     return series[best], best, (date - best).days
 
 
-def consumption_draws(lots, events, commodity=None, start=None, end=None,
-                     origin=None):
-    """Walk consumption FIFO and record every draw against its layer.
+def within(draws, start=None, end=None):
+    """The draws that fall inside a date window, ends included."""
+    first, last = _date(start), _date(end)
+    if not (first or last):
+        return list(draws or [])
+    return [d for d in draws or []
+            if (not first or d["date"] >= first)
+            and (not last or d["date"] <= last)]
 
-    The app's inventory walk returns the layers that survive; this returns
-    the withdrawals, because a withdrawal is what carries a date, a tonnage
-    and the cost of the specific layer it came out of — the three things a
-    saving needs.
+
+def stock_layers(lots, commodity=None):
+    """The cargoes of a commodity, oldest first — the FIFO queue itself.
+
+    Shared with the coverage report so that what a reader is told about a
+    cargo comes from the same queue the draws were taken out of, rather
+    than from a second pass that could disagree with it.
     """
     want = _base(commodity) if commodity else None
-    want_origin = (origin or "").strip().upper() or None
-    first, last = _date(start), _date(end)
-
     layers = []
     for lot in lots or []:
         if not isinstance(lot, dict):
@@ -139,7 +144,7 @@ def consumption_draws(lots, events, commodity=None, start=None, end=None,
         if landed is None or qty <= 0:
             continue
         layers.append({
-            "date": landed, "left": qty, "base": base,
+            "date": landed, "left": qty, "qty": qty, "base": base,
             "cost": to_float(lot.get("cost_egp_mt"), None),
             "lot_id": lot.get("lot_id") or lot.get("contract_id") or "",
             "ref": (lot.get("contract_ref") or lot.get("name")
@@ -148,6 +153,78 @@ def consumption_draws(lots, events, commodity=None, start=None, end=None,
             "supplier": (lot.get("supplier") or "").strip(),
         })
     layers.sort(key=lambda x: (x["date"], str(x["lot_id"])))
+    return layers
+
+
+def cargo_coverage(lots, all_draws, commodity=None, start=None, end=None,
+                   origin=None):
+    """Every cargo in scope and how much of it the consumption has reached.
+
+    Without this the tab looks like it has lost contracts: a cargo nobody
+    has eaten into yet has no realised saving, so it cannot appear as a
+    draw, and the only honest answer to "where are the rest?" is to name
+    them and say why they are not there.
+    """
+    want_origin = (origin or "").strip().upper() or None
+    first, last = _date(start), _date(end)
+    drawn_all, drawn_window, drawn_after = {}, {}, {}
+    for draw in all_draws or []:
+        key = draw.get("lot_id") or draw.get("contract_ref") or ""
+        drawn_all[key] = drawn_all.get(key, 0.0) + draw["mt"]
+        if last and draw["date"] > last:
+            bucket = drawn_after
+        elif first and draw["date"] < first:
+            continue
+        else:
+            bucket = drawn_window
+        bucket[key] = bucket.get(key, 0.0) + draw["mt"]
+
+    out = []
+    for layer in stock_layers(lots, commodity):
+        if want_origin and (layer["origin"] or "") != want_origin:
+            continue
+        key = layer["lot_id"] or layer["ref"]
+        total = drawn_all.get(key, 0.0)
+        here = drawn_window.get(key, 0.0)
+        # Order matters: a cargo consumed outside the window is either still
+        # ahead of it or already behind it, and calling both "earlier" would
+        # tell a reader the opposite of what happened.
+        if here > 1e-9:
+            state, why = "drawn", "consumed in this period"
+        elif last and layer["date"] > last:
+            state, why = "later", "landed after this period"
+        elif drawn_after.get(key, 0.0) > 1e-9:
+            state, why = "later", "consumed after this period"
+        elif total > 1e-9:
+            state, why = "earlier", "consumed before this period"
+        else:
+            state, why = "untouched", "still in stock, FIFO has not reached it"
+        out.append({
+            "lot_id": layer["lot_id"], "key": layer["ref"] or layer["lot_id"],
+            "origin": layer["origin"] or "(no origin)",
+            "supplier": layer["supplier"],
+            "landed": layer["date"].isoformat(),
+            "qty_mt": layer["qty"], "cost_egp_mt": layer["cost"],
+            "drawn_mt": here, "drawn_total_mt": total,
+            "remaining_mt": max(layer["qty"] - total, 0.0),
+            "state": state, "why": why,
+        })
+    return out
+
+
+def consumption_draws(lots, events, commodity=None, start=None, end=None,
+                     origin=None):
+    """Walk consumption FIFO and record every draw against its layer.
+
+    The app's inventory walk returns the layers that survive; this returns
+    the withdrawals, because a withdrawal is what carries a date, a tonnage
+    and the cost of the specific layer it came out of — the three things a
+    saving needs.
+    """
+    want = _base(commodity) if commodity else None
+    want_origin = (origin or "").strip().upper() or None
+
+    layers = stock_layers(lots, commodity)
 
     uses = []
     for event in events or []:
@@ -199,11 +276,7 @@ def consumption_draws(lots, events, commodity=None, start=None, end=None,
         # queue first would hand its tonnes to the wrong layer and change
         # what every later draw cost.
         draws = [d for d in draws if d.get("origin") == want_origin]
-    if first or last:
-        draws = [d for d in draws
-                 if (not first or d["date"] >= first)
-                 and (not last or d["date"] <= last)]
-    return draws
+    return within(draws, start, end)
 
 
 def value_draws(draws, local_series=None, cbot_series=None, fx_series=None,
@@ -270,7 +343,8 @@ def savings_report(lots, events, commodity=None, start=None, end=None,
                    basis_for=None, factor=0.3937,
                    stale_days=DEFAULT_STALE_DAYS, origin=None):
     """Draws, the same rolled up by day, cargo and origin, and the totals."""
-    draws = consumption_draws(lots, events, commodity, start, end, origin)
+    everything = consumption_draws(lots, events, commodity, None, None, origin)
+    draws = within(everything, start, end)
     rows = value_draws(draws, local_series, cbot_series, fx_series,
                        basis_for, factor, stale_days)
 
@@ -290,5 +364,7 @@ def savings_report(lots, events, commodity=None, start=None, end=None,
         "by_origin": [{"key": k, "rows": v, **_totals(v)}
                       for k, v in sorted(by_origin.items())],
         "totals": _totals(rows),
+        "coverage": cargo_coverage(lots, everything, commodity, start, end,
+                                   origin),
         "version": CONSUMPTION_SAVINGS_VERSION,
     }

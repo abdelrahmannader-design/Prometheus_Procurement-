@@ -7,10 +7,12 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from prometheus_core.consumption_savings import (consumption_draws,
+from prometheus_core.consumption_savings import (cargo_coverage,
+                                                 consumption_draws,
                                                  nearest_on_or_before,
                                                  savings_report,
-                                                 series_from_rows, value_draws)
+                                                 series_from_rows,
+                                                 value_draws, within)
 
 D = dt.date
 LOTS = [
@@ -244,6 +246,66 @@ class OriginTests(unittest.TestCase):
         rep = report(lots=MIXED, origin="BRZ")
         self.assertEqual([g["key"] for g in rep["by_origin"]], ["BRZ"])
         self.assertAlmostEqual(rep["totals"]["mt"], 2000.0)
+
+
+class CoverageTests(unittest.TestCase):
+    """Why a cargo is missing from the draws is itself a reported fact."""
+
+    def coverage(self, **over):
+        return {c["key"]: c for c in report(**over)["coverage"]}
+
+    def test_every_cargo_in_scope_is_accounted_for(self):
+        self.assertEqual(set(self.coverage()), {"Dec corn", "Oct corn"})
+
+    def test_a_cargo_consumption_reached_reports_what_it_gave_up(self):
+        dec = self.coverage()["Dec corn"]
+        self.assertEqual(dec["state"], "drawn")
+        self.assertAlmostEqual(dec["drawn_mt"], 2000.0)
+        self.assertAlmostEqual(dec["remaining_mt"], 0.0)
+
+    def test_a_cargo_fifo_has_not_reached_is_named_not_dropped(self):
+        """2,500 MT burned against 4,000 MT landed leaves a layer untouched."""
+        oct_lot = self.coverage(events=EVENTS[:1])["Oct corn"]
+        self.assertEqual(oct_lot["state"], "untouched")
+        self.assertAlmostEqual(oct_lot["drawn_mt"], 0.0)
+        self.assertAlmostEqual(oct_lot["remaining_mt"], 2000.0)
+
+    def test_a_cargo_that_lands_after_the_window_says_so(self):
+        oct_lot = self.coverage(end="2026-09-30")["Oct corn"]
+        self.assertEqual(oct_lot["state"], "later")
+        self.assertIn("landed after", oct_lot["why"])
+
+    def test_a_cargo_eaten_before_the_window_is_not_called_untouched(self):
+        dec = self.coverage(start="2026-10-20")["Dec corn"]
+        self.assertEqual(dec["state"], "earlier")
+        self.assertAlmostEqual(dec["drawn_mt"], 0.0)
+        self.assertAlmostEqual(dec["drawn_total_mt"], 2000.0)
+
+    def test_a_cargo_eaten_after_the_window_is_not_called_earlier(self):
+        """It is ahead of the period, not behind it."""
+        oct_lot = self.coverage(end="2026-10-05")["Oct corn"]
+        self.assertEqual(oct_lot["state"], "later")
+        self.assertIn("consumed after", oct_lot["why"])
+
+    def test_coverage_follows_the_origin_filter(self):
+        self.assertEqual(set(self.coverage(lots=MIXED, origin="ARG")),
+                         {"Arg cargo"})
+
+    def test_the_tonnes_drawn_add_back_to_the_total_consumed(self):
+        rep = report()
+        self.assertAlmostEqual(sum(c["drawn_mt"] for c in rep["coverage"]),
+                               rep["totals"]["mt"])
+
+    def test_a_window_keeps_both_ends(self):
+        draws = consumption_draws(LOTS, EVENTS, "CORN")
+        self.assertEqual(len(within(draws, "2026-09-10", "2026-10-10")),
+                         len(draws))
+        self.assertEqual(len(within(draws, "2026-09-11", "2026-10-09")), 0)
+
+    def test_coverage_can_be_asked_for_on_its_own(self):
+        draws = consumption_draws(LOTS, EVENTS[:1], "CORN")
+        cover = {c["key"]: c for c in cargo_coverage(LOTS, draws, "CORN")}
+        self.assertEqual(cover["Oct corn"]["state"], "untouched")
 
 
 if __name__ == "__main__":
