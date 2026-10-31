@@ -118,7 +118,8 @@ def _rate_by_base(consumption_rates):
 
 
 def build_daily_fifo_inventory(lots, events=None, consumption_rates=None, as_of=None,
-                               estimate_daily=True, record_draws=False):
+                               estimate_daily=True, record_draws=False,
+                               start_on_delivery=False):
     """Build current FIFO layers for every base commodity.
 
     Parameters
@@ -141,6 +142,10 @@ def build_daily_fifo_inventory(lots, events=None, consumption_rates=None, as_of=
         how its tonnes are known: "count" (cleared by a physical count, day
         not recorded), "actual" (a logged consumption entry) or "estimated"
         (the configured daily rate after the last actual entry).
+    start_on_delivery:
+        With no actual entry and no physical count to start from, begin the
+        daily estimate on the day the first cargo lands rather than the day
+        after. Off by default, which keeps every existing figure unchanged.
     """
     as_of_d = _date(as_of) or dt.date.today()
     as_of_s = as_of_d.isoformat()
@@ -244,6 +249,10 @@ def build_daily_fifo_inventory(lots, events=None, consumption_rates=None, as_of=
         actual_cutoff = last_actual_date or baseline_date
         if actual_cutoff is None:
             actual_cutoff = as_of_d if not estimate_daily else (timeline_start or as_of_d)
+            if estimate_daily and start_on_delivery and timeline_start:
+                # The day before the first landing, so that cargo arrives
+                # inside the estimate and is drawn on from its own day.
+                actual_cutoff = timeline_start - dt.timedelta(days=1)
 
         # Add/process delivered contract lots and standalone receipts up to the
         # actual cutoff. Receipts occur before consumption on the same date.

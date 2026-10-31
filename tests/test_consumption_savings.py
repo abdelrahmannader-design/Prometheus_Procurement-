@@ -436,5 +436,47 @@ class InventoryAgreementTests(unittest.TestCase):
                                + inv["estimated_consumed_mt"])
 
 
+class DailyRateFromDeliveryTests(unittest.TestCase):
+    """Consumption at the configured rate on every day from the first landing."""
+
+    def walk(self, events=(), rate=100, as_of="2026-09-05", **kw):
+        return build_daily_fifo_inventory(LOTS, list(events), {"CORN": rate},
+                                          as_of=as_of, record_draws=True,
+                                          **kw)["CORN"]
+
+    def test_the_first_cargo_is_drawn_on_from_the_day_it_lands(self):
+        inv = self.walk(start_on_delivery=True)
+        self.assertEqual(min(d["date"] for d in inv["draws"]),
+                         dt.date(2026, 9, 1))
+
+    def test_every_day_to_the_valuation_date_is_counted(self):
+        """1 Sep to 5 Sep inclusive is five days at 100 MT."""
+        inv = self.walk(start_on_delivery=True)
+        self.assertAlmostEqual(inv["estimated_consumed_mt"], 500.0)
+        self.assertAlmostEqual(inv["remaining_mt"], 2000.0 - 500.0)
+
+    def test_off_by_default_so_existing_figures_do_not_move(self):
+        inv = self.walk()
+        self.assertEqual(min(d["date"] for d in inv["draws"]),
+                         dt.date(2026, 9, 2))
+        self.assertAlmostEqual(inv["estimated_consumed_mt"], 400.0)
+
+    def test_a_logged_entry_still_takes_precedence_when_one_is_passed(self):
+        inv = self.walk(events=[{"date": "2026-09-03", "commodity": "CORN",
+                                 "consumed_mt": 50}], start_on_delivery=True)
+        self.assertAlmostEqual(inv["actual_consumed_mt"], 50.0)
+        self.assertEqual(min(d["date"] for d in inv["draws"]
+                             if d["kind"] == "estimated"), dt.date(2026, 9, 4))
+
+    def test_a_later_cargo_starts_the_day_the_one_before_it_runs_out(self):
+        """2,000 MT at 100/day from 1 Sep runs out on 20 Sep; Oct corn lands 1 Oct."""
+        inv = self.walk(start_on_delivery=True, as_of="2026-10-05")
+        oct_days = sorted(d["date"] for d in inv["draws"]
+                          if d.get("contract_ref") == "Oct corn")
+        self.assertEqual(oct_days[0], dt.date(2026, 10, 1))
+        gap = [d for d in inv["draws"] if d["contract_ref"] == "(unsourced)"]
+        self.assertAlmostEqual(sum(d["mt"] for d in gap), 1000.0)
+
+
 if __name__ == "__main__":
     unittest.main()
