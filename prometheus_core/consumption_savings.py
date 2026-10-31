@@ -43,7 +43,7 @@ __all__ = ["CONSUMPTION_SAVINGS_VERSION", "DEFAULT_STALE_DAYS",
            "consumption_draws", "value_draws", "savings_report",
            "nearest_on_or_before", "series_from_rows"]
 
-CONSUMPTION_SAVINGS_VERSION = "1.3"
+CONSUMPTION_SAVINGS_VERSION = "1.4"
 
 #: A reference price older than this is still used — refusing to value a
 #: tonne helps nobody — but the row is marked so a total built largely on
@@ -474,7 +474,8 @@ def _totals(rows):
                 "timing_effect", "imp_cbot", "imp_basis", "imp_fx"):
         total = sum(r[key + "_egp"] for r in rows if r.get(key + "_egp") is not None)
         priced = sum(r["mt"] for r in rows if r.get(key + "_egp") is not None)
-        out[key + "_egp"] = total
+        # Nothing priced is "not assessed", not a zero saving.
+        out[key + "_egp"] = total if priced else None
         out[key + "_mt_priced"] = priced
         # Weighted by the tonnes actually priced, not by every tonne drawn:
         # dividing by the full quantity would quietly dilute the average
@@ -482,11 +483,10 @@ def _totals(rows):
         out[key + "_egp_mt"] = (total / priced) if priced else None
     # What could not be split (no local price on the delivery day) is kept
     # as its own line, so the bridge always closes on the headline saving.
-    out["unsplit_egp"] = (out["saving_vs_local_egp"] - out["purchase_effect_egp"]
-                          - out["timing_effect_egp"])
+    z = lambda k: out[k + "_egp"] or 0.0
+    out["unsplit_egp"] = z("saving_vs_local") - z("purchase_effect") - z("timing_effect")
     # The same for the import comparison: board + basis + FX, and the rest.
-    out["imp_unsplit_egp"] = (out["saving_vs_cbot_egp"] - out["imp_cbot_egp"]
-                              - out["imp_basis_egp"] - out["imp_fx_egp"])
+    out["imp_unsplit_egp"] = z("saving_vs_cbot") - z("imp_cbot") - z("imp_basis") - z("imp_fx")
     return out
 
 
@@ -510,6 +510,11 @@ def savings_report(lots, events, commodity=None, start=None, end=None,
     # judged "on the day consumed" cannot be judged without one.
     draws = within([d for d in everything if d.get("kind") != "count"],
                    start, end)
+    # Consumption with no cargo or purchase on file to come from has no
+    # source record: it is listed apart, never allocated or valued, so no
+    # total — tonnes included — carries a tonne nobody can trace.
+    unsourced = [d for d in draws if (d.get("contract_ref") or "") == "(unsourced)"]
+    draws = [d for d in draws if (d.get("contract_ref") or "") != "(unsourced)"]
     rows = value_draws(draws, local_series, cbot_series, fx_series,
                        basis_for, factor, stale_days, local_lookup,
                        import_fees_for=import_fees_for, import_terms_for=import_terms_for)
@@ -533,5 +538,8 @@ def savings_report(lots, events, commodity=None, start=None, end=None,
         "coverage": cargo_coverage(lots, everything, commodity, start, end,
                                    origin),
         "counted_mt": counted_mt,
+        "unsourced": [{"date": d["date"], "mt": d["mt"], "commodity": d.get("commodity") or commodity,
+                       "kind": d.get("kind") or ""} for d in unsourced],
+        "unsourced_mt": sum(d["mt"] for d in unsourced),
         "version": CONSUMPTION_SAVINGS_VERSION,
     }

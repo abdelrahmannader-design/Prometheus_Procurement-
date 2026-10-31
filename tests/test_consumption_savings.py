@@ -191,11 +191,12 @@ class ValuationTests(unittest.TestCase):
         self.assertIsNone(row["saving_vs_cbot_egp_mt"])
         self.assertIsNotNone(row["saving_vs_local_egp_mt"])
 
-    def test_an_unsourced_draw_has_no_cost_so_no_saving(self):
-        rows = report(events=[{"date": "2026-11-01", "commodity": "CORN",
-                               "consumed_mt": 9000}])["rows"]
-        bad = [r for r in rows if r["contract_ref"] == "(unsourced)"][0]
-        self.assertIsNone(bad["saving_vs_local_egp_mt"])
+    def test_an_unsourced_draw_is_listed_apart_never_valued(self):
+        rep = report(events=[{"date": "2026-11-01", "commodity": "CORN",
+                              "consumed_mt": 9000}])
+        self.assertFalse([r for r in rep["rows"] if r["contract_ref"] == "(unsourced)"])
+        self.assertAlmostEqual(rep["unsourced_mt"], 9000 - 4000)
+        self.assertAlmostEqual(rep["totals"]["mt"], 4000)
 
 
 class RollupTests(unittest.TestCase):
@@ -378,9 +379,8 @@ class InventoryAgreementTests(unittest.TestCase):
 
     def test_an_estimate_that_outruns_the_stock_is_reported_unsourced(self):
         rep, inv = walked(events=EVENTS[:1], rates={"CORN": 100})
-        unsourced = sum(r["mt"] for r in rep["rows"]
-                        if r["contract_ref"] == "(unsourced)")
-        self.assertAlmostEqual(unsourced, inv["shortage_mt"])
+        self.assertAlmostEqual(rep["unsourced_mt"], inv["shortage_mt"])
+        self.assertFalse([r for r in rep["rows"] if r["contract_ref"] == "(unsourced)"])
         self.assert_agrees(rep, inv)
 
     def test_every_draw_says_how_its_tonnes_are_known(self):
@@ -565,15 +565,14 @@ class SavingsBridgeTests(unittest.TestCase):
     def test_without_an_arrival_price_the_saving_is_kept_unsplit(self):
         """No local logged on or before 1 Sep: nothing to split against."""
         t = report(events=EVENTS[:1])["totals"]
-        self.assertAlmostEqual(t["purchase_effect_egp"], 0.0)
+        self.assertIsNone(t["purchase_effect_egp"])  # nothing split is not assessed, not zero
         self.assertAlmostEqual(t["unsplit_egp"], t["saving_vs_local_egp"], places=6)
 
-    def test_an_unsourced_tonne_has_no_split(self):
+    def test_an_unsourced_tonne_is_not_in_the_bridge(self):
         lots = [dict(LOTS[0], original_mt=1000)]
-        rows = report(lots=lots, events=EVENTS[:1], local_series=self.PRICED)["rows"]
-        gap = [r for r in rows if r["contract_ref"] == "(unsourced)"][0]
-        self.assertIsNone(gap["purchase_effect_egp_mt"])
-        self.assertIsNone(gap["timing_effect_egp_mt"])
+        rep = report(lots=lots, events=EVENTS[:1], local_series=self.PRICED)
+        self.assertAlmostEqual(rep["unsourced_mt"], 500)
+        self.assertAlmostEqual(rep["totals"]["mt"], 1000)
 
     def test_a_lookup_by_origin_is_used_for_the_arrival_price_too(self):
         def lookup(draw):
