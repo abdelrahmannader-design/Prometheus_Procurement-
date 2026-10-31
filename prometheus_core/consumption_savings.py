@@ -10,7 +10,14 @@ This values every tonne on the day it was actually consumed, against two
 alternatives available that day:
 
     vs local   consumed_mt x (local price that day        - what it cost)
-    vs CBOT    consumed_mt x (board + basis, converted    - what it cost)
+    vs CBOT    consumed_mt x (board + basis, converted
+                              + the same port, clearance
+                              and inland freight          - what it cost)
+
+The import alternative carries the same landed fees as the cargo it is set
+against, so the comparison is like for like and what is left is the
+market: the board that day against the contract's own fixing, that day's
+basis against the premium paid, and that day's FX against the cost FX.
 
 Weighting by the tonnes genuinely burned on each day is the point. A
 cargo landed in July and eaten through October met a different market
@@ -36,7 +43,7 @@ __all__ = ["CONSUMPTION_SAVINGS_VERSION", "DEFAULT_STALE_DAYS",
            "consumption_draws", "value_draws", "savings_report",
            "nearest_on_or_before", "series_from_rows"]
 
-CONSUMPTION_SAVINGS_VERSION = "1.2"
+CONSUMPTION_SAVINGS_VERSION = "1.3"
 
 #: A reference price older than this is still used — refusing to value a
 #: tonne helps nobody — but the row is marked so a total built largely on
@@ -354,8 +361,22 @@ def consumption_draws(lots, events, commodity=None, start=None, end=None,
 def value_draws(draws, local_series=None, cbot_series=None, fx_series=None,
                 basis_for: Callable[[dt.date], Any] | None = None,
                 factor=0.3937, stale_days=DEFAULT_STALE_DAYS,
-                local_lookup: Callable[[dict], Any] | None = None):
+                local_lookup: Callable[[dict], Any] | None = None,
+                import_fees_for: Callable[[dict], Any] | None = None,
+                import_terms_for: Callable[[dict], Any] | None = None):
     """Price each draw against what that day's alternatives would have cost.
+
+    ``import_fees_for(draw)`` gives the discharge + clearance + inland
+    freight an import landed that day would carry, in EGP/MT; ``None`` from
+    it leaves the import alternative unpriced rather than guessed. Without
+    it no fees are added (the earlier, CIF-only behaviour).
+
+    ``import_terms_for(draw)`` gives the cargo's ``(cif_usd_mt, cost_fx,
+    premium)``. For a CBOT + premium cargo the saving against importing is
+    then split, per MT, into the board move (board that day − the
+    contract's implied fixing), basis (that day's basis − the premium paid)
+    and FX (that day's FX − the cost FX, on the CIF); whatever those do not
+    explain — flat-price cargoes, local purchases — is left unsplit.
 
     A positive saving means the tonne cost less than the alternative, which
     is the direction a reader expects from the word.
@@ -393,8 +414,20 @@ def value_draws(draws, local_series=None, cbot_series=None, fx_series=None,
         basis = to_float(basis_for(when), None) if basis_for else None
 
         cbot_cost = None
-        if None not in (board, rate, basis) and factor:
-            cbot_cost = (board + basis) * factor * rate
+        fees = 0.0
+        if import_fees_for is not None:
+            fees = to_float(import_fees_for(draw), None)
+        if None not in (board, rate, basis, fees) and factor:
+            cbot_cost = (board + basis) * factor * rate + fees
+        effects = {"imp_cbot": None, "imp_basis": None, "imp_fx": None}
+        terms = import_terms_for(draw) if import_terms_for is not None else None
+        if terms and cbot_cost is not None and cost is not None:
+            cif, cost_fx, premium = (to_float(x, None) for x in terms)
+            if None not in (cif, cost_fx, premium) and premium != 0:
+                fixing = cif / factor - premium
+                effects = {"imp_cbot": factor * rate * (board - fixing),
+                           "imp_basis": factor * rate * (basis - premium),
+                           "imp_fx": cif * (rate - cost_fx)}
 
         row = dict(draw)
         row.update({
@@ -403,6 +436,10 @@ def value_draws(draws, local_series=None, cbot_series=None, fx_series=None,
             "local_key": local_key,
             "cbot": board, "fx": rate, "basis": basis,
             "cbot_egp_mt": cbot_cost,
+            "import_fees_egp_mt": fees if cbot_cost is not None else None,
+            "imp_cbot_egp_mt": effects["imp_cbot"],
+            "imp_basis_egp_mt": effects["imp_basis"],
+            "imp_fx_egp_mt": effects["imp_fx"],
             "saving_vs_local_egp_mt":
                 (local - cost) if None not in (local, cost) else None,
             "saving_vs_cbot_egp_mt":
@@ -418,7 +455,7 @@ def value_draws(draws, local_series=None, cbot_series=None, fx_series=None,
         row["timing_effect_egp_mt"] = (local - local_del) if split else None
         row["is_stale"] = (row["stale"] is not None and row["stale"] > stale_days)
         for key in ("saving_vs_local", "saving_vs_cbot", "purchase_effect",
-                    "timing_effect"):
+                    "timing_effect", "imp_cbot", "imp_basis", "imp_fx"):
             per_mt = row[key + "_egp_mt"]
             row[key + "_egp"] = (per_mt * draw["mt"]) if per_mt is not None else None
         row["cost_egp"] = (cost * draw["mt"]) if cost is not None else None
@@ -434,7 +471,7 @@ def _totals(rows):
                                if r.get("kind") == "estimated")}
     out["logged_mt"] = mt - out["estimated_mt"]
     for key in ("cost", "saving_vs_local", "saving_vs_cbot", "purchase_effect",
-                "timing_effect"):
+                "timing_effect", "imp_cbot", "imp_basis", "imp_fx"):
         total = sum(r[key + "_egp"] for r in rows if r.get(key + "_egp") is not None)
         priced = sum(r["mt"] for r in rows if r.get(key + "_egp") is not None)
         out[key + "_egp"] = total
@@ -447,6 +484,9 @@ def _totals(rows):
     # as its own line, so the bridge always closes on the headline saving.
     out["unsplit_egp"] = (out["saving_vs_local_egp"] - out["purchase_effect_egp"]
                           - out["timing_effect_egp"])
+    # The same for the import comparison: board + basis + FX, and the rest.
+    out["imp_unsplit_egp"] = (out["saving_vs_cbot_egp"] - out["imp_cbot_egp"]
+                              - out["imp_basis_egp"] - out["imp_fx_egp"])
     return out
 
 
@@ -454,7 +494,7 @@ def savings_report(lots, events, commodity=None, start=None, end=None,
                    local_series=None, cbot_series=None, fx_series=None,
                    basis_for=None, factor=0.3937,
                    stale_days=DEFAULT_STALE_DAYS, origin=None, draws=None,
-                   local_lookup=None):
+                   local_lookup=None, import_fees_for=None, import_terms_for=None):
     """Draws, the same rolled up by day, cargo and origin, and the totals.
 
     ``draws`` takes the withdrawals from the inventory walk (see
@@ -471,7 +511,8 @@ def savings_report(lots, events, commodity=None, start=None, end=None,
     draws = within([d for d in everything if d.get("kind") != "count"],
                    start, end)
     rows = value_draws(draws, local_series, cbot_series, fx_series,
-                       basis_for, factor, stale_days, local_lookup)
+                       basis_for, factor, stale_days, local_lookup,
+                       import_fees_for=import_fees_for, import_terms_for=import_terms_for)
 
     by_day, by_contract, by_origin = {}, {}, {}
     for row in rows:

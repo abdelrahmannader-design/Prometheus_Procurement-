@@ -584,5 +584,59 @@ class SavingsBridgeTests(unittest.TestCase):
         self.assertAlmostEqual(row["timing_effect_egp_mt"], 300.0)
 
 
+class ImportLikeForLikeTests(unittest.TestCase):
+    """The import alternative carries the cargo's own landed fees, and the
+    gap to it splits into board move + basis + FX."""
+
+    F = 0.3937
+    CIF, COST_FX, PREMIUM, FEES = 262.17, 54.4363, 193.5, 941.05
+    DRAW = {"date": D(2026, 5, 4), "mt": 500.0, "lot_id": "C012",
+            "cost_egp_mt": 262.17 * 54.4363 + 941.05}
+
+    def value(self, **kw):
+        return value_draws([dict(self.DRAW)], {}, {D(2026, 5, 4): 473.75}, {D(2026, 5, 4): 53.494},
+                           basis_for=lambda d: 177.5, factor=self.F, **kw)[0]
+
+    def test_without_fees_the_import_is_cif_only_as_before(self):
+        row = self.value()
+        self.assertAlmostEqual(row["cbot_egp_mt"], (473.75 + 177.5) * self.F * 53.494)
+
+    def test_the_cargos_own_fees_are_added_to_the_import(self):
+        row = self.value(import_fees_for=lambda d: self.FEES)
+        self.assertAlmostEqual(row["cbot_egp_mt"], (473.75 + 177.5) * self.F * 53.494 + self.FEES)
+        self.assertAlmostEqual(row["import_fees_egp_mt"], self.FEES)
+
+    def test_unknown_fees_leave_the_import_unpriced_not_guessed(self):
+        row = self.value(import_fees_for=lambda d: None)
+        self.assertIsNone(row["cbot_egp_mt"])
+        self.assertIsNone(row["saving_vs_cbot_egp_mt"])
+
+    def test_board_basis_and_fx_add_up_to_the_saving_vs_import(self):
+        row = self.value(import_fees_for=lambda d: self.FEES,
+                         import_terms_for=lambda d: (self.CIF, self.COST_FX, self.PREMIUM))
+        fixing = self.CIF / self.F - self.PREMIUM
+        self.assertAlmostEqual(row["imp_cbot_egp_mt"], self.F * 53.494 * (473.75 - fixing))
+        self.assertAlmostEqual(row["imp_basis_egp_mt"], self.F * 53.494 * (177.5 - self.PREMIUM))
+        self.assertAlmostEqual(row["imp_fx_egp_mt"], self.CIF * (53.494 - self.COST_FX))
+        parts = row["imp_cbot_egp_mt"] + row["imp_basis_egp_mt"] + row["imp_fx_egp_mt"]
+        self.assertAlmostEqual(parts, row["saving_vs_cbot_egp_mt"], places=6)
+        self.assertAlmostEqual(row["imp_cbot_egp"], row["imp_cbot_egp_mt"] * 500.0)
+
+    def test_a_flat_price_cargo_is_left_unsplit(self):
+        row = self.value(import_fees_for=lambda d: self.FEES,
+                         import_terms_for=lambda d: (self.CIF, self.COST_FX, 0.0))
+        self.assertIsNone(row["imp_cbot_egp_mt"])
+        self.assertIsNotNone(row["saving_vs_cbot_egp_mt"])
+
+    def test_the_report_totals_close_on_the_import_saving(self):
+        rep = savings_report(LOTS, EVENTS, commodity="CORN", local_series=LOCAL, cbot_series=CBOT,
+                             fx_series=FX, basis_for=lambda d: 180.0,
+                             import_fees_for=lambda d: 900.0,
+                             import_terms_for=lambda d: (250.0, 50.0, 190.0))
+        t = rep["totals"]
+        self.assertAlmostEqual(t["imp_cbot_egp"] + t["imp_basis_egp"] + t["imp_fx_egp"]
+                               + t["imp_unsplit_egp"], t["saving_vs_cbot_egp"], places=4)
+
+
 if __name__ == "__main__":
     unittest.main()
