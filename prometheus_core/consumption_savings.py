@@ -376,6 +376,18 @@ def value_draws(draws, local_series=None, cbot_series=None, fx_series=None,
         else:
             local, local_date, local_age = nearest_on_or_before(local_series, when)
             local_key = ""
+        # The same local price on the day the cargo landed. Set against the
+        # cost it gives the saving the purchase made on arrival — what the
+        # Savings Tracker measures — and set against the price on the day of
+        # use it gives how far the market moved while the corn sat in stock.
+        landed = _date(draw.get("landed"))
+        local_del = None
+        if landed is not None:
+            if local_lookup:
+                local_del = (local_lookup({**draw, "date": landed})
+                             or (None,))[0]
+            else:
+                local_del = nearest_on_or_before(local_series, landed)[0]
         board, board_date, board_age = nearest_on_or_before(cbot_series, when)
         rate, fx_date, fx_age = nearest_on_or_before(fx_series, when)
         basis = to_float(basis_for(when), None) if basis_for else None
@@ -397,9 +409,16 @@ def value_draws(draws, local_series=None, cbot_series=None, fx_series=None,
                 (cbot_cost - cost) if None not in (cbot_cost, cost) else None,
             "stale": max([a for a in (local_age, board_age, fx_age)
                           if a is not None], default=None),
+            "local_at_delivery_egp_mt": local_del,
         })
+        # Split only where all three prices exist, so that on every split
+        # tonne purchase + timing is exactly the saving on the day of use.
+        split = None not in (cost, local, local_del)
+        row["purchase_effect_egp_mt"] = (local_del - cost) if split else None
+        row["timing_effect_egp_mt"] = (local - local_del) if split else None
         row["is_stale"] = (row["stale"] is not None and row["stale"] > stale_days)
-        for key in ("saving_vs_local", "saving_vs_cbot"):
+        for key in ("saving_vs_local", "saving_vs_cbot", "purchase_effect",
+                    "timing_effect"):
             per_mt = row[key + "_egp_mt"]
             row[key + "_egp"] = (per_mt * draw["mt"]) if per_mt is not None else None
         row["cost_egp"] = (cost * draw["mt"]) if cost is not None else None
@@ -414,7 +433,8 @@ def _totals(rows):
            "estimated_mt": sum(r["mt"] for r in rows
                                if r.get("kind") == "estimated")}
     out["logged_mt"] = mt - out["estimated_mt"]
-    for key in ("cost", "saving_vs_local", "saving_vs_cbot"):
+    for key in ("cost", "saving_vs_local", "saving_vs_cbot", "purchase_effect",
+                "timing_effect"):
         total = sum(r[key + "_egp"] for r in rows if r.get(key + "_egp") is not None)
         priced = sum(r["mt"] for r in rows if r.get(key + "_egp") is not None)
         out[key + "_egp"] = total
@@ -423,6 +443,10 @@ def _totals(rows):
         # dividing by the full quantity would quietly dilute the average
         # with rows that could not be valued at all.
         out[key + "_egp_mt"] = (total / priced) if priced else None
+    # What could not be split (no local price on the delivery day) is kept
+    # as its own line, so the bridge always closes on the headline saving.
+    out["unsplit_egp"] = (out["saving_vs_local_egp"] - out["purchase_effect_egp"]
+                          - out["timing_effect_egp"])
     return out
 
 

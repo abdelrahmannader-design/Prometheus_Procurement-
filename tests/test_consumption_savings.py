@@ -526,5 +526,63 @@ class LocalByOriginTests(unittest.TestCase):
         self.assertEqual({r["local_egp_mt"] for r in rep["rows"]}, {14500.0, 14600.0})
 
 
+class SavingsBridgeTests(unittest.TestCase):
+    """Saving on the day of use = saving on arrival + market move in stock."""
+
+    # A local price on each landing day as well as each day of use.
+    PRICED = {D(2026, 9, 1): 14200.0, D(2026, 9, 10): 14500.0,
+              D(2026, 10, 1): 14700.0, D(2026, 10, 10): 14600.0}
+
+    def test_the_purchase_effect_is_the_arrival_price_less_the_cost(self):
+        """What the Savings Tracker measures: local on the landing day − cost."""
+        first = report(local_series=self.PRICED)["rows"][0]
+        self.assertAlmostEqual(first["local_at_delivery_egp_mt"], 14200.0)
+        self.assertAlmostEqual(first["purchase_effect_egp_mt"], 14200.0 - 14000.0)
+
+    def test_the_timing_effect_is_how_far_local_moved_while_in_stock(self):
+        first = report(local_series=self.PRICED)["rows"][0]
+        self.assertAlmostEqual(first["timing_effect_egp_mt"], 14500.0 - 14200.0)
+
+    def test_on_every_tonne_the_two_add_up_to_the_saving(self):
+        for row in report(local_series=self.PRICED)["rows"]:
+            self.assertAlmostEqual(row["purchase_effect_egp"] + row["timing_effect_egp"],
+                                   row["saving_vs_local_egp"], places=6)
+
+    def test_a_good_buy_can_still_lose_in_a_falling_market(self):
+        """Bought 200 under the market, which then fell 500 before use."""
+        falling = {D(2026, 9, 1): 14200.0, D(2026, 9, 10): 13700.0}
+        row = report(local_series=falling, events=EVENTS[:1])["rows"][0]
+        self.assertGreater(row["purchase_effect_egp_mt"], 0)
+        self.assertLess(row["timing_effect_egp_mt"], 0)
+        self.assertLess(row["saving_vs_local_egp_mt"], 0)
+
+    def test_the_bridge_closes_on_the_headline(self):
+        t = report(local_series=self.PRICED)["totals"]
+        self.assertAlmostEqual(t["purchase_effect_egp"] + t["timing_effect_egp"]
+                               + t["unsplit_egp"], t["saving_vs_local_egp"], places=6)
+        self.assertAlmostEqual(t["unsplit_egp"], 0.0, places=6)
+
+    def test_without_an_arrival_price_the_saving_is_kept_unsplit(self):
+        """No local logged on or before 1 Sep: nothing to split against."""
+        t = report(events=EVENTS[:1])["totals"]
+        self.assertAlmostEqual(t["purchase_effect_egp"], 0.0)
+        self.assertAlmostEqual(t["unsplit_egp"], t["saving_vs_local_egp"], places=6)
+
+    def test_an_unsourced_tonne_has_no_split(self):
+        lots = [dict(LOTS[0], original_mt=1000)]
+        rows = report(lots=lots, events=EVENTS[:1], local_series=self.PRICED)["rows"]
+        gap = [r for r in rows if r["contract_ref"] == "(unsourced)"][0]
+        self.assertIsNone(gap["purchase_effect_egp_mt"])
+        self.assertIsNone(gap["timing_effect_egp_mt"])
+
+    def test_a_lookup_by_origin_is_used_for_the_arrival_price_too(self):
+        def lookup(draw):
+            series = {D(2026, 9, 1): 15000.0, D(2026, 9, 10): 15300.0}
+            return nearest_on_or_before(series, draw["date"]) + ("CORN-BRZ",)
+        row = report(local_lookup=lookup, events=EVENTS[:1])["rows"][0]
+        self.assertAlmostEqual(row["local_at_delivery_egp_mt"], 15000.0)
+        self.assertAlmostEqual(row["timing_effect_egp_mt"], 300.0)
+
+
 if __name__ == "__main__":
     unittest.main()
