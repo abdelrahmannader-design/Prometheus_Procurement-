@@ -122,6 +122,22 @@ class PriceLookupTests(unittest.TestCase):
         self.assertEqual(series_from_rows(rows, value_key=("close", "price")),
                          {D(2026, 9, 10): 450.0})
 
+    def test_a_row_without_transport_takes_the_default(self):
+        """Built like a local purchase: price + its transport, else the default."""
+        rows = [{"date": "2026-09-10", "commodity": "CORN",
+                 "price_egp_mt": 14000, "transport_egp_mt": 300},
+                {"date": "2026-09-11", "commodity": "CORN", "price_egp_mt": 14100}]
+        series = series_from_rows(rows, commodity="CORN",
+                                  extra="transport_egp_mt", extra_default=323.13)
+        self.assertEqual(series, {D(2026, 9, 10): 14300.0,
+                                  D(2026, 9, 11): 14423.13})
+
+    def test_a_stated_zero_transport_is_kept_not_defaulted(self):
+        rows = [{"date": "2026-09-10", "price_egp_mt": 14000, "transport_egp_mt": 0}]
+        self.assertEqual(series_from_rows(rows, extra="transport_egp_mt",
+                                          extra_default=323.13),
+                         {D(2026, 9, 10): 14000.0})
+
     def test_series_can_fold_transport_into_the_price(self):
         series = series_from_rows(
             [{"date": "2026-09-10", "commodity": "CORN",

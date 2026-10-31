@@ -74,12 +74,16 @@ def _origin(row):
 
 
 def series_from_rows(rows, date_key="date", value_key="price_egp_mt",
-                     commodity=None, extra=None):
+                     commodity=None, extra=None, extra_default=None):
     """A ``{date: value}`` map from logged rows, newest wins per date.
 
     ``extra`` names a second field added to the first, which is how a local
     price plus its transport becomes one all-in figure without the caller
     having to pre-flatten the rows.
+
+    ``extra_default`` is used when a row has no ``extra`` of its own, the
+    way a local purchase without a transport figure is costed at the app's
+    default rate — so a local price and a local purchase are built alike.
 
     ``value_key`` may be a tuple of field names tried in order. The app's
     CBOT history stores its close as ``price``, while older rows and imports
@@ -97,7 +101,10 @@ def series_from_rows(rows, date_key="date", value_key="price_egp_mt",
         if date is None or value is None:
             continue
         if extra:
-            value += to_float(row.get(extra), 0.0) or 0.0
+            add = to_float(row.get(extra), None)
+            if add is None:
+                add = to_float(extra_default, 0.0) or 0.0
+            value += add
         out[date] = value
     return out
 
