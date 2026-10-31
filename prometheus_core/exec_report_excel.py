@@ -23,7 +23,8 @@ from .xlsx_cache import store_formula_results
 SHEETS = ("Management Summary", "Contract Master", "Local Market Price History",
           "Daily Consumption Allocation", "Savings vs Local", "Contract Savings Summary",
           "CBOT Fixed vs Consumption", "Contract CBOT Performance",
-          "Open Contracts vs Local Today", "Excluded & Missing Data", "Validation & Sources")
+          "Open Contracts vs Local Today", "Excluded & Missing Data", "Validation & Sources",
+          "Local Purchases")
 NAVY, GREEN, RED, GREY, AMBER = "1F3A5F", "1A7A1A", "B3261E", "6B7280", "9A6B00"
 M0, M2, PCT = "#,##0;[Red]-#,##0", "#,##0.00;[Red]-#,##0.00", "0.0%"
 FIRST = 5  # first data row of every table (header on row 4)
@@ -99,6 +100,7 @@ def build_workbook(model, path):
     last["cm"] = _contract_master(b, model)
     last["lp"] = _local_history(b, model)
     last["al"] = _allocations(b, model)
+    last["lq"] = _local_purchases(b, model)
     _contract_master_consumed(b, model, last)
     last["sv"] = _savings(b, model)
     last["cs"] = _contract_savings(b, model, last)
@@ -212,9 +214,9 @@ def _local_history(b, m):
 
 def _allocations(b, m):
     ws = b.ws(3)
-    rows = m["allocations"]
-    b.title(ws, "Daily Consumption Allocation", "Every consumed tonne attributed to a real contract or local "
-            "purchase record. Unsourced consumption is not here — it is on Excluded & Missing Data.")
+    rows = [a for a in m["allocations"] if a["type"] == "Import"]
+    b.title(ws, "Daily Consumption Allocation", "Every consumed imported tonne attributed to a real contract. "
+            "Local purchases are on their own sheet; unsourced consumption is on Excluded & Missing Data.")
     heads = ["Consumption Date", "Contract ID", "Contract Number", "Supplier", "Commodity", "Origin",
              "Quantity Consumed MT", "Allocation Method", "Contract Remaining Balance MT", "Contract Source ID",
              "Consumption Source / Assumption", "Record Type", "Base"]
@@ -225,6 +227,32 @@ def _allocations(b, m):
                                a["origin"], a["mt"], a["method"], a.get("remaining_mt"), a["source_id"],
                                a["assumption"], a["type"], a["base"]], start=1):
             b.put(ws, r, j, blank(v), M0 if j in (7, 9) else None)
+    return last
+
+
+def _local_purchases(b, m):
+    ws = b.ws(11)
+    b.wb.move_sheet(ws, offset=-(len(SHEETS) - 1 - 4))
+    rows = [a for a in m["allocations"] if a["type"] != "Import"]
+    b.title(ws, "Local Purchases", "Tonnes supplied by local purchases, kept apart: never part of the import "
+            "savings. Each is set against the local market price + freight observed for its day "
+            "(positive = bought below that day's market).")
+    heads = ["Consumption Date", "Purchase ID", "Purchase", "Supplier", "Commodity", "Quantity Consumed MT",
+             "Purchase Cost EGP/MT", "Local Market + Freight EGP/MT", "Market Price Date", "vs Market EGP/MT",
+             "vs Market EGP", "Base", "Allocation Method", "Source Record ID"]
+    last = b.table(ws, "LocalPurchases", heads, len(rows), [12, 16, 30, 22, 10, 10, 12, 13, 12, 11, 13, 8, 13, 22])
+    for i, a in enumerate(rows):
+        r = FIRST + i
+        loc = a.get("local") or {}
+        price = loc.get("price")
+        for j, v in enumerate([a["date"], a["contract_id"], a["contract"], a["supplier"], a["commodity"], a["mt"],
+                               a.get("cost"), price, loc.get("date") or ""], start=1):
+            b.put(ws, r, j, blank(v), M0 if j == 6 else (M2 if j in (7, 8) else None))
+        per = (price - a["cost"]) if None not in (price, a.get("cost")) else None
+        b.f(ws, r, 10, f'=IF(OR(G{r}="",H{r}=""),"",H{r}-G{r})', per, M2)
+        b.f(ws, r, 11, f'=IF(J{r}="","",J{r}*F{r})', per * a["mt"] if per is not None else None, M0)
+        b.put(ws, r, 12, a["base"]); b.put(ws, r, 13, a["method"]); b.put(ws, r, 14, a["source_id"])
+    b.signs(ws, f"J{FIRST}:K{last}")
     return last
 
 
@@ -463,7 +491,8 @@ def _validation(b, m, last):
     r += 1
     for a in m["audit"]:
         b.put(ws, r, 1, a["base"]); b.put(ws, r, 2, a["consumed_mt"], M0)
-        b.f(ws, r, 3, f'=SUMIFS({col(3, "G", last["al"])},{col(3, "M", last["al"])},A{r})', a["allocated_mt"], M0)
+        b.f(ws, r, 3, f'=SUMIFS({col(3, "G", last["al"])},{col(3, "M", last["al"])},A{r})'
+                      f'+SUMIFS({col(11, "F", last["lq"])},{col(11, "L", last["lq"])},A{r})', a["allocated_mt"], M0)
         b.f(ws, r, 4, f'=SUMIFS({col(9, "F", last["ex"])},{col(9, "E", last["ex"])},A{r},{col(9, "A", last["ex"])},"Unsourced consumption")'
                       f'+SUMIFS({col(9, "F", last["ex"])},{col(9, "E", last["ex"])},A{r},{col(9, "A", last["ex"])},"Cleared by stock count")',
             a["excluded_mt"], M0)

@@ -1,5 +1,6 @@
 """The management report's two exports: one model, the same figures in both."""
 
+import datetime as dt
 import json
 import os
 import re
@@ -24,6 +25,11 @@ except Exception:  # pragma: no cover - optional dependency
 def model():
     inp = inputs()
     inp["contracts"][0]["contract"] = "A-1 </script> cargo"
+    inp["local_purchases"] = [{"lot_id": "LOCAL-1-0", "ref": "LOCAL #1 · Titan", "supplier": "Titan",
+                               "commodity": "CORN", "qty_mt": 500.0, "cost_egp_mt": 15200.0,
+                               "source_id": "local_purchases id 1"}]
+    inp["draws"].append({"date": dt.date(2026, 10, 4), "lot_id": "LOCAL-1-0", "mt": 500.0, "kind": "estimated",
+                         "base": "CORN", "local": {"price": 15500.0, "date": "2026-10-01", "key": "CORN"}})
     return mr.build(inp)
 
 
@@ -38,7 +44,9 @@ class WorkbookTests(unittest.TestCase):
         cls.raw = openpyxl.load_workbook(cls.path)
 
     def test_the_eleven_sheets_within_excels_name_limit(self):
-        self.assertEqual([w.title for w in self.wb.worksheets], list(SHEETS))
+        self.assertEqual(sorted(w.title for w in self.wb.worksheets), sorted(SHEETS))
+        titles = [w.title for w in self.wb.worksheets]
+        self.assertEqual(titles.index("Local Purchases"), titles.index("Daily Consumption Allocation") + 1)
         self.assertTrue(all(len(s) <= 31 for s in SHEETS))
         for name in ("Contract Master", "Local Market Price History", "Daily Consumption Allocation",
                      "Savings vs Local", "CBOT Fixed vs Consumption", "Contract CBOT Performance",
@@ -46,7 +54,7 @@ class WorkbookTests(unittest.TestCase):
             self.assertIn(name, SHEETS)
 
     def test_data_sheets_are_excel_tables(self):
-        for name in SHEETS[1:10]:
+        for name in list(SHEETS[1:10]) + ["Local Purchases"]:
             self.assertTrue(self.raw[name].tables, name)
 
     def test_every_formula_has_a_stored_result(self):
@@ -71,6 +79,20 @@ class WorkbookTests(unittest.TestCase):
         ex = self.wb["Excluded & Missing Data"]
         cats = [ex.cell(r, 1).value for r in range(5, ex.max_row + 1)]
         self.assertIn("Unsourced consumption", cats)
+
+    def test_local_purchases_are_on_their_own_sheet_only(self):
+        al = self.wb["Daily Consumption Allocation"]
+        self.assertNotIn("LOCAL-1-0", [al.cell(r, 2).value for r in range(5, al.max_row + 1)])
+        lq = self.wb["Local Purchases"]
+        self.assertEqual(lq.cell(5, 2).value, "LOCAL-1-0")
+        self.assertAlmostEqual(lq.cell(5, 11).value, (15500 - 15200) * 500)
+        sv = self.wb["Savings vs Local"]
+        self.assertNotIn("LOCAL-1-0", [sv.cell(r, 2).value for r in range(5, sv.max_row + 1)])
+        audit = self.wb["Validation & Sources"]
+        vals = [[audit.cell(r, c).value for c in range(1, 6)] for r in range(1, audit.max_row + 1)]
+        corn = next(v for v in vals if v[0] == "CORN" and isinstance(v[1], (int, float)))
+        self.assertAlmostEqual(corn[4], 0.0)          # consumed = allocated + excluded
+        self.assertAlmostEqual(corn[2], 2000.0)       # 1,500 imports + 500 local purchase
 
     def test_implied_fixing_is_a_formula_on_the_master(self):
         raw, ws = self.raw["Contract Master"], self.wb["Contract Master"]

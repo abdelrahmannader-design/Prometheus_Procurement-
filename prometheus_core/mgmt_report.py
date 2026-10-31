@@ -346,7 +346,8 @@ def build(inp, **overrides):
             p = lp[lot]
             row = {"type": "Local purchase", "contract_id": lot, "contract": p.get("ref") or lot,
                    "supplier": p.get("supplier", ""), "commodity": p.get("commodity", ""),
-                   "base": base, "origin": "Local", "source_id": p.get("source_id", "")}
+                   "base": base, "origin": "Local", "source_id": p.get("source_id", ""),
+                   "cost": _n(p.get("cost_egp_mt"))}
         else:
             exclude("Unsourced consumption",
                     "Consumption at the daily rate on a day with no recorded cargo or local purchase "
