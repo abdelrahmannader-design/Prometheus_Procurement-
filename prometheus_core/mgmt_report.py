@@ -9,13 +9,14 @@ Five questions, each answered only from records that can be traced:
    fixed-price contracts apart from unpriced (indicative) ones.
 3. The CBOT each contract was fixed at — recorded pricing lots, or implied
    from final CIF ÷ factor − premium when no pricing date is stored.
-4. The CBOT on each consumption day, compared only where the stored
-   series is on the contract's own futures month.
+4. The CBOT stored for each consumption day (the app's daily CBOT
+   series, whatever month it was on that day — the contract's futures
+   month is the month its premium is quoted over, not the benchmark).
 5. Rankings and data quality, with every exclusion listed and a set of
    validation checks that decide whether the report is management-ready.
 
 Nothing is filled in: a missing price, an unsourced tonne or an
-unmatched futures month is excluded and disclosed, never valued at zero
+day without a stored CBOT is excluded and disclosed, never valued at zero
 or at an assumed constant.
 
 Pure functions only — the app gathers the inputs, this builds the model
@@ -61,7 +62,7 @@ REALIZED = "Final CIF"
 PROVISIONAL = "Provisional CIF"
 FIFO = "FIFO Estimated"
 ACTUAL = "Actual"
-MATCHED = "Month-matched"
+MATCHED = "Consumption-day CBOT"
 
 
 def _d(value):
@@ -180,6 +181,14 @@ def benchmark_status(day, base, contract_month):
     if day > last_trade_day(*want):
         return f"Contract month {contract_month['code']} expired — no month-specific data", False
     return f"Series on an earlier month ({_label(by_exp)}) — not comparable", False
+
+
+def series_month_label(day, base):
+    """The futures month the continuous front-month series was on that day."""
+    if base not in CONTRACT_MONTHS:
+        return ""
+    by_exp, by_fnd = _front(day, base, "expiry"), _front(day, base, "fnd")
+    return _label(by_exp) if by_exp == by_fnd else f"{_label(by_exp)} / {_label(by_fnd)} (rolling)"
 
 
 def _label(ym):
@@ -418,7 +427,11 @@ def build(inp, **overrides):
             price, pdate = hist.on_or_before(day)
             while pdate is not None and pdate in spk:
                 price, pdate = hist.on_or_before(pdate - dt.timedelta(days=1))
-        status, ok = benchmark_status(day, c["base"], c["contract_month"])
+        # The benchmark is the CBOT stored for the consumption day itself; the
+        # contract's futures month is only the month its premium is quoted over.
+        # The month the series was on that day is recorded for transparency.
+        status, ok = MATCHED, True
+        series_month = series_month_label(day, c["base"])
         if price is None:
             status, ok = "No stored CBOT on or before the day", False
         elif (day - pdate).days > opts["cbot_max_age_days"]:
@@ -441,6 +454,7 @@ def build(inp, **overrides):
             "usd": usd_mt * r["mt"] if ok else None,
             "egp": usd_mt * r["mt"] * fx if (ok and fx) else None, "fx": fx,
             "proxy_diff": diff, "result": result, "benchmark": status, "assessable": ok,
+            "series_month": series_month,
             "spike_skipped": bool(pdate and day != pdate and any(day >= s > pdate for s in spk)),
         })
         if not ok:
@@ -663,7 +677,7 @@ def assessment(c):
         kind = ("a pricing advantage" if cb["usd"] > 0 else "a missed pricing opportunity" if cb["usd"] < 0
                 else "no difference")
         out.append(f"CBOT fixed at {f['value']:,.2f} {f['unit']} ({f['type'].lower()}) vs "
-                   f"{cb['avg_cbot']:,.2f} on comparable consumption days — {kind} of "
+                   f"{cb['avg_cbot']:,.2f} on its consumption days — {kind} of "
                    f"USD {abs(cb['usd']):,.0f} on {cb['assessed_mt']:,.0f} MT "
                    f"({(cb['coverage'] or 0) * 100:,.0f}% of its consumed tonnes); a historical benchmark, "
                    "not money that was certainly available.")
@@ -730,9 +744,12 @@ def validate(m):
     check("No unpriced contract treated as fixed", not wrong,
           "unpriced contracts show Not fixed with an indicative value only" if not wrong else ", ".join(wrong))
     nonmatched = [r for r in m["cbot"] if r["assessable"] and r["benchmark"] != MATCHED]
-    check("Consumption-day CBOT from a comparable benchmark", not nonmatched,
-          f"{sum(1 for r in m['cbot'] if r['assessable'])} day-rows compared, all on the contract's own futures month"
-          if not nonmatched else f"{len(nonmatched)} compared off-month")
+    stale = [r for r in m["cbot"] if r["assessable"] and r["cbot_date"] and
+             (_d(r["date"]) - _d(r["cbot_date"])).days > m["options"]["cbot_max_age_days"]]
+    check("Consumption-day CBOT from the stored daily series", not nonmatched and not stale,
+          f"{sum(1 for r in m['cbot'] if r['assessable'])} day-rows compared with the CBOT stored for the day "
+          f"(at most {m['options']['cbot_max_age_days']} days back over weekends/holidays; one-day spikes stepped over)"
+          if not (nonmatched or stale) else f"{len(nonmatched) + len(stale)} rows outside the rule")
     neg = [r for r in m["cbot"] if r["assessable"] and r["usd"] < 0 and r["result"] != "Missed opportunity"
            and abs(r["diff"]) >= m["options"]["neutral_cbot"]]
     check("Negative CBOT results shown as missed opportunities", not neg,

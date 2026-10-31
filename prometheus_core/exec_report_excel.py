@@ -336,16 +336,17 @@ def _cbot(b, m):
     n = m["options"]["neutral_cbot"]
     b.title(ws, "CBOT Fixed vs Consumption", "CBOT Difference = consumption-day CBOT − contract CBOT fixed; "
             "USD/MT = difference × conversion factor; USD = USD/MT × consumed MT. Compared only on days the "
-            "stored front-month series is on the contract's own futures month (Benchmark Status = "
-            "Month-matched); other days are Not assessable. A historical benchmark comparison, not a proven "
+            "CBOT stored in the app for the consumption day itself (the futures month is only the month the "
+            "premium is quoted over; the series' month that day is in the last column). A historical benchmark "
+            "comparison, not a proven "
             "avoidable loss.")
     heads = ["Contract Number", "Contract ID", "Supplier", "Commodity", "Consumption Date", "Consumed MT",
              "CIF USD/MT", "Contract Premium", "Price Unit", "Conversion Factor", "CBOT Fixed", "Fixing Type",
              "Futures Month", "CBOT on Consumption Date", "Market Price Date", "Benchmark Status",
              "CBOT Difference", "Difference USD/MT", "Total Advantage / Missed USD", "FX",
-             "Total Advantage / Missed EGP", "Result", "CBOT x MT", "Base"]
+             "Total Advantage / Missed EGP", "Result", "CBOT x MT", "Base", "Series Month That Day"]
     last = b.table(ws, "CbotVsConsumption", heads, len(rows),
-                   [22, 9, 16, 11, 12, 9, 9, 9, 10, 9, 10, 11, 9, 11, 12, 34, 10, 10, 13, 8, 14, 16, 12, 8])
+                   [22, 9, 16, 11, 12, 9, 9, 9, 10, 9, 10, 11, 9, 11, 12, 22, 10, 10, 13, 8, 14, 16, 12, 8, 20])
     for i, x in enumerate(rows):
         r = FIRST + i
         for j, v in enumerate([x["contract"], x["contract_id"], x["supplier"], x["commodity"], x["date"],
@@ -362,6 +363,7 @@ def _cbot(b, m):
             x["result"])
         b.f(ws, r, 23, f'=IF(Q{r}="","",N{r}*F{r})', (x["cbot"] * x["mt"]) if x["assessable"] else None, M0)
         b.put(ws, r, 24, x["base"])
+        b.put(ws, r, 25, x.get("series_month") or "")
     b.signs(ws, f"Q{FIRST}:U{last}")
     return last
 
@@ -374,8 +376,8 @@ def _cbot_performance(b, m, last):
     rows = [c for c in m["contracts"] if c["fix"]["fixed"] and c["cbot"]["consumed_mt"] > 0]
     rows.sort(key=lambda c: (c["cbot"]["usd"] is None, c["cbot"]["usd"] or 0))
     b.title(ws, "Contract CBOT Performance", "One row per fixed contract with consumption. Average CBOT is "
-            "weighted by the tonnes consumed on comparable (month-matched) days; the result is the sum of "
-            "those days' differences — never the whole contract quantity. Not assessable where no comparable day exists.")
+            "weighted by the tonnes consumed each day, against the CBOT stored for that day; the result is the "
+            "sum of those days' differences — never the whole contract quantity. Not assessable where no CBOT is stored.")
     heads = ["Contract ID", "Contract", "Supplier", "Commodity", "MT Consumed", "MT Assessed", "Coverage %",
              "CIF $/MT", "Premium", "Price Unit", "CBOT Fixed", "Fixing Type", "Avg CBOT During Consumption",
              "Difference", "Advantage USD", "Missed Opportunity USD", "Net Result USD", "Net Result EGP",
@@ -527,8 +529,9 @@ def _validation(b, m, last):
         "CBOT fixed: recorded pricing lots (tonne-weighted), else implied = CIF ÷ factor − premium "
         "(CORN 0.3937; SOYBEAN, WHEAT 0.36745; SBM 1.1023, premium in $/short ton). Not shown as fixed for "
         "unpriced contracts. No price-adjustment fields are recorded in the database.",
-        "Consumption-day CBOT: the stored front-month series, used only where the calendar puts the "
-        "contract's own futures month at the front under both roll conventions (first notice and expiry). "
+        "Consumption-day CBOT: the CBOT stored in the app for each consumption day (the nearest futures "
+        "month that day, recorded per row). The contract's futures month is the month its premium is quoted "
+        "over and does not restrict the comparison. "
         f"Prints more than {o['cbot_max_age_days']} days old and one-day spikes are not used.",
         f"Result: Advantage when CBOT − fixed ≥ {o['neutral_cbot']:g} price unit, Missed opportunity when ≤ "
         f"−{o['neutral_cbot']:g}, else Neutral. A historical benchmark, not an executable alternative.",
@@ -573,7 +576,7 @@ def _summary(b, m, last):
         ("CBOT missed opportunity, USD", f'=SUMIFS({CB("S")},{CB("S")},"<0")', k["cbot_missed_usd"],
          "Benchmark — days the market was below our fixing"),
         ("Net CBOT pricing difference, USD", f"=SUM({CB('S')})", k["cbot_net_usd"],
-         f"EGP {k['cbot_net_egp']:,.0f} · {(k['cbot_coverage'] or 0) * 100:,.0f}% of fixed-contract tonnes comparable"),
+         f"EGP {k['cbot_net_egp']:,.0f} · {(k['cbot_coverage'] or 0) * 100:,.0f}% of fixed-contract tonnes with a stored CBOT"),
     ]
     for i, (label, formula, value, sub) in enumerate(cards):
         c0 = 2 + (i % 3) * 3
@@ -599,10 +602,10 @@ def _summary(b, m, last):
         f"({k['historical_saving_egp_mt'] or 0:,.0f} EGP/MT), each tonne against the local price observed on its day.",
         f"Not-yet-consumed fixed-price tonnes would save EGP {k['open_fixed_potential_egp']:,.0f} at today's local "
         f"price; unpriced contracts add an indicative EGP {k['open_indicative_potential_egp']:,.0f} (scenario only).",
-        f"On comparable days the CBOT was above our fixing worth USD {k['cbot_advantage_usd']:,.0f} and below it "
+        f"On the consumption days the CBOT was above our fixing worth USD {k['cbot_advantage_usd']:,.0f} and below it "
         f"worth USD {abs(k['cbot_missed_usd']):,.0f} — net USD {k['cbot_net_usd']:,.0f}. A benchmark, not added to savings.",
         f"Excluded: {qd['excluded_unsourced_mt']:,.0f} MT of unsourced consumption, {qd['missing_cbot_mt']:,.0f} MT "
-        "without a comparable CBOT day — listed on Excluded & Missing Data.",
+        "without a stored CBOT for the day — listed on Excluded & Missing Data.",
     ]
     for i, t in enumerate(says):
         b.put(ws, r + 1 + i, 2, f"{i + 1}.  {t}")

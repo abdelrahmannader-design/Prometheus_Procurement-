@@ -168,7 +168,7 @@ body.mgmt .mgmt-only{display:block!important}
  <div class="card"><h2>What this says</h2><ol class="says" id="says"></ol></div>
  <div class="grid2">
   <div class="card"><h2>Historical savings vs local, by commodity</h2><p class="sub">Consumed tonnes against the local price observed on the day · EGP</p><div id="chCom"></div></div>
-  <div class="card"><h2>CBOT benchmark, by commodity</h2><p class="sub">Comparable consumption days only · USD · separate from the savings</p><div id="chComCbot"></div></div>
+  <div class="card"><h2>CBOT benchmark, by commodity</h2><p class="sub">CBOT stored for each consumption day · USD · separate from the savings</p><div id="chComCbot"></div></div>
  </div>
  <div class="grid2">
   <div class="card"><h2>Top 10 contracts by local market savings</h2><p class="sub">Click a bar to open the contract</p><div id="chTop"></div></div>
@@ -177,17 +177,17 @@ body.mgmt .mgmt-only{display:block!important}
 </section>
 
 <section class="panel" id="p-contracts">
- <div class="card"><h2>Contract comparison</h2><p class="sub">Consumed contracts. CBOT fixed and the tonne-weighted CBOT on comparable consumption days side by side. Click a row for the full contract analysis.</p>
+ <div class="card"><h2>Contract comparison</h2><p class="sub">Consumed contracts. CBOT fixed and the tonne-weighted CBOT on its consumption days side by side. Click a row for the full contract analysis.</p>
  <div class="tw"><table id="tC"></table></div></div>
 </section>
 
 <section class="panel" id="p-cbot">
  <div class="card"><h2>CBOT fixed vs consumption</h2>
-  <p class="sub">Our fixed CBOT (reference line) against the stored CBOT on each day the contract was consumed. Green = market above our fixing (advantage), red = below (missed opportunity). Grey points are days the stored series was not on the contract's futures month — not compared.</p>
+  <p class="sub">Our fixed CBOT (reference line) against the stored CBOT on each day the contract was consumed. Green = market above our fixing (advantage), red = below (missed opportunity). Each point is the CBOT stored for that consumption day; hover for the difference, tonnes and USD impact.</p>
   <label class="note">Contract <select class="ctl" id="cbSel"></select></label>
   <div id="cbChart"></div><div id="cbBars"></div><div id="cbSum" class="note"></div>
  </div>
- <div class="card tech"><h2>Contract CBOT performance</h2><p class="sub">One row per fixed contract with consumption; result = sum of comparable days' differences.</p><div class="tw"><table id="tCP"></table></div></div>
+ <div class="card tech"><h2>Contract CBOT performance</h2><p class="sub">One row per fixed contract with consumption; result = sum of the consumption days' differences.</p><div class="tw"><table id="tCP"></table></div></div>
 </section>
 
 <section class="panel" id="p-open">
@@ -221,7 +221,7 @@ const short = v => { if (!isN(v)) return "—"; const a = Math.abs(v), s = v < 0
 const sum = (rows, fn) => rows.reduce((a, r) => { const v = fn(r); return isN(v) ? a + v : a; }, 0);
 const td = (v, f, col) => `<td class="n ${col ? sg(v) : ""}">${(f || f0)(v)}</td>`;
 const S = {tab: "overview", sort: {}, open: new Set(), dqTile: "", cb: ""};
-const MATCHED = "Month-matched";
+const MATCHED = "Consumption-day CBOT";
 
 // ── filters ──────────────────────────────────────────────────────────
 function opts(sel, vals, all) { $(sel).innerHTML = `<option value="">${all}</option>` + vals.map(v => `<option>${esc(v)}</option>`).join(""); }
@@ -335,7 +335,7 @@ function cbotChart(c, rows) {
     s += `<circle cx="${X(r.date)}" cy="${Y(r.cbot)}" r="${r.assessable ? 4 : 3}" fill="${r.assessable ? "var(--s1)" : "var(--surface)"}" stroke="${r.assessable ? "var(--surface)" : "var(--muted)"}" stroke-width="2" data-tip="${esc(t)}"/>`;
   });
   s += `<text x="${L}" y="${H - 8}">${esc(rows[0].date)}</text><text x="${W - R}" y="${H - 8}" text-anchor="end">${esc(rows[rows.length - 1].date)}</text></svg>`;
-  return `<div class="legend"><span><i style="background:var(--s1)"></i>Stored CBOT on consumption days</span><span><i style="background:var(--ink)"></i>Our fixed CBOT</span><span><i style="background:var(--good);opacity:.5"></i>Above fixing (advantage)</span><span><i style="background:var(--bad);opacity:.5"></i>Below fixing (missed)</span><span><i style="background:var(--surface);border:2px solid var(--muted)"></i>Not comparable</span></div>` + s;
+  return `<div class="legend"><span><i style="background:var(--s1)"></i>Stored CBOT on consumption days</span><span><i style="background:var(--ink)"></i>Our fixed CBOT</span><span><i style="background:var(--good);opacity:.5"></i>Above fixing (advantage)</span><span><i style="background:var(--bad);opacity:.5"></i>Below fixing (missed)</span></div>` + s;
 }
 
 function dailyBars(rows) {
@@ -344,7 +344,7 @@ function dailyBars(rows) {
   const W = 1200, H = 180, L = 56, R = 16, T = 10, B = 24;
   const vals = rows.map(r => r.usd), mx = Math.max(0, ...vals), mn = Math.min(0, ...vals), sp = (mx - mn) || 1;
   const Y = v => T + (mx - v) / sp * (H - T - B), bw = Math.max(2, Math.min(22, (W - L - R) / rows.length - 2));
-  let s = `<p class="note" style="margin:10px 0 2px">Daily financial difference on comparable days, USD</p><svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Daily CBOT difference">`;
+  let s = `<p class="note" style="margin:10px 0 2px">Daily financial difference on consumption days, USD</p><svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Daily CBOT difference">`;
   [mx, 0, mn].forEach(v => { s += `<line x1="${L}" x2="${W - R}" y1="${Y(v)}" y2="${Y(v)}" stroke="${v === 0 ? "var(--axis)" : "var(--grid)"}"/><text x="${L - 6}" y="${Y(v) + 4}" text-anchor="end">${short(v)}</text>`; });
   const x0 = L + Math.max(0, (W - L - R - rows.length * (bw + 2)) / 2);
   rows.forEach((r, i) => { const x = x0 + i * (bw + 2);
@@ -397,26 +397,26 @@ function renderOverview(v, K) {
       `Fixed-price · ${f0(K.open_fixed_mt)} MT · unpriced scenario ${money("EGP", K.open_indicative_potential_egp)} not included`),
     kcard("Open contract outstanding", K.open_outstanding_mt, f0(K.open_outstanding_mt) + " MT", '<span class="tag">Position</span>',
       `Not yet delivered · ${f0(K.open_available_mt)} MT delivered and in stock · ${K.open_contracts} open contracts`),
-    kcard("Total CBOT pricing advantage", K.cbot_advantage_usd, money("USD", K.cbot_advantage_usd), B, "Comparable days the market was above our fixing"),
-    kcard("Total CBOT missed opportunity", K.cbot_missed_usd, money("USD", K.cbot_missed_usd), B, "Comparable days the market was below our fixing"),
+    kcard("Total CBOT pricing advantage", K.cbot_advantage_usd, money("USD", K.cbot_advantage_usd), B, "Consumption days the CBOT was above our fixing"),
+    kcard("Total CBOT missed opportunity", K.cbot_missed_usd, money("USD", K.cbot_missed_usd), B, "Consumption days the CBOT was below our fixing"),
     kcard("Net CBOT pricing difference", K.cbot_net_usd, money("USD", K.cbot_net_usd), B,
-      `${money("EGP", K.cbot_net_egp)} · ${isN(K.cbot_coverage) ? fx(K.cbot_coverage * 100, 0) : "—"}% of fixed-contract tonnes comparable · never added to savings`),
+      `${money("EGP", K.cbot_net_egp)} · ${isN(K.cbot_coverage) ? fx(K.cbot_coverage * 100, 0) : "—"}% of fixed-contract tonnes with a stored CBOT · never added to savings`),
   ].join("");
   const q = M.quality, negs = v.contracts.filter(c => isN(c.hist.saving) && c.hist.saving < 0);
   const lines = [
     `Importing instead of buying locally ${K.historical_saving_egp >= 0 ? "saved" : "cost"} <b class="${sg(K.historical_saving_egp)}">${money("EGP", Math.abs(K.historical_saving_egp))}</b> on ${f0(K.historical_mt)} MT consumed, each tonne against the local price observed on its day.`,
     `Fixed-price tonnes not yet consumed would save <b class="${sg(K.open_fixed_potential_egp)}">${money("EGP", K.open_fixed_potential_egp)}</b> at today's local price; unpriced contracts add an indicative ${money("EGP", K.open_indicative_potential_egp)} (scenario).`,
-    `Against the CBOT on comparable consumption days our fixings gained ${money("USD", K.cbot_advantage_usd)} and missed ${money("USD", Math.abs(K.cbot_missed_usd))} — net <b class="${sg(K.cbot_net_usd)}">${money("USD", K.cbot_net_usd)}</b>, a historical benchmark already inside the savings above.`,
+    `Against the CBOT on the consumption days our fixings gained ${money("USD", K.cbot_advantage_usd)} and missed ${money("USD", Math.abs(K.cbot_missed_usd))} — net <b class="${sg(K.cbot_net_usd)}">${money("USD", K.cbot_net_usd)}</b>, a historical benchmark already inside the savings above.`,
     negs.length ? `${negs.length} contract${negs.length > 1 ? "s" : ""} cost more than local on the days consumed (${money("EGP", sum(negs, c => c.hist.saving))} together).` : "No contract cost more than local on the days consumed.",
   ];
-  if (!v.filtered) lines.push(`Kept out of these figures: ${f0(q.excluded_unsourced_mt)} MT of unsourced consumption and ${f0(q.missing_cbot_mt)} MT without a comparable CBOT day — see Data quality.`);
+  if (!v.filtered) lines.push(`Kept out of these figures: ${f0(q.excluded_unsourced_mt)} MT of unsourced consumption and ${f0(q.missing_cbot_mt)} MT without a stored CBOT for the day — see Data quality.`);
   $("says").innerHTML = lines.map(l => `<li>${l}</li>`).join("");
   $("mgmtNote").innerHTML = `<b>${M.management_ready ? "✔ All validation checks passed" : "✖ Validation failed — not management-ready"}</b> · checksum ${esc(M.checksum)} · data as of ${esc(M.as_of)}. Actual = consumption already made (FIFO estimated); Potential = not yet consumed at today's local price; Benchmark = CBOT comparison, separate from savings.`;
   const bases = [...new Set(v.contracts.map(c => c.base))].sort();
   $("chCom").innerHTML = hbar(bases.map(b => { const r = v.sav.filter(x => x.base === b), val = sum(r, x => x.saving), mt = sum(r, x => x.mt);
     return {label: b, value: val, tip: `<b>${b}</b><br>${money("EGP", val)} on ${f0(mt)} MT<br>${mt ? f0(val / mt) : "—"} EGP/MT`}; }).filter(i => i.value), {left: 90, aria: "Savings by commodity"});
   $("chComCbot").innerHTML = hbar(bases.map(b => { const r = v.cb.filter(x => x.base === b && x.assessable), val = sum(r, x => x.usd);
-    return {label: b, value: val, color: val >= 0 ? "var(--good)" : "var(--bad)", tip: `<b>${b}</b><br>${money("USD", val)} net on ${f0(sum(r, x => x.mt))} comparable MT`}; }).filter(i => i.value), {left: 90, aria: "CBOT by commodity"});
+    return {label: b, value: val, color: val >= 0 ? "var(--good)" : "var(--bad)", tip: `<b>${b}</b><br>${money("USD", val)} net on ${f0(sum(r, x => x.mt))} MT`}; }).filter(i => i.value), {left: 90, aria: "CBOT by commodity"});
   const per = {};
   v.sav.forEach(r => { per[r.contract_id] = (per[r.contract_id] || 0) + r.saving; });
   const top = Object.entries(per).filter(([, x]) => x > 0).sort((a, b) => b[1] - a[1]).slice(0, 10);
@@ -424,7 +424,7 @@ function renderOverview(v, K) {
   const pc = {};
   v.cb.filter(r => r.assessable).forEach(r => { pc[r.contract_id] = (pc[r.contract_id] || 0) + r.usd; });
   const miss = Object.entries(pc).filter(([, x]) => x < 0).sort((a, b) => a[1] - b[1]).slice(0, 10);
-  $("chMiss").innerHTML = hbar(miss.map(([id, x]) => ({label: CI[id].contract, value: Math.abs(x), id, color: "var(--bad)", tip: `<b>${esc(CI[id].contract)}</b><br>Missed ${money("USD", Math.abs(x))} vs CBOT on comparable days`})), {aria: "Top missed", fmt: x => "−" + short(x)});
+  $("chMiss").innerHTML = hbar(miss.map(([id, x]) => ({label: CI[id].contract, value: Math.abs(x), id, color: "var(--bad)", tip: `<b>${esc(CI[id].contract)}</b><br>Missed ${money("USD", Math.abs(x))} vs CBOT on its consumption days`})), {aria: "Top missed", fmt: x => "−" + short(x)});
 }
 
 // ── contracts tab ────────────────────────────────────────────────────
@@ -474,7 +474,7 @@ function detail(c, v) {
     ["Total savings", `<b class="${sg(h.saving)}">${money("EGP", h.saving)}</b>`], ["Basis", c.cif_final ? '<span class="tag act">Final CIF</span>' : '<span class="tag pot">Provisional CIF</span>']]);
   const cbx = f.fixed ? dl([["CBOT fixed", `<b>${f2(f.value)}</b> ${esc(f.unit)}`], ["Type", esc(f.status)], ["Pricing date", esc(f.pricing_date || "Not recorded")],
     ["Futures month", esc(c.contract_month ? c.contract_month.code + (c.contract_month.inferred ? " (year inferred)" : "") : c.futures_month || "—")],
-    ["Premium / factor", f2(c.premium) + " / " + fx(f.factor, 4)], ["Avg CBOT, comparable days", f2(cb.avg_cbot)], ["Coverage", isN(cb.coverage) ? fx(cb.coverage * 100, 0) + "% of consumed MT" : "—"],
+    ["Premium / factor", f2(c.premium) + " / " + fx(f.factor, 4)], ["Avg CBOT, consumption days", f2(cb.avg_cbot)], ["Coverage", isN(cb.coverage) ? fx(cb.coverage * 100, 0) + "% of consumed MT" : "—"],
     ["Result", `<b class="${sg(cb.usd)}">${money("USD", cb.usd)}</b> · ${esc(cb.assessment)}`]])
     : `<p class="note">${esc(f.status || "No CBOT fixing")}${isN(f.indicative) ? ` — indicative ${f2(f.indicative)} ${esc(f.unit)} (not a final fixing)` : ""}</p>`;
   const op = dl([["Delivered", f0(c.delivered_mt) + " MT"], ["Consumed", f0(c.consumed_mt) + " MT"], ["Available stock", f0(c.available_mt) + " MT"], ["Outstanding", f0(c.outstanding_mt) + " MT"],
@@ -504,13 +504,13 @@ function renderCbot(v) {
     `<tr class="tot"><td colspan="2">Total · ${rows.length}</td>${td(sum(rows, c => c.y.mt))}${td(sum(rows, c => c.y.amt))}<td colspan="6"></td>${td(sum(rows, c => c.y.adv), f0, 1)}${td(sum(rows, c => c.y.miss), f0, 1)}${td(sum(rows, c => c.y.usd), f0, 1)}${td(sum(rows, c => c.y.egp), f0, 1)}<td></td></tr></tbody>`;
   const choices = rows.slice().sort((a, b) => b.y.amt - a.y.amt);
   if (!choices.find(c => c.id === S.cb)) S.cb = choices.length ? choices[0].id : "";
-  $("cbSel").innerHTML = choices.map(c => `<option value="${esc(c.id)}" ${c.id === S.cb ? "selected" : ""}>${esc(c.contract)} · ${esc(c.commodity)} · ${f0(c.y.amt)} of ${f0(c.y.mt)} MT comparable</option>`).join("");
+  $("cbSel").innerHTML = choices.map(c => `<option value="${esc(c.id)}" ${c.id === S.cb ? "selected" : ""}>${esc(c.contract)} · ${esc(c.commodity)} · ${f0(c.y.amt)} of ${f0(c.y.mt)} MT with a stored CBOT</option>`).join("");
   const c = CI[S.cb];
   if (!c) { $("cbChart").innerHTML = '<p class="note">No fixed contract with consumption in this selection.</p>'; $("cbBars").innerHTML = ""; $("cbSum").innerHTML = ""; return; }
   const cr = v.cb.filter(r => r.contract_id === c.id), s = by[c.id];
   $("cbChart").innerHTML = cbotChart(c, cr);
   $("cbBars").innerHTML = dailyBars(cr);
-  $("cbSum").innerHTML = `${esc(c.fix.status)} · fixed ${f2(c.fix.value)} ${esc(c.fix.unit)} · futures ${esc(c.contract_month ? c.contract_month.code : "—")} · comparable ${f0(s.amt)} of ${f0(s.mt)} MT · advantage ${money("USD", s.adv)} · missed ${money("USD", s.miss)} · net <b class="${sg(s.usd)}">${money("USD", s.usd)}</b>`;
+  $("cbSum").innerHTML = `${esc(c.fix.status)} · fixed ${f2(c.fix.value)} ${esc(c.fix.unit)} · futures ${esc(c.contract_month ? c.contract_month.code : "—")} · CBOT on ${f0(s.amt)} of ${f0(s.mt)} MT consumed · advantage ${money("USD", s.adv)} · missed ${money("USD", s.miss)} · net <b class="${sg(s.usd)}">${money("USD", s.usd)}</b>`;
 }
 
 // ── open tab ─────────────────────────────────────────────────────────
@@ -541,7 +541,7 @@ function renderQuality() {
     ["", "Verified (actual) allocations", q.verified_allocations, "rows"], ["", "FIFO-estimated allocations", q.fifo_allocations, "rows"],
     ["Unsourced consumption", "Excluded unsourced", q.excluded_unsourced, `rows · ${f0(q.excluded_unsourced_mt)} MT`],
     ["missing-dates", "Fixed contracts without a pricing date", q.missing_pricing_dates, "fixing implied from CIF"],
-    ["CBOT comparison not assessable", "Days without comparable CBOT", q.missing_cbot, `rows · ${f0(q.missing_cbot_mt)} MT`],
+    ["CBOT comparison not assessable", "Days without a stored CBOT", q.missing_cbot, `rows · ${f0(q.missing_cbot_mt)} MT`],
     ["No usable local price", "Missing local observations", q.missing_local, `rows · ${f0(q.missing_local_mt)} MT`],
     ["stale", "Stale local references (8–30 d)", q.stale_local, `rows · ${f0(q.stale_local_mt)} MT · used, flagged`],
     ["Logged entry not used", "Logged entries not used", M.excluded.filter(e => e.category === "Logged entry not used").length, "see reason"]];
@@ -562,7 +562,7 @@ function renderQuality() {
     (ex.length > shown.length ? `<tr><td colspan="7" class="note">… ${ex.length - shown.length} more — all are in the Excel sheet Excluded & Missing Data.</td></tr>` : "") + "</tbody>";
   const src = M.sources || {}, o = M.options;
   $("src").innerHTML = `<p>Data as of ${esc(M.as_of)} · generated ${esc(M.generated)} · consumption: ${esc(M.walk_mode)} · rates ${esc(Object.entries(M.rates || {}).map(([k, x]) => k + " " + x).join(", "))} MT/day.</p>
-   <p>CBOT: ${esc(src.cbot_source || "")}; ${esc(Object.entries(src.cbot || {}).map(([k, x]) => `${k} ${x[0]} → ${x[1]}`).join(" · "))}. Compared only on days the calendar puts the contract's own futures month at the front under both roll conventions (first notice and expiry); one-day spikes and prints older than ${o.cbot_max_age_days} days are not used. Advantage when CBOT − fixed ≥ ${o.neutral_cbot}, missed when ≤ −${o.neutral_cbot}, else neutral.</p>
+   <p>CBOT: ${esc(src.cbot_source || "")}; ${esc(Object.entries(src.cbot || {}).map(([k, x]) => `${k} ${x[0]} → ${x[1]}`).join(" · "))}. Each consumption day is compared with the CBOT stored for that day (the contract's futures month is only the month its premium is quoted over); one-day spikes and prints older than ${o.cbot_max_age_days} days are not used. Advantage when CBOT − fixed ≥ ${o.neutral_cbot}, missed when ≤ −${o.neutral_cbot}, else neutral.</p>
    <p>Local: origin-matched delivered price (price + freight) observed on or before the day; ≤ ${o.carry_days} days carried forward, ≤ ${o.max_carry_days} days stale but used and flagged, older excluded. Latest quotes: ${esc(Object.entries(src.local_latest || {}).map(([k, x]) => k + " " + x).join(" · "))}.</p>
    <p>Landed cost: CIF × FX (Form 4 once entered, except SBM; else delivery FX) + discharge + clearance + inland freight. CBOT fixed: pricing lots, else CIF ÷ factor − premium (CORN 0.3937; SOYBEAN, WHEAT 0.36745; SBM 1.1023 with premium in $/short ton). Unpriced contracts are never shown as fixed.</p>`;
 }
@@ -596,7 +596,7 @@ function exportXlsx() {
     ["Summary", [["Procurement savings — filtered view"], ["Data as of", M.as_of], ["Checksum (unfiltered model)", M.checksum],
       ["Filters", Object.entries(F_).filter(([, x]) => x).map(([k, x]) => k + "=" + x).join("; ") || "none"], [],
       ["Measure", "Value"], ...Object.entries(K).map(([k, x]) => [k, x])]],
-    ["Contracts", [["Contract ID", "Contract", "Supplier", "Commodity", "Origin", "Status", "Consumed MT", "Compared MT", "Savings EGP", "CBOT fixed", "Fixing type", "Avg CBOT comparable", "CBOT net USD", "Assessment"],
+    ["Contracts", [["Contract ID", "Contract", "Supplier", "Commodity", "Origin", "Status", "Consumed MT", "Compared MT", "Savings EGP", "CBOT fixed", "Fixing type", "Avg CBOT consumption days", "CBOT net USD", "Assessment"],
       ...contractRows(v).map(c => [c.id, c.contract, c.supplier, c.commodity, c.origin, c.status, c.consumed_mt, c.x.cmt, c.x.sav, c.fix.value, c.fix.type, c.x.avg, c.x.amt ? c.x.usd : null, c.assessment])]],
     ["Savings vs Local", [["Date", "Contract", "Contract ID", "Commodity", "MT", "Landed EGP/MT", "Local EGP/MT", "Local date", "Quote age", "Savings EGP/MT", "Savings EGP", "Data quality", "Local record"],
       ...v.sav.map(r => [r.date, r.contract, r.contract_id, r.commodity, r.mt, r.cost, r.local, r.local_date, r.local_age, r.saving_mt, r.saving, r.quality, r.local_source])]],
