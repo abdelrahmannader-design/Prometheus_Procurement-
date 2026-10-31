@@ -61,8 +61,18 @@ def effective_freight_egp_mt(base_rate, mode="LEGACY", vat_pct=14.0, all_in_rate
     return all_in if all_in is not None else base
 
 
-def _consume_fifo(layers, qty_mt):
-    """Consume qty from oldest available layers; return shortage MT."""
+_DRAW_FIELDS = ("lot_id", "contract_id", "contract_ref", "commodity", "origin",
+                "supplier", "delivery_date", "cost_egp_mt", "source")
+
+
+def _consume_fifo(layers, qty_mt, draws=None, when=None, kind=None):
+    """Consume qty from oldest available layers; return shortage MT.
+
+    With ``draws`` given, every withdrawal is also recorded there — the
+    date, the tonnes, the kind of consumption and the layer it came out of —
+    so a caller that needs to know which cargo each tonne came from reads it
+    off this walk instead of running a second one that could disagree.
+    """
     qty = max(_to_float(qty_mt, 0.0) or 0.0, 0.0)
     for layer in layers:
         if qty <= 1e-9:
@@ -74,6 +84,13 @@ def _consume_fifo(layers, qty_mt):
         layer["remaining_mt"] = rem - take
         layer["consumed_mt"] = (_to_float(layer.get("consumed_mt"), 0.0) or 0.0) + take
         qty -= take
+        if draws is not None:
+            row = {k: layer.get(k) for k in _DRAW_FIELDS}
+            row.update({"date": when, "mt": take, "kind": kind})
+            draws.append(row)
+    if draws is not None and qty > 1e-9:
+        draws.append({"date": when, "mt": qty, "kind": kind, "lot_id": "",
+                      "contract_ref": "(unsourced)", "cost_egp_mt": None})
     return max(qty, 0.0)
 
 
@@ -101,7 +118,7 @@ def _rate_by_base(consumption_rates):
 
 
 def build_daily_fifo_inventory(lots, events=None, consumption_rates=None, as_of=None,
-                               estimate_daily=True):
+                               estimate_daily=True, record_draws=False):
     """Build current FIFO layers for every base commodity.
 
     Parameters
@@ -119,6 +136,11 @@ def build_daily_fifo_inventory(lots, events=None, consumption_rates=None, as_of=
         confirmation when estimate_daily=True. It never writes consumption log.
     as_of:
         Inventory valuation date (default today).
+    record_draws:
+        Also return every FIFO withdrawal under ``draws``, each tagged with
+        how its tonnes are known: "count" (cleared by a physical count, day
+        not recorded), "actual" (a logged consumption entry) or "estimated"
+        (the configured daily rate after the last actual entry).
     """
     as_of_d = _date(as_of) or dt.date.today()
     as_of_s = as_of_d.isoformat()
@@ -165,6 +187,7 @@ def build_daily_fifo_inventory(lots, events=None, consumption_rates=None, as_of=
         shortage = 0.0
         consumed_actual = 0.0
         consumed_estimated = 0.0
+        draws = [] if record_draws else None
 
         if baseline_date is not None:
             pre = [_layer_from_lot(x) for x in delivered if (_date(x.get("delivery_date")) or dt.date.min) <= baseline_date]
@@ -172,7 +195,8 @@ def build_daily_fifo_inventory(lots, events=None, consumption_rates=None, as_of=
             layers = pre
             if baseline_qty is not None:
                 if baseline_qty <= total_pre + 1e-9:
-                    shortage += _consume_fifo(layers, max(total_pre - baseline_qty, 0.0))
+                    shortage += _consume_fifo(layers, max(total_pre - baseline_qty, 0.0),
+                                              draws, baseline_date, "count")
                 else:
                     # Physical stock exceeds identified contract receipts.
                     # Preserve the difference as an explicit unknown-cost lot.
@@ -259,7 +283,7 @@ def build_daily_fifo_inventory(lots, events=None, consumption_rates=None, as_of=
                 layers.sort(key=lambda x: (x.get("delivery_date") or "9999-12-31", x.get("contract_id") or "", x.get("lot_id") or ""))
             else:
                 consumed_actual += payload
-                shortage += _consume_fifo(layers, payload)
+                shortage += _consume_fifo(layers, payload, draws, _ed, "actual")
 
         # Automatic daily projection after the last confirmed actual-consumption
         # point. It is analytical only and clearly labelled ESTIMATED.
@@ -296,7 +320,7 @@ def build_daily_fifo_inventory(lots, events=None, consumption_rates=None, as_of=
                     layers.append(layer)
                 layers.sort(key=lambda x: (x.get("delivery_date") or "9999-12-31", x.get("contract_id") or "", x.get("lot_id") or ""))
                 consumed_estimated += rate
-                shortage += _consume_fifo(layers, rate)
+                shortage += _consume_fifo(layers, rate, draws, current, "estimated")
                 estimate_days += 1
                 current += dt.timedelta(days=1)
         else:
@@ -358,6 +382,8 @@ def build_daily_fifo_inventory(lots, events=None, consumption_rates=None, as_of=
             "inbound_mt": sum(_to_float(x.get("original_mt"), 0.0) or 0.0 for x in inbound),
             "issues": issues,
         }
+        if record_draws:
+            results[base]["draws"] = draws
     return results
 
 

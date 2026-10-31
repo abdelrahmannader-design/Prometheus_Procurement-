@@ -7,7 +7,9 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from prometheus_core.inventory import build_daily_fifo_inventory
 from prometheus_core.consumption_savings import (cargo_coverage,
+                                                 draws_from_inventory,
                                                  consumption_draws,
                                                  nearest_on_or_before,
                                                  savings_report,
@@ -306,6 +308,118 @@ class CoverageTests(unittest.TestCase):
         draws = consumption_draws(LOTS, EVENTS[:1], "CORN")
         cover = {c["key"]: c for c in cargo_coverage(LOTS, draws, "CORN")}
         self.assertEqual(cover["Oct corn"]["state"], "untouched")
+
+
+def walked(lots=LOTS, events=EVENTS, rates=None, as_of="2026-10-10",
+           estimate=True, commodity="CORN", origin=None, **over):
+    """A savings report fed by the inventory walk, plus the walk itself."""
+    inv = build_daily_fifo_inventory(lots, events, rates or {}, as_of=as_of,
+                                     estimate_daily=estimate,
+                                     record_draws=True)[commodity]
+    draws = draws_from_inventory(inv["draws"], commodity, origin)
+    return report(lots=lots, events=events, draws=draws, origin=origin,
+                  **over), inv
+
+
+class InventoryAgreementTests(unittest.TestCase):
+    """The savings tab and the inventory view must agree on what is left."""
+
+    def assert_agrees(self, rep, inv):
+        left = {x["lot_id"]: x["remaining_mt"] for x in inv["layers"]}
+        for cargo in rep["coverage"]:
+            self.assertAlmostEqual(cargo["remaining_mt"],
+                                   left.get(cargo["lot_id"], 0.0), places=6,
+                                   msg=cargo["key"])
+
+    def test_the_daily_estimate_consumes_cargo_the_log_never_mentions(self):
+        """1,500 MT logged on 10 Sep, then 25 MT/day to 10 Oct.
+
+        Twenty days finish the September cargo's last 500 MT; ten more take
+        250 MT out of the October one, which the log never mentions.
+        """
+        rep, inv = walked(events=EVENTS[:1], rates={"CORN": 25})
+        cover = {c["key"]: c for c in rep["coverage"]}
+        self.assertEqual(cover["Oct corn"]["state"], "drawn")
+        self.assertAlmostEqual(cover["Oct corn"]["drawn_estimated_mt"], 250.0)
+        self.assertAlmostEqual(cover["Oct corn"]["remaining_mt"], 1750.0)
+        self.assertAlmostEqual(rep["totals"]["logged_mt"], 1500.0)
+        self.assertAlmostEqual(rep["totals"]["estimated_mt"], 750.0)
+        self.assert_agrees(rep, inv)
+
+    def test_an_estimate_that_outruns_the_stock_is_reported_unsourced(self):
+        rep, inv = walked(events=EVENTS[:1], rates={"CORN": 100})
+        unsourced = sum(r["mt"] for r in rep["rows"]
+                        if r["contract_ref"] == "(unsourced)")
+        self.assertAlmostEqual(unsourced, inv["shortage_mt"])
+        self.assert_agrees(rep, inv)
+
+    def test_every_draw_says_how_its_tonnes_are_known(self):
+        rep, _ = walked(events=EVENTS[:1], rates={"CORN": 100})
+        self.assertEqual({r["kind"] for r in rep["rows"]},
+                         {"actual", "estimated"})
+
+    def test_with_the_estimate_off_it_matches_the_log_alone(self):
+        rep, inv = walked(events=EVENTS[:1], rates={"CORN": 100},
+                          estimate=False)
+        cover = {c["key"]: c for c in rep["coverage"]}
+        self.assertEqual(cover["Oct corn"]["state"], "untouched")
+        self.assertAlmostEqual(rep["totals"]["mt"], 1500.0)
+        self.assert_agrees(rep, inv)
+
+    def test_the_walk_and_the_log_walk_agree_when_there_is_only_a_log(self):
+        rep, inv = walked(estimate=False)
+        plain = report()
+        self.assertAlmostEqual(rep["totals"]["mt"], plain["totals"]["mt"])
+        self.assertAlmostEqual(rep["totals"]["saving_vs_local_egp"],
+                               plain["totals"]["saving_vs_local_egp"])
+        self.assert_agrees(rep, inv)
+
+    def test_a_stock_count_consumes_without_a_day_so_it_is_not_valued(self):
+        """4,000 MT landed, 2,500 counted: 1,500 MT gone on no known day."""
+        count = [{"date": "2026-10-05", "commodity": "CORN",
+                  "is_adjustment": True, "adjusted_qty": 2500}]
+        rep, inv = walked(events=count, estimate=False)
+        self.assertAlmostEqual(rep["counted_mt"], 1500.0)
+        self.assertAlmostEqual(rep["totals"]["mt"], 0.0)
+        dec = {c["key"]: c for c in rep["coverage"]}["Dec corn"]
+        self.assertEqual(dec["state"], "counted")
+        self.assertIn("2026-10-05", dec["why"])
+        self.assertAlmostEqual(dec["remaining_mt"], 500.0)
+        self.assert_agrees(rep, inv)
+
+    def test_consumption_after_a_count_is_valued_on_its_day(self):
+        events = [{"date": "2026-10-05", "commodity": "CORN",
+                   "is_adjustment": True, "adjusted_qty": 2500},
+                  {"date": "2026-10-08", "commodity": "CORN",
+                   "consumed_mt": 1000}]
+        rep, inv = walked(events=events, estimate=False)
+        self.assertAlmostEqual(rep["totals"]["mt"], 1000.0)
+        self.assertEqual([r["contract_ref"] for r in rep["rows"]],
+                         ["Dec corn", "Oct corn"])
+        self.assert_agrees(rep, inv)
+
+    def test_the_origin_filter_reads_the_same_walk(self):
+        rep, inv = walked(lots=MIXED, origin="ARG", rates={"CORN": 100},
+                          events=EVENTS[:1])
+        self.assertEqual({r["origin"] for r in rep["rows"]}, {"ARG"})
+        self.assertEqual([c["key"] for c in rep["coverage"]], ["Arg cargo"])
+        self.assert_agrees(rep, inv)
+
+    def test_recording_draws_changes_nothing_the_inventory_reports(self):
+        args = (LOTS, EVENTS[:1], {"CORN": 100})
+        plain = build_daily_fifo_inventory(*args, as_of="2026-10-10")["CORN"]
+        rec = build_daily_fifo_inventory(*args, as_of="2026-10-10",
+                                         record_draws=True)["CORN"]
+        rec.pop("draws")
+        self.assertEqual(plain, rec)
+
+    def test_the_draws_add_up_to_what_the_inventory_consumed(self):
+        inv = build_daily_fifo_inventory(LOTS, EVENTS[:1], {"CORN": 100},
+                                         as_of="2026-10-10",
+                                         record_draws=True)["CORN"]
+        self.assertAlmostEqual(sum(d["mt"] for d in inv["draws"]),
+                               inv["actual_consumed_mt"]
+                               + inv["estimated_consumed_mt"])
 
 
 if __name__ == "__main__":

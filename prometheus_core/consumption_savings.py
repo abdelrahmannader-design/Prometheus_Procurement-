@@ -36,7 +36,7 @@ __all__ = ["CONSUMPTION_SAVINGS_VERSION", "DEFAULT_STALE_DAYS",
            "consumption_draws", "value_draws", "savings_report",
            "nearest_on_or_before", "series_from_rows"]
 
-CONSUMPTION_SAVINGS_VERSION = "1.1"
+CONSUMPTION_SAVINGS_VERSION = "1.2"
 
 #: A reference price older than this is still used — refusing to value a
 #: tonne helps nobody — but the row is marked so a total built largely on
@@ -168,15 +168,24 @@ def cargo_coverage(lots, all_draws, commodity=None, start=None, end=None,
     want_origin = (origin or "").strip().upper() or None
     first, last = _date(start), _date(end)
     drawn_all, drawn_window, drawn_after = {}, {}, {}
+    drawn_estimated, drawn_count, count_dates = {}, {}, {}
     for draw in all_draws or []:
         key = draw.get("lot_id") or draw.get("contract_ref") or ""
         drawn_all[key] = drawn_all.get(key, 0.0) + draw["mt"]
+        if draw.get("kind") == "count":
+            # Cleared by a physical count: consumed, but on no known day, so
+            # it belongs to no window and is reported on its own.
+            drawn_count[key] = drawn_count.get(key, 0.0) + draw["mt"]
+            count_dates[key] = draw["date"]
+            continue
         if last and draw["date"] > last:
             bucket = drawn_after
         elif first and draw["date"] < first:
             continue
         else:
             bucket = drawn_window
+            if draw.get("kind") == "estimated":
+                drawn_estimated[key] = drawn_estimated.get(key, 0.0) + draw["mt"]
         bucket[key] = bucket.get(key, 0.0) + draw["mt"]
 
     out = []
@@ -195,8 +204,12 @@ def cargo_coverage(lots, all_draws, commodity=None, start=None, end=None,
             state, why = "later", "landed after this period"
         elif drawn_after.get(key, 0.0) > 1e-9:
             state, why = "later", "consumed after this period"
-        elif total > 1e-9:
+        elif total - drawn_count.get(key, 0.0) > 1e-9:
             state, why = "earlier", "consumed before this period"
+        elif drawn_count.get(key, 0.0) > 1e-9:
+            state = "counted"
+            why = (f"consumed before the stock count of "
+                   f"{count_dates[key].isoformat()} (day not recorded)")
         else:
             state, why = "untouched", "still in stock, FIFO has not reached it"
         out.append({
@@ -206,9 +219,53 @@ def cargo_coverage(lots, all_draws, commodity=None, start=None, end=None,
             "landed": layer["date"].isoformat(),
             "qty_mt": layer["qty"], "cost_egp_mt": layer["cost"],
             "drawn_mt": here, "drawn_total_mt": total,
+            "drawn_estimated_mt": drawn_estimated.get(key, 0.0),
+            "drawn_count_mt": drawn_count.get(key, 0.0),
             "remaining_mt": max(layer["qty"] - total, 0.0),
             "state": state, "why": why,
         })
+    return out
+
+
+KIND_LABELS = {"actual": "logged", "estimated": "estimated", "count": "stock count"}
+
+
+def draws_from_inventory(raw_draws, commodity=None, origin=None):
+    """Savings draws from the withdrawals the inventory FIFO already made.
+
+    The inventory view decides what has been consumed — logged entries, the
+    daily-rate estimate after the last one, and physical stock counts — so
+    the savings report reads the same withdrawals rather than walking the
+    log a second time and reaching a different answer about what is left.
+    Every draw keeps its ``kind`` so a reader can tell recorded tonnes from
+    modelled ones.
+    """
+    want = _base(commodity) if commodity else None
+    want_origin = (origin or "").strip().upper() or None
+    out = []
+    for raw in raw_draws or []:
+        when = _date(raw.get("date"))
+        mt = to_float(raw.get("mt"), 0.0) or 0.0
+        if when is None or mt <= 1e-9:
+            continue
+        sourced = (raw.get("contract_ref") or "") != "(unsourced)"
+        base = _base(raw.get("commodity")) or want or ""
+        out.append({
+            "date": when, "commodity": want or base, "mt": mt,
+            "cost_egp_mt": to_float(raw.get("cost_egp_mt"), None),
+            "lot_id": raw.get("lot_id") or raw.get("contract_id") or "",
+            "contract_ref": ((raw.get("contract_ref") or raw.get("contract_id")
+                              or "").strip() or "(no reference)"),
+            "origin": (_origin(raw) or "(no origin)") if sourced else "(unsourced)",
+            "supplier": (raw.get("supplier") or "").strip(),
+            "landed": (_date(raw.get("delivery_date")).isoformat()
+                       if sourced and _date(raw.get("delivery_date")) else ""),
+            "kind": raw.get("kind") or "actual",
+        })
+    out.sort(key=lambda d: d["date"])
+    if want_origin:
+        # After the walk, for the reason given in consumption_draws.
+        out = [d for d in out if d["origin"] == want_origin]
     return out
 
 
@@ -325,7 +382,10 @@ def value_draws(draws, local_series=None, cbot_series=None, fx_series=None,
 def _totals(rows):
     mt = sum(r["mt"] for r in rows)
     out = {"mt": mt, "draws": len(rows),
-           "stale_mt": sum(r["mt"] for r in rows if r.get("is_stale"))}
+           "stale_mt": sum(r["mt"] for r in rows if r.get("is_stale")),
+           "estimated_mt": sum(r["mt"] for r in rows
+                               if r.get("kind") == "estimated")}
+    out["logged_mt"] = mt - out["estimated_mt"]
     for key in ("cost", "saving_vs_local", "saving_vs_cbot"):
         total = sum(r[key + "_egp"] for r in rows if r.get(key + "_egp") is not None)
         priced = sum(r["mt"] for r in rows if r.get(key + "_egp") is not None)
@@ -341,10 +401,22 @@ def _totals(rows):
 def savings_report(lots, events, commodity=None, start=None, end=None,
                    local_series=None, cbot_series=None, fx_series=None,
                    basis_for=None, factor=0.3937,
-                   stale_days=DEFAULT_STALE_DAYS, origin=None):
-    """Draws, the same rolled up by day, cargo and origin, and the totals."""
-    everything = consumption_draws(lots, events, commodity, None, None, origin)
-    draws = within(everything, start, end)
+                   stale_days=DEFAULT_STALE_DAYS, origin=None, draws=None):
+    """Draws, the same rolled up by day, cargo and origin, and the totals.
+
+    ``draws`` takes the withdrawals from the inventory walk (see
+    draws_from_inventory); without it the logged events are walked here,
+    which knows nothing of estimates or stock counts.
+    """
+    if draws is None:
+        everything = consumption_draws(lots, events, commodity, None, None, origin)
+    else:
+        everything = list(draws)
+    counted_mt = sum(d["mt"] for d in everything if d.get("kind") == "count")
+    # Tonnes cleared by a stock count have no consumption day, and a saving
+    # judged "on the day consumed" cannot be judged without one.
+    draws = within([d for d in everything if d.get("kind") != "count"],
+                   start, end)
     rows = value_draws(draws, local_series, cbot_series, fx_series,
                        basis_for, factor, stale_days)
 
@@ -366,5 +438,6 @@ def savings_report(lots, events, commodity=None, start=None, end=None,
         "totals": _totals(rows),
         "coverage": cargo_coverage(lots, everything, commodity, start, end,
                                    origin),
+        "counted_mt": counted_mt,
         "version": CONSUMPTION_SAVINGS_VERSION,
     }
