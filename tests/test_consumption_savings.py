@@ -495,5 +495,36 @@ class DailyRateFromDeliveryTests(unittest.TestCase):
         self.assertAlmostEqual(sum(d["mt"] for d in gap), 1000.0)
 
 
+class LocalByOriginTests(unittest.TestCase):
+    """Each tonne is set against the local price for its own origin."""
+
+    BRZ = {D(2026, 9, 10): 15000.0, D(2026, 10, 10): 15100.0}
+    PLAIN = {D(2026, 9, 10): 14500.0, D(2026, 10, 10): 14600.0}
+
+    def lookup(self, draw):
+        for series in ((self.BRZ,) if draw.get("origin") == "BRZ" else ()) + (self.PLAIN,):
+            found = nearest_on_or_before(series, draw["date"])
+            if found[0] is not None:
+                return found + ("key",)
+        return (None, None, None, "")
+
+    def test_a_brazilian_tonne_meets_the_brazilian_price(self):
+        rep = report(lots=MIXED, local_lookup=self.lookup)
+        by_origin = {}
+        for row in rep["rows"]:
+            by_origin.setdefault(row["origin"], set()).add(row["local_egp_mt"])
+        self.assertEqual(by_origin["BRZ"], {15000.0, 15100.0})
+        self.assertEqual(by_origin["ARG"], {14600.0})
+
+    def test_the_saving_follows_the_price_it_was_set_against(self):
+        rep = report(lots=MIXED, local_lookup=self.lookup)
+        first = rep["rows"][0]
+        self.assertAlmostEqual(first["saving_vs_local_egp_mt"], 15000.0 - 14000.0)
+
+    def test_without_a_lookup_one_series_serves_every_origin(self):
+        rep = report(lots=MIXED)
+        self.assertEqual({r["local_egp_mt"] for r in rep["rows"]}, {14500.0, 14600.0})
+
+
 if __name__ == "__main__":
     unittest.main()

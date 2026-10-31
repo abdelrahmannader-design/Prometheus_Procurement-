@@ -353,17 +353,29 @@ def consumption_draws(lots, events, commodity=None, start=None, end=None,
 
 def value_draws(draws, local_series=None, cbot_series=None, fx_series=None,
                 basis_for: Callable[[dt.date], Any] | None = None,
-                factor=0.3937, stale_days=DEFAULT_STALE_DAYS):
+                factor=0.3937, stale_days=DEFAULT_STALE_DAYS,
+                local_lookup: Callable[[dict], Any] | None = None):
     """Price each draw against what that day's alternatives would have cost.
 
     A positive saving means the tonne cost less than the alternative, which
     is the direction a reader expects from the word.
+
+    ``local_lookup(draw)`` returns ``(price, date, age_days, key)`` for that
+    draw, so the local alternative can follow the cargo's own origin —
+    Brazilian corn against the Brazilian local price — instead of one
+    series for every origin. Without it ``local_series`` is used for all.
     """
     rows = []
     for draw in draws or []:
         when = draw["date"]
         cost = to_float(draw.get("cost_egp_mt"), None)
-        local, local_date, local_age = nearest_on_or_before(local_series, when)
+        if local_lookup:
+            found = local_lookup(draw) or (None, None, None, "")
+            local, local_date, local_age = found[:3]
+            local_key = found[3] if len(found) > 3 else ""
+        else:
+            local, local_date, local_age = nearest_on_or_before(local_series, when)
+            local_key = ""
         board, board_date, board_age = nearest_on_or_before(cbot_series, when)
         rate, fx_date, fx_age = nearest_on_or_before(fx_series, when)
         basis = to_float(basis_for(when), None) if basis_for else None
@@ -376,6 +388,7 @@ def value_draws(draws, local_series=None, cbot_series=None, fx_series=None,
         row.update({
             "local_egp_mt": local, "local_price_date":
                 local_date.isoformat() if local_date else "",
+            "local_key": local_key,
             "cbot": board, "fx": rate, "basis": basis,
             "cbot_egp_mt": cbot_cost,
             "saving_vs_local_egp_mt":
@@ -416,7 +429,8 @@ def _totals(rows):
 def savings_report(lots, events, commodity=None, start=None, end=None,
                    local_series=None, cbot_series=None, fx_series=None,
                    basis_for=None, factor=0.3937,
-                   stale_days=DEFAULT_STALE_DAYS, origin=None, draws=None):
+                   stale_days=DEFAULT_STALE_DAYS, origin=None, draws=None,
+                   local_lookup=None):
     """Draws, the same rolled up by day, cargo and origin, and the totals.
 
     ``draws`` takes the withdrawals from the inventory walk (see
@@ -433,7 +447,7 @@ def savings_report(lots, events, commodity=None, start=None, end=None,
     draws = within([d for d in everything if d.get("kind") != "count"],
                    start, end)
     rows = value_draws(draws, local_series, cbot_series, fx_series,
-                       basis_for, factor, stale_days)
+                       basis_for, factor, stale_days, local_lookup)
 
     by_day, by_contract, by_origin = {}, {}, {}
     for row in rows:
