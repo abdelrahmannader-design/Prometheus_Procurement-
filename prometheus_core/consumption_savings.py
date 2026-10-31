@@ -80,14 +80,20 @@ def series_from_rows(rows, date_key="date", value_key="price_egp_mt",
     ``extra`` names a second field added to the first, which is how a local
     price plus its transport becomes one all-in figure without the caller
     having to pre-flatten the rows.
+
+    ``value_key`` may be a tuple of field names tried in order. The app's
+    CBOT history stores its close as ``price``, while older rows and imports
+    use ``close``; reading only one of them silently loses the whole board.
     """
     out = {}
     want = _base(commodity) if commodity else None
+    keys = (value_key,) if isinstance(value_key, str) else tuple(value_key)
     for row in rows or []:
         if want and _base(row.get("commodity")) != want:
             continue
         date = _date(row.get(date_key))
-        value = to_float(row.get(value_key), None)
+        value = next((v for v in (to_float(row.get(k), None) for k in keys)
+                      if v is not None), None)
         if date is None or value is None:
             continue
         if extra:

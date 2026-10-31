@@ -108,6 +108,20 @@ class PriceLookupTests(unittest.TestCase):
         self.assertTrue(rows[0]["is_stale"])
         self.assertAlmostEqual(rows[0]["saving_vs_local_egp_mt"], 500.0)
 
+    def test_the_board_is_read_from_price_as_the_app_stores_it(self):
+        """cbot_history rows are {date, price, commodity} — not close."""
+        rows = [{"date": "2026-09-10", "commodity": "CORN", "price": 447.5},
+                {"date": "2026-09-11", "commodity": "CORN", "close": 450.0}]
+        series = series_from_rows(rows, value_key=("close", "price"),
+                                  commodity="CORN")
+        self.assertEqual(series, {D(2026, 9, 10): 447.5, D(2026, 9, 11): 450.0})
+
+    def test_close_wins_when_a_row_carries_both(self):
+        rows = [{"date": "2026-09-10", "commodity": "CORN",
+                 "close": 450.0, "price": 449.0}]
+        self.assertEqual(series_from_rows(rows, value_key=("close", "price")),
+                         {D(2026, 9, 10): 450.0})
+
     def test_series_can_fold_transport_into_the_price(self):
         series = series_from_rows(
             [{"date": "2026-09-10", "commodity": "CORN",
