@@ -414,6 +414,7 @@ class InventoryAgreementTests(unittest.TestCase):
         dec = {c["key"]: c for c in rep["coverage"]}["Dec corn"]
         self.assertEqual(dec["state"], "counted")
         self.assertIn("2026-10-05", dec["why"])
+        self.assertEqual(dec["count_date"], "2026-10-05")
         self.assertAlmostEqual(dec["remaining_mt"], 500.0)
         self.assert_agrees(rep, inv)
 

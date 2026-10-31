@@ -234,6 +234,8 @@ def cargo_coverage(lots, all_draws, commodity=None, start=None, end=None,
             "drawn_mt": here, "drawn_total_mt": total,
             "drawn_estimated_mt": drawn_estimated.get(key, 0.0),
             "drawn_count_mt": drawn_count.get(key, 0.0),
+            "count_date": (count_dates[key].isoformat()
+                           if key in count_dates else ""),
             "remaining_mt": max(layer["qty"] - total, 0.0),
             "state": state, "why": why,
         })
