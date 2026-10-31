@@ -229,6 +229,16 @@ def fixing(contract):
     cif = _n(c.get("cif_usd_mt"))
     pricing = (c.get("pricing_status") or "").upper()
     lo, hi = PLAUSIBLE.get(base, (None, None))
+    if lots and c.get("final_cif_over_lots") and cif is not None and premium:
+        # A final CIF entered on a part-priced contract wins over the lots.
+        mt = sum(_n(x["qty_mt"]) for x in lots)
+        implied = cif / factor - premium
+        out.update(type="Implied", value=implied, fixed=True, lot_mt=mt,
+                   status=f"Implied from the final CIF (CIF ÷ factor − premium); pricing lots cover "
+                          f"{mt:,.0f} of {qty:,.0f} MT",
+                   note=f"Lots' weighted CBOT {sum(_n(x['qty_mt']) * _n(x['cbot']) for x in lots) / mt:,.2f} "
+                        "shown for reference only.")
+        return out
     if lots:
         mt = sum(_n(x["qty_mt"]) for x in lots)
         value = sum(_n(x["qty_mt"]) * _n(x["cbot"]) for x in lots) / mt

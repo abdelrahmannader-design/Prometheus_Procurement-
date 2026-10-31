@@ -66,6 +66,13 @@ class FixingTests(unittest.TestCase):
         self.assertAlmostEqual(f["value"], (530 * 1000 + 520 * 1500) / 2500)
         self.assertIn("2,500 of 3,000", f["status"])
 
+    def test_a_final_cif_on_a_part_priced_contract_wins_over_the_lots(self):
+        lots = [{"qty_mt": 1000, "cbot": 530.0}, {"qty_mt": 1500, "cbot": 520.0}]
+        f = mr.fixing(self.base(pricing_lots=lots, pricing_status="PARTIAL", final_cif_over_lots=True))
+        self.assertEqual(f["type"], "Implied")
+        self.assertAlmostEqual(f["value"], 285 / 0.3937 - 207, places=6)
+        self.assertIn("final CIF", f["status"])
+
     def test_flat_price_is_not_eligible(self):
         f = mr.fixing({"base": "SBM", "qty_mt": 500, "cif_usd_mt": 410, "premium": 0,
                        "premium_label": "FLAT", "pricing_status": "PRICED"})
