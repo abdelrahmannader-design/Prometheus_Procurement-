@@ -25,6 +25,7 @@ both the Excel and the HTML exports render.
 
 from __future__ import annotations
 
+import bisect
 import datetime as dt
 import hashlib
 import json
@@ -337,6 +338,27 @@ def build(inp, **overrides):
         series[base] = Series(pairs)
         spikes[base] = series[base].spikes(inp.get("spike_pct", 2.5)) if len(series[base]) > 2 else set()
 
+    fx_days = sorted((_d(d), _n(rate)) for d, rate, *_ in (inp.get("fx_series") or []) if _d(d) and _n(rate))
+
+    def day_cbot(base, day):
+        """The stored CBOT for the day (spikes stepped over, at most cbot_max_age_days back)."""
+        hist, spk = series.get(base), spikes.get(base, set())
+        if hist is None or not len(hist):
+            return None, None
+        price, pdate = hist.on_or_before(day)
+        while pdate is not None and pdate in spk:
+            price, pdate = hist.on_or_before(pdate - dt.timedelta(days=1))
+        if pdate is None or (day - pdate).days > opts["cbot_max_age_days"]:
+            return None, None
+        return price, pdate
+
+    def day_fx(day):
+        """The market FX stored for the day (or the last one before it, at most 7 days back)."""
+        i = bisect.bisect_right([d for d, _ in fx_days], day) - 1
+        if i < 0 or (day - fx_days[i][0]).days > 7:
+            return None, None
+        return fx_days[i][1], fx_days[i][0]
+
     excluded = []
 
     def exclude(category, reason, **kw):
@@ -459,7 +481,8 @@ def build(inp, **overrides):
                                  local_transport_default=bool(o.get("transport_default_used")),
                                  saving_excl_mt=sx, saving_excl=(sx * r["mt"]) if sx is not None else None,
                                  storage_start=c.get("storage_start") or "",
-                                 quality=f"{r['method']} · {status} · {basis}"))
+                                 quality=f"{r['method']} · {status} · {basis}",
+                                 **equivalent_premium(c, l_price, _d(r["date"]), day_cbot, day_fx)))
 
     # ── CBOT on each consumption day vs the contract's fixing ────────────
     cbot_rows = []
@@ -751,6 +774,38 @@ def build(inp, **overrides):
     model["management_ready"] = all(v["passed"] for v in model["validation"])
     model["checksum"] = checksum(model)
     return model
+
+
+def equivalent_premium(c, local_excl, day, day_cbot, day_fx):
+    """The premium a local purchase that day is equivalent to, over that day's CBOT.
+
+    CIF basis: (local price without transport − the contract's discharge and
+    clearance) ÷ that day's FX ÷ the commodity factor − that day's CBOT, so it
+    compares directly with the contract's CIF premium. ``eq_premium_gross``
+    skips the port-cost step. The gap is equivalent minus the contract premium
+    (positive = the contract premium was below the local equivalent).
+    """
+    base = c["base"]
+    factor, unit = FACTORS.get(base), UNITS.get(base, "")
+    out = {"day_cbot": None, "day_cbot_date": "", "day_fx": None, "day_fx_date": "", "port_costs": None,
+           "premium_factor": factor, "premium_unit": unit, "eq_premium": None, "eq_premium_gross": None,
+           "contract_premium": None, "premium_gap": None}
+    if factor is None:
+        return out
+    cb, cbd = day_cbot(base, day)
+    fx, fxd = day_fx(day)
+    port = (_n(c.get("discharge_egp_mt")) or 0.0) + (_n(c.get("clearance_egp_mt")) or 0.0)
+    out.update(day_cbot=cb, day_cbot_date=cbd.isoformat() if cbd else "", day_fx=fx,
+               day_fx_date=fxd.isoformat() if fxd else "", port_costs=port)
+    if c["fix"].get("eligible") and _n(c.get("premium")) is not None:
+        out["contract_premium"] = _n(c.get("premium"))
+    if None in (cb, fx, local_excl) or not fx:
+        return out
+    out["eq_premium"] = (local_excl - port) / fx / factor - cb
+    out["eq_premium_gross"] = local_excl / fx / factor - cb
+    if out["contract_premium"] is not None:
+        out["premium_gap"] = out["eq_premium"] - out["contract_premium"]
+    return out
 
 
 def pricing_class(c):

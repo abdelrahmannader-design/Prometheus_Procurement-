@@ -295,10 +295,13 @@ def _savings(b, m):
              "Allocation Method", "Data Quality Status", "Local Price Of", "Local x MT", "Base", "Month",
              "Import Inland Transport EGP/MT", "Imported Cost Excl. Transport EGP/MT", "Local Transport EGP/MT",
              "Local Price Excl. Transport EGP/MT", "Savings Excl. Transport EGP/MT", "Total Savings Excl. Transport EGP",
-             "Local Price Age Status", "Storage Start Date", "Local Excl x MT", "MT With Excl"]
+             "Local Price Age Status", "Storage Start Date", "Local Excl x MT", "MT With Excl",
+             "CBOT That Day", "CBOT Price Date", "FX That Day EGP/USD", "FX Date", "Port Costs (Discharge + Clearance) EGP/MT",
+             "CBOT Factor", "Local Equivalent Premium (CIF basis)", "Local Equivalent Premium (port costs not removed)",
+             "Contract Premium", "Premium Gap (Local Equivalent − Contract)", "Premium Unit"]
     last = b.table(ws, "SavingsVsLocal", heads, len(rows),
                    [22, 9, 16, 11, 12, 9, 12, 12, 12, 8, 16, 11, 13, 13, 13, 40, 11, 14, 8, 9,
-                    11, 12, 10, 12, 11, 13, 34, 12, 13, 9])
+                    11, 12, 10, 12, 11, 13, 34, 12, 13, 9, 10, 11, 10, 11, 13, 8, 14, 14, 10, 14, 10])
     for i, s in enumerate(rows):
         r = FIRST + i
         for j, v in enumerate([s["contract"], s["contract_id"], s["supplier"], s["commodity"], s["date"],
@@ -329,8 +332,24 @@ def _savings(b, m):
         b.f(ws, r, 29, f'=IF(ISNUMBER(X{r}),X{r}*F{r},"")',
             (s["local_excl"] * s["mt"]) if s["local_excl"] is not None else None, M0)
         b.f(ws, r, 30, f'=IF(ISNUMBER(Y{r}),F{r},0)', s["mt"] if s["saving_excl_mt"] is not None else 0, M0)
+        # Local equivalent premium = (local excl. transport − port costs) ÷ FX ÷ factor − CBOT that day.
+        nv = lambda x: "N/A — Missing Source Data" if x is None else x
+        has = s.get("premium_factor") is not None
+        b.put(ws, r, 31, nv(s.get("day_cbot")) if has else "No CBOT for this commodity", M2)
+        b.put(ws, r, 32, s.get("day_cbot_date") or "")
+        b.put(ws, r, 33, nv(s.get("day_fx")), "0.0000"); b.put(ws, r, 34, s.get("day_fx_date") or "")
+        b.put(ws, r, 35, nv(s.get("port_costs")) if has else "", M2)
+        b.put(ws, r, 36, s.get("premium_factor") if has else "", "0.0000")
+        b.f(ws, r, 37, f'=IF(AND(ISNUMBER(X{r}),ISNUMBER(AE{r}),ISNUMBER(AG{r}),ISNUMBER(AJ{r})),(X{r}-N(AI{r}))/AG{r}/AJ{r}-AE{r},{NA})',
+            nv(s.get("eq_premium")), M2, bold=True)
+        b.f(ws, r, 38, f'=IF(AND(ISNUMBER(X{r}),ISNUMBER(AE{r}),ISNUMBER(AG{r}),ISNUMBER(AJ{r})),X{r}/AG{r}/AJ{r}-AE{r},{NA})',
+            nv(s.get("eq_premium_gross")), M2)
+        b.put(ws, r, 39, s["contract_premium"] if s.get("contract_premium") is not None else ("Flat price" if has else ""), M2)
+        b.f(ws, r, 40, f'=IF(AND(ISNUMBER(AK{r}),ISNUMBER(AM{r})),AK{r}-AM{r},{NA})', nv(s.get("premium_gap")), M2)
+        b.put(ws, r, 41, s.get("premium_unit") or "")
     b.signs(ws, f"L{FIRST}:M{last}")
     b.signs(ws, f"Y{FIRST}:Z{last}")
+    b.signs(ws, f"AN{FIRST}:AN{last}")
     orange = PatternFill("solid", fgColor="FFE3B3")
     ws.conditional_formatting.add(f"H{FIRST}:J{last}", FormulaRule(formula=[f"$J{FIRST}>5"], fill=orange))
     ws.conditional_formatting.add(f"AA{FIRST}:AA{last}", FormulaRule(formula=[f"$J{FIRST}>5"], fill=orange))

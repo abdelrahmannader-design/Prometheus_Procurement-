@@ -240,3 +240,23 @@ class BuildTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EquivalentPremiumTests(unittest.TestCase):
+    def test_local_price_as_a_cif_premium_over_the_days_cbot(self):
+        c = {"base": "CORN", "premium": 150.0, "discharge_egp_mt": 300.0, "clearance_egp_mt": 200.0,
+             "fix": {"eligible": True}}
+        day = dt.date(2026, 10, 28)
+        out = mr.equivalent_premium(c, 15000.0, day, lambda b, d: (400.0, d), lambda d: (50.0, d))
+        self.assertAlmostEqual(out["eq_premium"], (15000 - 500) / 50 / 0.3937 - 400)
+        self.assertAlmostEqual(out["eq_premium_gross"], 15000 / 50 / 0.3937 - 400)
+        self.assertAlmostEqual(out["premium_gap"], out["eq_premium"] - 150)
+        self.assertEqual(out["premium_unit"], "¢/bu")
+
+    def test_missing_cbot_or_fx_is_not_assessed_and_flat_contracts_get_no_premium(self):
+        flat = {"base": "SBM", "premium": 0.0, "fix": {"eligible": False}}
+        out = mr.equivalent_premium(flat, 27000.0, dt.date(2026, 10, 28), lambda b, d: (None, None), lambda d: (55.0, d))
+        self.assertIsNone(out["eq_premium"]); self.assertIsNone(out["contract_premium"]); self.assertIsNone(out["premium_gap"])
+        sfm = mr.equivalent_premium({"base": "SFM", "fix": {"eligible": False}}, 20000.0, dt.date(2026, 10, 28),
+                                    lambda b, d: (1.0, d), lambda d: (50.0, d))
+        self.assertIsNone(sfm["premium_factor"]); self.assertIsNone(sfm["eq_premium"])

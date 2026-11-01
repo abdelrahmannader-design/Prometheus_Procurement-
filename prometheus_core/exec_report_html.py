@@ -910,6 +910,27 @@ function svRows(v) {
       q: [same && `${fx(same / mt * 100, 0)}% same day`, (mt - same - stale) > 0.5 && `${fx((mt - same - stale) / mt * 100, 0)}% last quote ≤ ${CD()} d`, stale && `${fx(stale / mt * 100, 0)}% STALE > ${CD()} d`].filter(Boolean).join(" · ")}});
   });
 }
+// Local equivalent premium: what the local price that day comes to as a CIF
+// premium over that day's CBOT, comparable with the contract's own premium.
+function premTip(r) {
+  if (!isN(r.eq_premium)) return "";
+  return `Local ${f2(r.local_excl)} − port costs ${f2(r.port_costs)} = ${f2(r.local_excl - r.port_costs)} EGP/MT ÷ FX ${fx(r.day_fx, 4)} (${r.day_fx_date}) = ` +
+    `${f2((r.local_excl - r.port_costs) / r.day_fx)} $/MT ÷ ${r.premium_factor} = ${f2((r.local_excl - r.port_costs) / r.day_fx / r.premium_factor)} − CBOT ${f2(r.day_cbot)} (${r.day_cbot_date}) = ${f2(r.eq_premium)} ${r.premium_unit}` +
+    ` · without removing port costs: ${f2(r.eq_premium_gross)} ${r.premium_unit}`;
+}
+function premCells(r) {
+  if (!r.premium_factor) return '<td class="n na" colspan="5">no CBOT for this commodity</td>';
+  const u = ` <span class="note">${esc(r.premium_unit)}</span>`, na = '<td class="n na" title="N/A — Missing Source Data">N/A</td>';
+  return (isN(r.day_cbot) ? `<td class="n" title="${esc(r.day_cbot_date)}">${f2(r.day_cbot)}</td>` : na) +
+    (isN(r.day_fx) ? `<td class="n" title="${esc(r.day_fx_date)}">${fx(r.day_fx, 4)}</td>` : na) +
+    (isN(r.eq_premium) ? `<td class="n" title="${esc(premTip(r))}"><b>${f2(r.eq_premium)}</b>${u}</td>` : na) +
+    (isN(r.contract_premium) ? `<td class="n">${f2(r.contract_premium)}${u}</td>` : '<td class="n note">flat price</td>') +
+    (isN(r.premium_gap) ? `<td class="n ${sg(r.premium_gap)}">${f2(r.premium_gap)}</td>` : '<td class="n na">—</td>');
+}
+function premAvg(rows) {
+  const w = rows.filter(r => isN(r.eq_premium)), mt = sum(w, r => r.mt), g = w.filter(r => isN(r.premium_gap)), gm = sum(g, r => r.mt);
+  return `<td></td><td></td>${mt ? td(sum(w, r => r.eq_premium * r.mt) / mt, f2) : "<td></td>"}<td></td>${gm ? td(sum(g, r => r.premium_gap * r.mt) / gm, f2, 1) : "<td></td>"}`;
+}
 function renderSavings(v) {
   const cols = svcols(), L_ = scs(), P_ = PS();
   let rows = svRows(v);
@@ -933,9 +954,9 @@ function renderSavings(v) {
   rows.forEach(c => {
     h += `<tr class="row" data-sv="${esc(c.id)}" id="sv-${esc(c.id)}">` + cols.map(col => cell(col, c)).join("") + "</tr>";
     // The daily consumption table keeps its original layout (including transport, age in days).
-    if (S.svOpen && S.svOpen.has(c.id)) h += `<tr class="det"><td colspan="${cols.length}"><div class="detwrap" style="overflow-x:auto"><table><thead><tr><th>Date</th><th class="n">MT</th><th class="n">Landed EGP/MT</th><th class="n">Local EGP/MT</th><th>Local quote of</th><th class="n">Age (days)</th><th class="n">Saving EGP/MT</th><th class="n">Saving EGP</th><th>Local record</th><th>Data quality</th></tr></thead><tbody>` +
-      c.z.rows.map(r => `<tr><td>${esc(r.date)}</td>${td(r.mt)}${td(r.cost, f2)}${td(r.local, f2)}<td>${esc(r.local_date)} <span class="note">${esc(r.local_key)}</span></td>${td(r.local_age)}${td(r.saving_mt, f2, 1)}${td(r.saving, f0, 1)}<td>${esc(r.local_source)}</td><td class="note">${esc(r.quality)}</td></tr>`).join("") +
-      `<tr class="tot"><td>Total</td>${td(c.z.incl.mt)}${td(c.z.incl.cost, f2)}${td(c.z.incl.local, f2)}<td></td><td></td>${td(c.z.incl.per, f2, 1)}${td(c.z.incl.sav, f0, 1)}<td></td><td></td></tr></tbody></table></div></td></tr>`;
+    if (S.svOpen && S.svOpen.has(c.id)) h += `<tr class="det"><td colspan="${cols.length}"><div class="detwrap" style="overflow-x:auto"><table><thead><tr><th>Date</th><th class="n">MT</th><th class="n">Landed EGP/MT</th><th class="n">Local EGP/MT</th><th>Local quote of</th><th class="n">Age (days)</th><th class="n">Saving EGP/MT</th><th class="n">Saving EGP</th><th class="n">CBOT that day</th><th class="n">FX that day</th><th class="n">Local equiv. premium</th><th class="n">Contract premium</th><th class="n">Premium gap</th><th>Local record</th><th>Data quality</th></tr></thead><tbody>` +
+      c.z.rows.map(r => `<tr><td>${esc(r.date)}</td>${td(r.mt)}${td(r.cost, f2)}${td(r.local, f2)}<td>${esc(r.local_date)} <span class="note">${esc(r.local_key)}</span></td>${td(r.local_age)}${td(r.saving_mt, f2, 1)}${td(r.saving, f0, 1)}${premCells(r)}<td>${esc(r.local_source)}</td><td class="note">${esc(r.quality)}</td></tr>`).join("") +
+      `<tr class="tot"><td>Total</td>${td(c.z.incl.mt)}${td(c.z.incl.cost, f2)}${td(c.z.incl.local, f2)}<td></td><td></td>${td(c.z.incl.per, f2, 1)}${td(c.z.incl.sav, f0, 1)}${premAvg(c.z.rows)}<td></td><td></td></tr></tbody></table></div></td></tr>`;
   });
   h += totRow(cols, rows, `Total · ${rows.length} contracts`) + "</tbody>";
   $("svT").innerHTML = h;
