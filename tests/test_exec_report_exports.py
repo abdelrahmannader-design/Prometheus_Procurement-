@@ -102,6 +102,13 @@ class WorkbookTests(unittest.TestCase):
         r2 = next(r for r in range(5, raw.max_row + 1) if raw.cell(r, 1).value == "C2")
         self.assertEqual(ws.cell(r2, 19).value, "Not fixed")
 
+    def test_monthly_trend_sums_back_to_the_headline(self):
+        ws = self.wb["Monthly Trend"]
+        total = sum(ws.cell(r, 2).value or 0 for r in range(5, ws.max_row + 1) if ws.cell(r, 1).value)
+        self.assertAlmostEqual(total, self.m["kpis"]["historical_saving_egp"], places=4)
+        cbot = sum(ws.cell(r, 5).value or 0 for r in range(5, ws.max_row + 1) if ws.cell(r, 1).value)
+        self.assertAlmostEqual(cbot, self.m["kpis"]["cbot_net_usd"], places=4)
+
     def test_validation_banner_and_checksum(self):
         ws = self.wb["Validation & Sources"]
         self.assertIn("MANAGEMENT-READY", ws["A3"].value)
@@ -129,7 +136,7 @@ class HtmlTests(unittest.TestCase):
         self.assertEqual(self.doc.count("</script>"), 2)
 
     def test_dashboard_controls_exist(self):
-        for hook in ('id="bMgmt"', 'id="bTheme"', 'id="bXlsx"', "window.print()", 'id="fFrom"', 'id="fDQ"',
+        for hook in ('data-p="trends"', 'id="trMonth"', 'id="trLocal"', 'id="trCbot"', 'id="trSupplier"', 'id="trSource"', 'id="bMgmt"', 'id="bTheme"', 'id="bXlsx"', "window.print()", 'id="fFrom"', 'id="fDQ"',
                      'data-p="cbot"', 'data-p="open"', 'data-p="quality"', "@media print",
                      'prefers-color-scheme:dark'):
             self.assertIn(hook, self.doc)

@@ -663,6 +663,7 @@ def build(inp, **overrides):
         "local_obs": inp.get("local_obs") or [], "commodities": commodities, "kpis": k,
         "quality": quality, "audit": audit, "look_alikes": inp.get("look_alikes") or [],
         "sources": inp.get("sources") or {},
+        "cbot_series": _series_window(series, spikes, master, as_of),
     }
     model["validation"] = validate(model)
     model["management_ready"] = all(v["passed"] for v in model["validation"])
@@ -697,6 +698,21 @@ def assessment(c):
     elif f["eligible"] and not f["fixed"]:
         out.append(f["status"] + (f" (indicative {f['indicative']:,.2f} {f['unit']})." if f["indicative"] else "."))
     return " ".join(out)
+
+
+def _series_window(series, spikes, master, as_of):
+    """The stored CBOT per commodity over the period the report covers (spikes left out)."""
+    out = {}
+    for base, hist in series.items():
+        dates = [_d(c.get("delivery_date")) for c in master if c["base"] == base and c["fix"]["fixed"]]
+        dates = [d for d in dates if d]
+        if not dates or not len(hist):
+            continue
+        start = min(dates) - dt.timedelta(days=150)
+        spk = spikes.get(base, set())
+        out[base] = [[d.isoformat(), v] for d, v in zip(hist.dates, hist.values)
+                     if start <= d <= as_of and d not in spk]
+    return out
 
 
 def _public(c):

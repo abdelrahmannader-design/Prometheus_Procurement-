@@ -126,7 +126,7 @@ body.mgmt .mgmt-only{display:block!important}
  .card,.kpi{break-inside:avoid;border-color:#ccc}
  main{max-width:none;padding:0}header{padding:0 0 6px}
  *{-webkit-print-color-adjust:exact;print-color-adjust:exact}
- body.mgmt .panel:not(#p-overview):not(#p-open){display:none!important}
+ body.mgmt .panel:not(#p-overview):not(#p-open):not(#p-trends){display:none!important}
 }
 </style>
 </head>
@@ -141,6 +141,7 @@ body.mgmt .mgmt-only{display:block!important}
  <button class="tab" data-p="contracts">Contracts</button>
  <button class="tab" data-p="cbot">CBOT fixed vs consumption</button>
  <button class="tab" data-p="open">Open contracts vs local</button>
+ <button class="tab" data-p="trends">Trends &amp; breakdowns</button>
  <button class="tab tech" data-p="quality">Data quality</button>
  <span class="spacer"></span>
  <button class="btn primary" id="bMgmt">Management View</button>
@@ -194,6 +195,22 @@ body.mgmt .mgmt-only{display:block!important}
  <div class="kpis" id="okpis"></div>
  <div class="card"><h2>Landed cost vs today's local price</h2><p class="sub">Per contract with tonnes not yet consumed · EGP/MT · green = cheaper than local, red = dearer</p><div id="chOpen"></div></div>
  <div class="card"><h2>Open contracts and stock</h2><p class="sub">Fixed-price contracts are the confirmed potential; unpriced contracts are an indicative scenario totalled separately.</p><div class="tw"><table id="tO"></table></div></div>
+</section>
+
+<section class="panel" id="p-trends">
+ <div class="grid2">
+  <div class="card"><h2>Savings vs local by month</h2><p class="sub">Consumed tonnes against the local price on the day · EGP · by consumption month</p><div id="trMonth"></div></div>
+  <div class="card"><h2>CBOT result by month</h2><p class="sub">Benchmark · USD · consumption days above (green) or below (red) our fixing</p><div id="trCbotMonth"></div></div>
+ </div>
+ <div class="card"><h2>Local price vs our landed cost</h2><p class="sub">Tonne-weighted, per consumption day · EGP/MT · the gap between the lines is the saving per tonne; breaks are periods with no imported tonnes consumed
+  <label class="note" style="margin-left:10px">Commodity <select class="ctl" id="trLocBase"></select></label></p><div id="trLocal"></div></div>
+ <div class="card"><h2>CBOT market vs our fixings</h2><p class="sub">Stored CBOT (line) and each fixed contract's CBOT across its consumption days (segment): green = market above our fixing while consumed, red = below
+  <label class="note" style="margin-left:10px">Commodity <select class="ctl" id="trCbBase"></select></label></p><div id="trCbot"></div></div>
+ <div class="grid2">
+  <div class="card"><h2>Savings by supplier</h2><p class="sub">Historical savings vs local · EGP · click a bar for the supplier's contracts</p><div id="trSupplier"></div></div>
+  <div class="card"><h2>Savings by origin</h2><p class="sub">Historical savings vs local · EGP</p><div id="trOrigin"></div></div>
+ </div>
+ <div class="card"><h2>Where consumption came from</h2><p class="sub">Share of consumed tonnes by source, per commodity · only compared imports carry savings</p><div id="trSource"></div></div>
 </section>
 
 <section class="panel" id="p-quality">
@@ -620,10 +637,102 @@ function exportXlsx() {
   window.__lastExport = files.map(f => f[0]);
 }
 
+// ── trends & breakdowns ─────────────────────────────────────────────
+function vbars(items, o) {
+  if (!items.length) return '<p class="note">Nothing to show for this selection.</p>';
+  const W = 640, H = 230, L = 56, R = 10, T = 16, B = 30;
+  const vals = items.map(i => i.value), mx = Math.max(0, ...vals), mn = Math.min(0, ...vals), sp = (mx - mn) || 1;
+  const Y = v => T + (mx - v) / sp * (H - T - B), slot = (W - L - R) / items.length, bw = Math.min(46, slot * 0.7);
+  let s = `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="${esc(o.aria || "bar chart")}">`;
+  [mx, (mx + mn) / 2, mn].forEach(v => { s += `<line x1="${L}" x2="${W - R}" y1="${Y(v)}" y2="${Y(v)}" stroke="var(--grid)"/><text x="${L - 6}" y="${Y(v) + 4}" text-anchor="end">${short(v)}</text>`; });
+  s += `<line x1="${L}" x2="${W - R}" y1="${Y(0)}" y2="${Y(0)}" stroke="var(--axis)"/>`;
+  items.forEach((it, i) => { const x = L + i * slot + (slot - bw) / 2, y0 = Y(0), y1 = Y(it.value);
+    const col = it.color || (it.value < 0 ? "var(--bad)" : "var(--s1)");
+    s += `<g data-tip="${esc(it.tip || "")}"><rect x="${L + i * slot}" y="${T}" width="${slot}" height="${H - T - B}" fill="transparent"/>`;
+    s += `<rect x="${x}" y="${Math.min(y0, y1)}" width="${bw}" height="${Math.max(Math.abs(y1 - y0), it.value ? 1 : 0)}" rx="4" fill="${col}"/></g>`;
+    s += `<text class="lbl" x="${x + bw / 2}" y="${H - 12}" text-anchor="middle">${esc(it.label)}</text>`; });
+  return s + "</svg>";
+}
+const monthName = m => { const [y, mm] = m.split("-"); return ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][+mm - 1] + " " + y.slice(2); };
+function lines2(rows, o) {
+  if (rows.length < 2) return '<p class="note">Not enough consumption days for this selection.</p>';
+  const W = 1200, H = 280, L = 60, R = 16, T = 14, B = 30;
+  const ys = rows.flatMap(r => [r.a, r.b]), pad = (Math.max(...ys) - Math.min(...ys)) * 0.08 || 50;
+  const lo = Math.min(...ys) - pad, hi = Math.max(...ys) + pad, t0 = Date.parse(rows[0].d), t1 = Date.parse(rows[rows.length - 1].d), sp = (t1 - t0) || 1;
+  const X = d => L + (Date.parse(d) - t0) / sp * (W - L - R), Y = v => T + (1 - (v - lo) / (hi - lo)) * (H - T - B);
+  let s = `<div class="legend"><span><i style="background:var(--s1)"></i>${esc(o.a)}</span><span><i style="background:var(--s2)"></i>${esc(o.b)}</span></div><svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="${esc(o.aria)}">`;
+  for (let k = 0; k <= 4; k++) { const v = lo + (hi - lo) * k / 4; s += `<line x1="${L}" x2="${W - R}" y1="${Y(v)}" y2="${Y(v)}" stroke="var(--grid)"/><text x="${L - 6}" y="${Y(v) + 4}" text-anchor="end">${fx(v, 0)}</text>`; }
+  // A gap of more than 4 days without consumption breaks the line rather than bridging it.
+  const path = key => rows.map((r, i) => ((i && Date.parse(r.d) - Date.parse(rows[i - 1].d) <= 4 * 864e5) ? "L" : "M")
+    + X(r.d).toFixed(1) + "," + Y(r[key]).toFixed(1)).join(" ");
+  s += `<path d="${path("b")}" fill="none" stroke="var(--s2)" stroke-width="2"/><path d="${path("a")}" fill="none" stroke="var(--s1)" stroke-width="2"/>`;
+  const step = (W - L - R) / rows.length;
+  rows.forEach(r => { s += `<rect x="${X(r.d) - step / 2}" y="${T}" width="${Math.max(step, 2)}" height="${H - T - B}" fill="transparent" data-tip="${esc(o.tip(r))}"/>`; });
+  return s + `<text x="${L}" y="${H - 8}">${esc(rows[0].d)}</text><text x="${W - R}" y="${H - 8}" text-anchor="end">${esc(rows[rows.length - 1].d)}</text></svg>`;
+}
+function cbotHistory(base, v) {
+  const hist = (M.cbot_series || {})[base] || [];
+  const segs = v.contracts.filter(c => c.base === base && c.fix.fixed && c.first_date && c.cbot.consumed_mt > 0);
+  if (hist.length < 2) return '<p class="note">No stored CBOT history for this commodity.</p>';
+  const W = 1200, H = 300, L = 56, R = 16, T = 14, B = 30;
+  const ys = hist.map(h => h[1]).concat(segs.map(c => c.fix.value)), pad = (Math.max(...ys) - Math.min(...ys)) * 0.06 || 5;
+  const lo = Math.min(...ys) - pad, hi = Math.max(...ys) + pad, t0 = Date.parse(hist[0][0]), t1 = Date.parse(hist[hist.length - 1][0]), sp = (t1 - t0) || 1;
+  const X = d => L + Math.min(Math.max((Date.parse(d) - t0) / sp, 0), 1) * (W - L - R), Y = val => T + (1 - (val - lo) / (hi - lo)) * (H - T - B);
+  let s = `<div class="legend"><span><i style="background:var(--s1)"></i>Stored CBOT (${esc(segs[0] ? segs[0].fix.unit : "")})</span><span><i style="background:var(--good)"></i>Our fixing — market was above it while consumed</span><span><i style="background:var(--bad)"></i>Our fixing — market was below it</span></div>`;
+  s += `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="CBOT market vs fixings">`;
+  for (let k = 0; k <= 4; k++) { const val = lo + (hi - lo) * k / 4; s += `<line x1="${L}" x2="${W - R}" y1="${Y(val)}" y2="${Y(val)}" stroke="var(--grid)"/><text x="${L - 6}" y="${Y(val) + 4}" text-anchor="end">${fx(val, 0)}</text>`; }
+  s += `<path d="${hist.map((h, i) => (i ? "L" : "M") + X(h[0]).toFixed(1) + "," + Y(h[1]).toFixed(1)).join(" ")}" fill="none" stroke="var(--s1)" stroke-width="1.5"/>`;
+  segs.forEach(c => { const good = (c.cbot.usd || 0) >= 0, x0 = X(c.first_date), x1 = Math.max(X(c.last_date), x0 + 4), y = Y(c.fix.value);
+    const t = `<b>${esc(c.contract)}</b> · ${esc(c.fix.type)}<br>Fixed ${f2(c.fix.value)} · consumed ${esc(c.first_date)} → ${esc(c.last_date)}<br>Avg CBOT while consumed ${f2(c.cbot.avg_cbot)} → <b class="${sg(c.cbot.usd)}">${money("USD", c.cbot.usd)}</b>`;
+    s += `<g data-goto="${esc(c.id)}" style="cursor:pointer" data-tip="${esc(t)}"><rect x="${x0 - 3}" y="${y - 8}" width="${x1 - x0 + 6}" height="16" fill="transparent"/><line x1="${x0}" x2="${x1}" y1="${y}" y2="${y}" stroke="${good ? "var(--good)" : "var(--bad)"}" stroke-width="5" stroke-linecap="round"/></g>`; });
+  return s + `<text x="${L}" y="${H - 8}">${esc(hist[0][0])}</text><text x="${W - R}" y="${H - 8}" text-anchor="end">${esc(hist[hist.length - 1][0])}</text></svg>`;
+}
+function stacked100(rows) {
+  const parts = [["Imports compared vs local", "var(--s1)"], ["Imports not compared", "#86b6ef"], ["Local purchases (own tab)", "var(--s2)"], ["Unsourced (excluded)", "var(--muted)"]];
+  const W = 1200, L = 90, R = 16, rh = 30, T = 6, H = T + rows.length * rh + 6;
+  let s = `<div class="legend">${parts.map(([l, c]) => `<span><i style="background:${c}"></i>${esc(l)}</span>`).join("")}</div><svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Consumption by source">`;
+  rows.forEach((r, i) => { const y = T + i * rh, tot = r.vals.reduce((a, b) => a + b, 0) || 1; let x = L;
+    s += `<text class="lbl" x="${L - 8}" y="${y + 18}" text-anchor="end">${esc(r.base)}</text>`;
+    r.vals.forEach((val, j) => { const w = val / tot * (W - L - R); if (w <= 0) return;
+      s += `<rect x="${x}" y="${y + 4}" width="${Math.max(w - 2, 1)}" height="20" rx="3" fill="${parts[j][1]}" data-tip="${esc(`<b>${r.base}</b> · ${parts[j][0]}<br>${f0(val)} MT · ${fx(val / tot * 100, 0)}%`)}"/>`;
+      if (w > 60) s += `<text x="${x + 6}" y="${y + 18}" style="fill:#fff">${fx(val / tot * 100, 0)}%</text>`;
+      x += w; }); });
+  return s + "</svg>";
+}
+function renderTrends(v) {
+  const byM = {}, cbM = {};
+  v.sav.forEach(r => { const m = r.date.slice(0, 7), o = byM[m] = byM[m] || {s: 0, mt: 0, fin: 0}; o.s += r.saving; o.mt += r.mt; if (r.cif_basis === "Final CIF") o.fin += r.saving; });
+  v.cb.filter(r => r.assessable).forEach(r => { const m = r.date.slice(0, 7), o = cbM[m] = cbM[m] || {u: 0, mt: 0, adv: 0, mis: 0}; o.u += r.usd; o.mt += r.mt; if (r.usd > 0) o.adv += r.usd; else o.mis += r.usd; });
+  $("trMonth").innerHTML = vbars(Object.keys(byM).sort().map(m => ({label: monthName(m), value: byM[m].s,
+    tip: `<b>${monthName(m)}</b><br>${money("EGP", byM[m].s)} on ${f0(byM[m].mt)} MT (${f0(byM[m].s / byM[m].mt)} EGP/MT)<br>final CIF ${short(byM[m].fin)} · provisional ${short(byM[m].s - byM[m].fin)}`})), {aria: "Savings by month"});
+  $("trCbotMonth").innerHTML = vbars(Object.keys(cbM).sort().map(m => ({label: monthName(m), value: cbM[m].u, color: cbM[m].u >= 0 ? "var(--good)" : "var(--bad)",
+    tip: `<b>${monthName(m)}</b><br>Net ${money("USD", cbM[m].u)} on ${f0(cbM[m].mt)} MT<br>advantage ${money("USD", cbM[m].adv)} · missed ${money("USD", cbM[m].mis)}`})), {aria: "CBOT by month"});
+  const bases = [...new Set(v.sav.map(r => r.base))].sort();
+  const keep = (sel, list, pref) => { const cur = $(sel).value; $(sel).innerHTML = list.map(b => `<option>${esc(b)}</option>`).join(""); $(sel).value = list.includes(cur) ? cur : (list.includes(pref) ? pref : list[0] || ""); };
+  keep("trLocBase", bases, "CORN");
+  const lb = $("trLocBase").value, day = {};
+  v.sav.filter(r => r.base === lb).forEach(r => { const o = day[r.date] = day[r.date] || {mt: 0, c: 0, l: 0}; o.mt += r.mt; o.c += r.cost * r.mt; o.l += r.local * r.mt; });
+  $("trLocal").innerHTML = lines2(Object.keys(day).sort().map(d => ({d, a: day[d].c / day[d].mt, b: day[d].l / day[d].mt, mt: day[d].mt})),
+    {a: "Our landed cost (tonnes consumed that day)", b: "Local delivered price that day", aria: "Local vs landed",
+     tip: r => `<b>${r.d}</b> · ${f0(r.mt)} MT<br>Landed ${f2(r.a)} · local ${f2(r.b)}<br>Saving <b class="${sg(r.b - r.a)}">${f2(r.b - r.a)} EGP/MT</b>`});
+  const cbBases = Object.keys(M.cbot_series || {}).filter(b => v.contracts.some(c => c.base === b && c.fix.fixed)).sort();
+  keep("trCbBase", cbBases, "CORN");
+  $("trCbot").innerHTML = $("trCbBase").value ? cbotHistory($("trCbBase").value, v) : '<p class="note">No fixed contracts in this selection.</p>';
+  const agg = key => { const o = {}; v.sav.forEach(r => { const k = key(r) || "—", x = o[k] = o[k] || {s: 0, mt: 0}; x.s += r.saving; x.mt += r.mt; });
+    return Object.entries(o).sort((a, b) => b[1].s - a[1].s); };
+  const sup = agg(r => r.supplier).slice(0, 12);
+  $("trSupplier").innerHTML = hbar(sup.map(([k, x]) => ({label: k, value: x.s, sup: k, tip: `<b>${esc(k)}</b><br>${money("EGP", x.s)} on ${f0(x.mt)} MT · ${f0(x.s / x.mt)} EGP/MT`})), {aria: "Savings by supplier"});
+  const org = agg(r => (CI[r.contract_id] || {}).origin);
+  $("trOrigin").innerHTML = hbar(org.map(([k, x]) => ({label: k, value: x.s, tip: `<b>${esc(k)}</b><br>${money("EGP", x.s)} on ${f0(x.mt)} MT · ${f0(x.s / x.mt)} EGP/MT`})), {aria: "Savings by origin"});
+  const f = v.f;
+  $("trSource").innerHTML = stacked100(M.commodities.filter(c => !f.base || c.base === f.base).map(c => ({base: c.base,
+    vals: [c.priced_mt, Math.max(c.allocated_import_mt - c.priced_mt, 0), c.allocated_local_mt, c.excluded_mt]})));
+}
+
 // ── wiring ───────────────────────────────────────────────────────────
 function render() {
   const v = view(), K = kpis(v);
-  renderOverview(v, K); renderContracts(v); renderCbot(v); renderOpen(v);
+  renderOverview(v, K); renderContracts(v); renderCbot(v); renderOpen(v); renderTrends(v);
 }
 function showTab(p) { S.tab = p; document.querySelectorAll(".tab").forEach(t => t.classList.toggle("on", t.dataset.p === p));
   document.querySelectorAll(".panel").forEach(x => x.classList.toggle("on", x.id === "p-" + p)); }
@@ -647,6 +756,11 @@ $("fPreset").addEventListener("change", e => { const v = e.target.value, end = M
   $("fFrom").value = start; $("fTo").value = v ? end : ""; render(); });
 $("bReset").addEventListener("click", () => { ["fBase", "fOrigin", "fSupplier", "fQ", "fFrom", "fTo", "fPreset", "fOpen", "fFix", "fDQ"].forEach(id => $(id).value = ""); render(); });
 $("cbSel").addEventListener("change", e => { S.cb = e.target.value; renderCbot(view()); });
+$("trLocBase").addEventListener("change", () => renderTrends(view()));
+$("trCbBase").addEventListener("change", () => renderTrends(view()));
+$("trSupplier").addEventListener("click", e => { const g = e.target.closest("g[data-tip]"); if (!g) return;
+  const name = (g.getAttribute("data-tip").match(/<b>(.*?)<\/b>/) || [])[1]; if (!name) return;
+  const tmp = document.createElement("textarea"); tmp.innerHTML = name; $("fSupplier").value = tmp.value; showTab("contracts"); render(); });
 $("bMgmt").addEventListener("click", () => { const on = document.body.classList.toggle("mgmt"); $("bMgmt").textContent = on ? "Analyst View" : "Management View";
   if (on) { $("bReset").click(); showTab("overview"); } });
 $("bTheme").addEventListener("click", () => { const r = document.documentElement, dark = r.getAttribute("data-theme") === "dark" ||

@@ -24,7 +24,7 @@ SHEETS = ("Management Summary", "Contract Master", "Local Market Price History",
           "Daily Consumption Allocation", "Savings vs Local", "Contract Savings Summary",
           "CBOT Fixed vs Consumption", "Contract CBOT Performance",
           "Open Contracts vs Local Today", "Excluded & Missing Data", "Validation & Sources",
-          "Local Purchases")
+          "Local Purchases", "Monthly Trend")
 NAVY, GREEN, RED, GREY, AMBER = "1F3A5F", "1A7A1A", "B3261E", "6B7280", "9A6B00"
 M0, M2, PCT = "#,##0;[Red]-#,##0", "#,##0.00;[Red]-#,##0.00", "0.0%"
 FIRST = 5  # first data row of every table (header on row 4)
@@ -90,6 +90,13 @@ class Book:
         ws.conditional_formatting.add(ref, CellIsRule(operator="greaterThan", formula=["0"], font=Font(color=GREEN)))
 
 
+def place(b, name, after):
+    """Put sheet ``name`` straight after sheet ``after`` in the workbook."""
+    names = b.wb.sheetnames
+    b.wb.move_sheet(name, offset=(names.index(after) + 1) - names.index(name)
+                    if names.index(name) > names.index(after) else 0)
+
+
 def col(sheet, letter, last):
     return f"{q(SHEETS[sheet])}!${letter}${FIRST}:${letter}${last}"
 
@@ -106,6 +113,7 @@ def build_workbook(model, path):
     last["cs"] = _contract_savings(b, model, last)
     last["cb"] = _cbot(b, model)
     last["cp"] = _cbot_performance(b, model, last)
+    _monthly(b, model, last)
     last["op"] = _open(b, model)
     last["ex"] = _excluded(b, model)
     _validation(b, model, last)
@@ -232,7 +240,7 @@ def _allocations(b, m):
 
 def _local_purchases(b, m):
     ws = b.ws(11)
-    b.wb.move_sheet(ws, offset=-(len(SHEETS) - 1 - 4))
+    place(b, ws.title, SHEETS[3])
     rows = [a for a in m["allocations"] if a["type"] != "Import"]
     b.title(ws, "Local Purchases", "Tonnes supplied by local purchases, kept apart: never part of the import "
             "savings. Each is set against the local market price + freight observed for its day "
@@ -267,9 +275,9 @@ def _savings(b, m):
     heads = ["Contract Number", "Contract ID", "Supplier", "Commodity", "Consumption Date", "Consumed MT",
              "Imported Landed Cost EGP/MT", "Local Delivered Price EGP/MT", "Local Price Observation Date",
              "Quote Age (days)", "Local Price Record ID", "Savings EGP/MT", "Total Savings EGP", "CIF Basis",
-             "Allocation Method", "Data Quality Status", "Local Price Of", "Local x MT", "Base"]
+             "Allocation Method", "Data Quality Status", "Local Price Of", "Local x MT", "Base", "Month"]
     last = b.table(ws, "SavingsVsLocal", heads, len(rows),
-                   [22, 9, 16, 11, 12, 9, 12, 12, 12, 8, 16, 11, 13, 13, 13, 40, 11, 14, 8])
+                   [22, 9, 16, 11, 12, 9, 12, 12, 12, 8, 16, 11, 13, 13, 13, 40, 11, 14, 8, 9])
     for i, s in enumerate(rows):
         r = FIRST + i
         for j, v in enumerate([s["contract"], s["contract_id"], s["supplier"], s["commodity"], s["date"],
@@ -282,6 +290,7 @@ def _savings(b, m):
         b.put(ws, r, 17, s["local_key"])
         b.f(ws, r, 18, f"=H{r}*F{r}", s["local"] * s["mt"], M0)
         b.put(ws, r, 19, s["base"])
+        b.put(ws, r, 20, s["date"][:7])
     b.signs(ws, f"L{FIRST}:M{last}")
     return last
 
@@ -344,9 +353,9 @@ def _cbot(b, m):
              "CIF USD/MT", "Contract Premium", "Price Unit", "Conversion Factor", "CBOT Fixed", "Fixing Type",
              "Futures Month", "CBOT on Consumption Date", "Market Price Date", "Benchmark Status",
              "CBOT Difference", "Difference USD/MT", "Total Advantage / Missed USD", "FX",
-             "Total Advantage / Missed EGP", "Result", "CBOT x MT", "Base", "Series Month That Day"]
+             "Total Advantage / Missed EGP", "Result", "CBOT x MT", "Base", "Series Month That Day", "Month"]
     last = b.table(ws, "CbotVsConsumption", heads, len(rows),
-                   [22, 9, 16, 11, 12, 9, 9, 9, 10, 9, 10, 11, 9, 11, 12, 22, 10, 10, 13, 8, 14, 16, 12, 8, 20])
+                   [22, 9, 16, 11, 12, 9, 9, 9, 10, 9, 10, 11, 9, 11, 12, 22, 10, 10, 13, 8, 14, 16, 12, 8, 20, 9])
     for i, x in enumerate(rows):
         r = FIRST + i
         for j, v in enumerate([x["contract"], x["contract_id"], x["supplier"], x["commodity"], x["date"],
@@ -364,6 +373,7 @@ def _cbot(b, m):
         b.f(ws, r, 23, f'=IF(Q{r}="","",N{r}*F{r})', (x["cbot"] * x["mt"]) if x["assessable"] else None, M0)
         b.put(ws, r, 24, x["base"])
         b.put(ws, r, 25, x.get("series_month") or "")
+        b.put(ws, r, 26, x["date"][:7])
     b.signs(ws, f"Q{FIRST}:U{last}")
     return last
 
@@ -407,6 +417,45 @@ def _cbot_performance(b, m, last):
     b.signs(ws, f"N{FIRST}:R{end}")
     m["_cp_rows"] = rows
     return end
+
+
+# ── 6b. Monthly Trend ────────────────────────────────────────────────
+
+def _monthly(b, m, last):
+    ws = b.ws(12)
+    place(b, ws.title, SHEETS[7])
+    b.title(ws, "Monthly Trend", "Savings vs local and the CBOT benchmark by consumption month — SUMIFS over "
+            "Savings vs Local and CBOT Fixed vs Consumption (Month columns). The two are separate measures.")
+    months = sorted({s["date"][:7] for s in m["savings"]} | {x["date"][:7] for x in m["cbot"] if x["assessable"]})
+    heads = ["Month", "Savings vs Local EGP", "Compared MT", "Savings EGP/MT", "CBOT Net USD", "CBOT Advantage USD",
+             "CBOT Missed USD", "CBOT MT"]
+    end = b.table(ws, "MonthlyTrend", heads, len(months), [10, 16, 12, 12, 14, 15, 15, 11])
+    SV = lambda c_: col(4, c_, last["sv"])
+    CB = lambda c_: col(6, c_, last["cb"])
+    for i, mo in enumerate(months):
+        r = FIRST + i
+        sv = [s for s in m["savings"] if s["date"][:7] == mo]
+        cb = [x for x in m["cbot"] if x["assessable"] and x["date"][:7] == mo]
+        sav, mt = sum(s["saving"] for s in sv), sum(s["mt"] for s in sv)
+        b.put(ws, r, 1, mo)
+        b.f(ws, r, 2, f"=SUMIFS({SV('M')},{SV('T')},A{r})", sav, M0)
+        b.f(ws, r, 3, f"=SUMIFS({SV('F')},{SV('T')},A{r})", mt, M0)
+        b.f(ws, r, 4, f'=IF(C{r}=0,"",B{r}/C{r})', (sav / mt) if mt else None, M2)
+        b.f(ws, r, 5, f"=SUMIFS({CB('S')},{CB('Z')},A{r})", sum(x["usd"] for x in cb), M0)
+        b.f(ws, r, 6, f'=SUMIFS({CB("S")},{CB("Z")},A{r},{CB("S")},">0")', sum(x["usd"] for x in cb if x["usd"] > 0), M0)
+        b.f(ws, r, 7, f'=SUMIFS({CB("S")},{CB("Z")},A{r},{CB("S")},"<0")', sum(x["usd"] for x in cb if x["usd"] < 0), M0)
+        b.f(ws, r, 8, f"=SUMIFS({CB('F')},{CB('Z')},A{r})", sum(x["mt"] for x in cb), M0)
+    b.signs(ws, f"B{FIRST}:G{end}")
+    for title, col_i, anchor in (("Savings vs local by month, EGP", 2, "J4"), ("CBOT net result by month, USD", 5, "J22")):
+        ch = BarChart()
+        ch.title, ch.legend = title, None
+        ch.y_axis.number_format = '#,##0.0,,"M"' if col_i == 2 else '#,##0,"k"'
+        ch.x_axis.delete = False
+        ch.y_axis.delete = False
+        ch.add_data(Reference(ws, min_col=col_i, min_row=4, max_row=end), titles_from_data=True)
+        ch.set_categories(Reference(ws, min_col=1, min_row=FIRST, max_row=end))
+        ch.height, ch.width = 7.5, 16
+        ws.add_chart(ch, anchor)
 
 
 # ── 7. Open Contracts vs Local Today ─────────────────────────────────────
