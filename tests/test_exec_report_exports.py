@@ -109,6 +109,28 @@ class WorkbookTests(unittest.TestCase):
         cbot = sum(ws.cell(r, 5).value or 0 for r in range(5, ws.max_row + 1) if ws.cell(r, 1).value)
         self.assertAlmostEqual(cbot, self.m["kpis"]["cbot_net_usd"], places=4)
 
+    def test_transport_premium_storage_and_stale_columns(self):
+        def heads(name):
+            ws = self.raw[name]
+            return [ws.cell(4, c).value for c in range(1, ws.max_column + 1)]
+        sv = heads("Savings vs Local")
+        for h in ("Import Inland Transport EGP/MT", "Savings Excl. Transport EGP/MT", "Local Price Age Status", "Storage Start Date"):
+            self.assertIn(h, sv)
+        op = heads("Open Contracts vs Local Today")
+        for h in ("Storage Start Date", "Premium", "Futures Month", "Fixed CBOT", "Latest CBOT", "FX Basis", "Form 4 Status",
+                  "Imported Cost Excl. Transport EGP/MT", "Imported Cost Incl. Transport EGP/MT", "Local Price Age Status",
+                  "Total Potential Excl. Transport EGP", "Total Potential Incl. Transport EGP", "Totals Bucket"):
+            self.assertIn(h, op)
+        ws = self.wb["Open Contracts vs Local Today"]
+        col = {h: i + 1 for i, h in enumerate(op)}
+        conf = sum(ws.cell(r, col["Total Potential Incl. Transport EGP"]).value for r in range(5, ws.max_row + 1)
+                   if ws.cell(r, col["Totals Bucket"]).value == "Confirmed")
+        self.assertAlmostEqual(conf, self.m["kpis"]["open_fixed_potential_egp"], places=4)
+        cs = heads("Contract Savings Summary")
+        for h in ("Premium", "Futures Month", "Final CIF", "Pricing Status"):
+            self.assertTrue(any(h in (x or "") for x in cs), h)
+        self.assertTrue(any("Fixing Type" in (x or "") for x in cs))
+
     def test_validation_banner_and_checksum(self):
         ws = self.wb["Validation & Sources"]
         self.assertIn("MANAGEMENT-READY", ws["A3"].value)
@@ -138,7 +160,8 @@ class HtmlTests(unittest.TestCase):
     def test_dashboard_controls_exist(self):
         for hook in ('data-p="savings"', 'id="svT"', 'data-p="trends"', 'id="trMonth"', 'id="trLocal"', 'id="trCbot"', 'id="trSupplier"', 'id="trSource"', 'id="bMgmt"', 'id="bTheme"', 'id="bXlsx"', "window.print()", 'id="fFrom"', 'id="fDQ"',
                      'data-p="cbot"', 'data-p="open"', 'data-p="quality"', "@media print",
-                     'prefers-color-scheme:dark'):
+                     'prefers-color-scheme:dark', 'id="txSeg"', 'data-tx="side" class="on"', 'id="fAge"',
+                     'id="oBucket"', 'id="oRes"', "STALE", "N/A — Missing Source Data"):
             self.assertIn(hook, self.doc)
 
 

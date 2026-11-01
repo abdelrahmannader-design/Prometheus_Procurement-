@@ -48,7 +48,7 @@ MONTH_NAMES = {"JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6, "JUL"
 CODE_MONTHS = {v: k for k, v in MONTH_CODES.items()}
 
 DEFAULTS = {
-    "carry_days": 7,        # kept for reference; a local price stays in force until the next one
+    "carry_days": 5,        # a local price older than this is highlighted STALE (still in force)
     "max_carry_days": None, # None: no limit — no new local price means the price had not changed
     "cbot_max_age_days": 7, # a CBOT print older than this is not used
     "neutral_cbot": 1.0,    # |CBOT difference| below this (price units) is Neutral
@@ -315,6 +315,8 @@ def _local_status(age, opts):
         return None, f"Local quote {age} days old — older than {limit} days"
     if age == 0:
         return "Same-day observation", ""
+    if age > opts["carry_days"]:
+        return f"STALE — {age} days old (last price in force)", ""
     return f"Last price in force ({age} d)", ""
 
 
@@ -349,6 +351,24 @@ def build(inp, **overrides):
         if flag:
             c["fix"].update(fixed=False, indicative=c["fix"]["value"], value=None,
                             type="Check CIF / premium", status=flag)
+        c["pricing_class"] = pricing_class(c)
+
+    latest_fx = inp.get("latest_fx") or {}
+    latest_cbot = {}
+    for base, hist in series.items():
+        if len(hist):
+            spk = spikes.get(base, set())
+            pairs = [(d, v) for d, v in zip(hist.dates, hist.values) if d not in spk and d <= as_of]
+            if pairs:
+                latest_cbot[base] = pairs[-1]
+    # An open contract's cost is current, not historical: recorded CIF if fixed,
+    # else latest stored CBOT + its premium; Form 4 if recorded, else the latest
+    # daily FX. Its consumed tonnes and its open tonnes use the same cost.
+    for c in contracts.values():
+        c["current"] = current_cost(c, latest_fx, latest_cbot)
+        if c.get("is_open") and c["current"]["cost_incl"] is not None:
+            c["landed_egp_mt"] = c["current"]["cost_incl"]
+            c["fx"], c["fx_basis"] = c["current"]["fx"], c["current"]["fx_basis"]
 
     # ── allocations: every consumed tonne, attributed or excluded ────────
     allocations, by_contract = [], defaultdict(list)
@@ -418,11 +438,27 @@ def build(inp, **overrides):
             continue
         o = obs_index.get((loc.get("key"), obs_date.isoformat()), {})
         basis = REALIZED if c.get("cif_final") else PROVISIONAL
+        # Both transport scenarios, each side with its own inland transport:
+        # imports lose only their inland freight (ocean freight stays inside
+        # CIF); the local price loses the transport recorded on its quote.
+        freight = _n(c.get("freight_egp_mt"))
+        cost_excl = (cost - freight) if freight is not None else None
+        l_trans = _n(o.get("transport"))
+        l_price = _n(o.get("price"))
+        if l_price is None and l_trans is not None:
+            l_price = price - l_trans
+        sx = (l_price - cost_excl) if None not in (l_price, cost_excl) else None
         savings_rows.append(dict(base_row, cost=cost, local=price, local_date=obs_date.isoformat(),
                                  local_age=age, local_key=loc.get("key", ""),
                                  local_source=o.get("source_id", ""), local_status=status,
+                                 local_stale=age > opts["carry_days"],
                                  cif_basis=basis, saving_mt=price - cost,
                                  saving=(price - cost) * r["mt"],
+                                 freight=freight, cost_excl=cost_excl, local_excl=l_price,
+                                 local_transport=l_trans,
+                                 local_transport_default=bool(o.get("transport_default_used")),
+                                 saving_excl_mt=sx, saving_excl=(sx * r["mt"]) if sx is not None else None,
+                                 storage_start=c.get("storage_start") or "",
                                  quality=f"{r['method']} · {status} · {basis}"))
 
     # ── CBOT on each consumption day vs the contract's fixing ────────────
@@ -492,34 +528,69 @@ def build(inp, **overrides):
         consumed = _s(rows, lambda r: r["mt"])
         qty = _n(c.get("qty_mt")) or 0.0
         dl = _d(c.get("delivery_date"))
-        if dl is None or dl > as_of:
-            delivered, delivery = 0.0, (f"Not yet delivered (due {c.get('delivery_date')})"
-                                        if dl else "No delivery date — reconcile")
-            verified = dl is not None
-        elif c.get("receipt_logged"):
-            delivered, delivery, verified = qty, "Delivered — receipt logged", True
-        elif c.get("storage_start"):
-            delivered, delivery, verified = qty, "Delivered — storage start recorded", True
+        storage = _d(c.get("storage_start"))
+        flags = []
+        # Receipt evidence, strongest first: a logged receipt, then a recorded
+        # storage start. A delivery date alone is an expectation, not a receipt.
+        if c.get("receipt_logged"):
+            receipt = "Confirmed — receipt logged"
+        elif storage is not None:
+            receipt = "Storage start recorded"
+        elif dl is not None and dl > as_of:
+            receipt = f"Not yet delivered (due {c.get('delivery_date')})"
         else:
+            receipt = "Unverified — no storage start or receipt"
+        received = c.get("receipt_logged") or storage is not None
+        if dl is None and not received:
+            delivered, delivery, verified = 0.0, "No delivery date — reconcile", False
+        elif received:
+            delivered, delivery, verified = qty, f"Delivered — {receipt.lower()}", True
+        elif consumed > 1e-6:
+            # Consumption estimated for a contract with no storage start or receipt:
+            # kept as recorded history, flagged, never silently reclassified.
             delivered, delivery, verified = qty, "Delivery not verified — reconcile", False
+            flags.append("Consumption allocated but no storage start or receipt recorded — reconcile")
+        else:
+            delivered, delivery, verified = 0.0, receipt, False
+        if storage is not None and rows and _d(rows[0]["date"]) < storage:
+            flags.append(f"FIFO consumption starts {rows[0]['date']}, before the storage start {storage.isoformat()}")
+        if c.get("disc_missing"):
+            flags.append("Discharge not recorded on the contract")
+        if c.get("clr_missing"):
+            flags.append("Clearance not recorded on the contract")
         avail = _n(stock.get(c["id"])) or 0.0
         sr = sav_by.get(c["id"], [])
         smt = _s(sr, lambda r: r["mt"])
         sv = _s(sr, lambda r: r["saving"])
         lc = _s(sr, lambda r: r["local"] * r["mt"])
+        srx = [r for r in sr if r["saving_excl"] is not None]
+        smx = _s(srx, lambda r: r["mt"])
+        svx = _s(srx, lambda r: r["saving_excl"])
+        lcx = _s(srx, lambda r: r["local_excl"] * r["mt"])
+        ages = [r["local_age"] for r in sr if r["local_age"] is not None]
         cr = cb_by.get(c["id"], [])
         amt = _s([x for x in cr if x["assessable"]], lambda r: r["mt"])
         adv = _s([x for x in cr if x["assessable"]], lambda r: r["usd"])
         c.update({
             "delivered_mt": delivered, "outstanding_mt": qty - delivered, "consumed_mt": consumed,
             "available_mt": avail, "delivery_status": delivery, "delivery_verified": verified,
+            "receipt_status": receipt, "received": bool(received),
+            "storage_status": storage.isoformat() if storage else "Not recorded",
+            "flags": flags,
             "unreconciled_mt": round(delivered - consumed - avail, 6) if delivered else round(-consumed - avail, 6),
             "first_date": rows[0]["date"] if rows else "", "last_date": rows[-1]["date"] if rows else "",
             "hist": {"priced_mt": smt, "saving": sv if sr else None,
                      "saving_mt": (sv / smt) if smt else None,
                      "local_wavg": (lc / smt) if smt else None,
                      "saving_pct": (sv / lc * 100) if lc else None,
-                     "excluded_mt": consumed - smt},
+                     "excluded_mt": consumed - smt,
+                     "priced_mt_excl": smx, "saving_excl": svx if srx else None,
+                     "saving_excl_mt": (svx / smx) if smx else None,
+                     "local_excl_wavg": (lcx / smx) if smx else None,
+                     "cost_excl": _n(c.get("landed_egp_mt")) - _n(c.get("freight_egp_mt"))
+                     if None not in (_n(c.get("landed_egp_mt")), _n(c.get("freight_egp_mt"))) else None,
+                     "max_local_age": max(ages) if ages else None,
+                     "stale_mt": _s([r for r in sr if r["local_stale"]], lambda r: r["mt"])},
             "cbot": {"consumed_mt": _s(cr, lambda r: r["mt"]), "assessed_mt": amt,
                      "coverage": (amt / _s(cr, lambda r: r["mt"])) if cr and _s(cr, lambda r: r["mt"]) else None,
                      "avg_cbot": (_s([x for x in cr if x["assessable"]], lambda r: r["cbot"] * r["mt"]) / amt) if amt else None,
@@ -543,52 +614,41 @@ def build(inp, **overrides):
         if c["fix"]["eligible"] and not c["fix"]["fixed"] and consumed:
             exclude("Contract not fixed", c["fix"]["status"], contract=c["contract"], contract_id=c["id"],
                     commodity=c["base"], mt=consumed, source=c.get("source_id", ""))
-        if not verified and dl is not None and dl <= as_of:
-            exclude("Delivery not verified", "Delivery date passed but no receipt or storage start is "
-                    "recorded; left out of the confirmed open totals.", contract=c["contract"],
-                    contract_id=c["id"], commodity=c["base"], mt=qty, source=c.get("source_id", ""))
+        for fl in flags:
+            exclude("Reconciliation flag", fl, contract=c["contract"], contract_id=c["id"],
+                    commodity=c["base"], mt=consumed or qty, source=c.get("source_id", ""))
 
-    # ── open contracts vs local today ─────────────────────────────────────
+    # ── open contracts and unconsumed stock vs the latest local price ────
     open_rows = []
     for c in master:
-        unconsumed = c["available_mt"] + c["outstanding_mt"]
-        if not (c.get("is_open") or c["available_mt"] > 1e-6):
+        remaining = c["available_mt"] + c["outstanding_mt"]
+        if not (c.get("is_open") or c["available_mt"] > 1e-6 or (not c["received"] and remaining > 1e-6)):
             continue
-        local, landed = _n(c.get("local_today")), _n(c.get("landed_today"))
-        per = (local - landed) if None not in (local, landed) else None
-        fixed = (c.get("pricing_status") or "").upper() == "PRICED" and c.get("cif_final")
-        if per is None:
-            cls = "Not assessable"
-        elif not c["delivery_verified"] and c["outstanding_mt"] == 0:
-            cls = "Reconcile delivery"
-        else:
-            cls = "Fixed price" if fixed else "Indicative (unpriced)"
-        open_rows.append({
-            "contract_id": c["id"], "contract": c["contract"], "supplier": c.get("supplier", ""),
-            "commodity": c.get("commodity", ""), "base": c["base"], "status": c.get("status", ""),
-            "is_open": bool(c.get("is_open")), "qty_mt": c.get("qty_mt"), "delivered_mt": c["delivered_mt"],
-            "consumed_mt": c["consumed_mt"], "available_mt": c["available_mt"],
-            "outstanding_mt": c["outstanding_mt"], "pricing_status": c.get("pricing_status", ""),
-            "cif": _n(c.get("cif_today")), "cif_basis": c.get("cif_basis_today", ""),
-            "fx": _n(c.get("fx_today")), "fx_basis": c.get("fx_basis_today", ""),
-            "landed": landed, "local": local, "local_date": c.get("local_today_date", ""),
-            "local_key": c.get("local_today_key", ""), "saving_mt": per,
-            "potential": per * unconsumed if per is not None else None, "unconsumed_mt": unconsumed,
-            "class": cls, "delivery_status": c["delivery_status"],
-        })
+        open_rows.append(open_valuation(c, remaining, latest_fx, latest_cbot, as_of, opts))
 
     # ── roll-ups, KPIs, data quality, validation ─────────────────────────
     hist_total = _s(savings_rows, lambda r: r["saving"])
     hist_mt = _s(savings_rows, lambda r: r["mt"])
     assessed = [r for r in cbot_rows if r["assessable"]]
     fixed_open = [r for r in open_rows if r["class"] == "Fixed price"]
-    ind_open = [r for r in open_rows if r["class"] == "Indicative (unpriced)"]
+    # Everything else that can be valued is indicative or provisional: unpriced
+    # contracts, fixed CIF on provisional FX, contracts not yet received.
+    ind_open = [r for r in open_rows if r["class"] not in ("Fixed price", "Not assessable")
+                and "incomplete" not in r["class"]]
+    sx_rows = [r for r in savings_rows if r["saving_excl"] is not None]
     open_c = [c for c in master if c.get("is_open")]
     k = {
         "historical_saving_egp": hist_total, "historical_mt": hist_mt,
         "historical_saving_egp_mt": (hist_total / hist_mt) if hist_mt else None,
         "historical_final_egp": _s([r for r in savings_rows if r["cif_basis"] == REALIZED], lambda r: r["saving"]),
         "historical_provisional_egp": _s([r for r in savings_rows if r["cif_basis"] == PROVISIONAL], lambda r: r["saving"]),
+        "historical_saving_excl_egp": _s(sx_rows, lambda r: r["saving_excl"]),
+        "historical_mt_excl": _s(sx_rows, lambda r: r["mt"]),
+        "historical_saving_excl_egp_mt": (_s(sx_rows, lambda r: r["saving_excl"]) / _s(sx_rows, lambda r: r["mt"]))
+        if _s(sx_rows, lambda r: r["mt"]) else None,
+        "open_fixed_potential_excl_egp": _s(fixed_open, lambda r: r["potential_excl"]),
+        "open_indicative_potential_excl_egp": _s(ind_open, lambda r: r["potential_excl"]),
+        "open_not_received_mt": _s([r for r in open_rows if not r["received"]], lambda r: r["unconsumed_mt"]),
         "open_fixed_potential_egp": _s(fixed_open, lambda r: r["potential"]),
         "open_fixed_mt": _s(fixed_open, lambda r: r["unconsumed_mt"]),
         "open_indicative_potential_egp": _s(ind_open, lambda r: r["potential"]),
@@ -615,7 +675,17 @@ def build(inp, **overrides):
         exc = _s([e for e in excluded if e["commodity"] == base and e["category"] in
                   ("Unsourced consumption", "Cleared by stock count")], lambda e: e["mt"])
         mt = _s(sr, lambda r: r["mt"])
+        srx = [r for r in sr if r["saving_excl"] is not None]
+        mtx = _s(srx, lambda r: r["mt"])
         commodities.append({
+            "saving_excl_egp": _s(srx, lambda r: r["saving_excl"]), "priced_mt_excl": mtx,
+            "saving_excl_egp_mt": (_s(srx, lambda r: r["saving_excl"]) / mtx) if mtx else None,
+            "cost_wavg": (_s(sr, lambda r: r["cost"] * r["mt"]) / mt) if mt else None,
+            "local_wavg": (_s(sr, lambda r: r["local"] * r["mt"]) / mt) if mt else None,
+            "cost_excl_wavg": (_s(srx, lambda r: r["cost_excl"] * r["mt"]) / mtx) if mtx else None,
+            "local_excl_wavg": (_s(srx, lambda r: r["local_excl"] * r["mt"]) / mtx) if mtx else None,
+            "open_fixed_excl_egp": _s([r for r in orr if r["class"] == "Fixed price"], lambda r: r["potential_excl"]),
+            "open_indicative_excl_egp": _s([r for r in orr if r in ind_open], lambda r: r["potential_excl"]),
             "base": base, "contracts": sum(1 for c in master if c["base"] == base),
             "consumed_mt": consumed_total.get(base, 0.0),
             "allocated_import_mt": _s([a for a in alloc if a["type"] == "Import"], lambda r: r["mt"]),
@@ -623,7 +693,7 @@ def build(inp, **overrides):
             "excluded_mt": exc, "priced_mt": mt, "saving_egp": _s(sr, lambda r: r["saving"]),
             "saving_egp_mt": (_s(sr, lambda r: r["saving"]) / mt) if mt else None,
             "open_fixed_egp": _s([r for r in orr if r["class"] == "Fixed price"], lambda r: r["potential"]),
-            "open_indicative_egp": _s([r for r in orr if r["class"] == "Indicative (unpriced)"], lambda r: r["potential"]),
+            "open_indicative_egp": _s([r for r in orr if r in ind_open], lambda r: r["potential"]),
             "cbot_net_usd": _s(ar, lambda r: r["usd"]), "cbot_assessed_mt": _s(ar, lambda r: r["mt"]),
         })
 
@@ -637,8 +707,13 @@ def build(inp, **overrides):
         "missing_cbot_mt": _s([r for r in cbot_rows if not r["assessable"]], lambda r: r["mt"]),
         "missing_local": sum(1 for e in excluded if e["category"] == "No usable local price"),
         "missing_local_mt": _s([e for e in excluded if e["category"] == "No usable local price"], lambda e: e["mt"]),
-        "stale_local": 0,
-        "stale_local_mt": 0.0,
+        "stale_local": sum(1 for r in savings_rows if r["local_stale"]),
+        "stale_local_mt": _s([r for r in savings_rows if r["local_stale"]], lambda r: r["mt"]),
+        "stale_open": sum(1 for r in open_rows if r["local_stale"]),
+        "missing_storage": sum(1 for c in master if c["storage_status"] == "Not recorded"),
+        "not_received_open": sum(1 for r in open_rows if not r["received"]),
+        "provisional_fx_open": sum(1 for r in open_rows if r["fx_basis"].startswith("Latest")),
+        "reconciliation_flags": sum(len(c["flags"]) for c in master),
         "carried_local": sum(1 for r in savings_rows if r["local_status"].startswith("Last price")),
         "carried_local_mt": _s([r for r in savings_rows if r["local_status"].startswith("Last price")], lambda r: r["mt"]),
         "same_day_local": sum(1 for r in savings_rows if r["local_status"].startswith("Same")),
@@ -676,6 +751,154 @@ def build(inp, **overrides):
     model["management_ready"] = all(v["passed"] for v in model["validation"])
     model["checksum"] = checksum(model)
     return model
+
+
+def pricing_class(c):
+    """Fixed / Partially fixed / Unpriced / Flat-priced, as the record supports."""
+    f = c["fix"]
+    if not f["eligible"]:
+        return "Flat-priced" if f["type"] in ("Flat price", "") else "Not CBOT-based"
+    status = (c.get("pricing_status") or "").upper()
+    if status == "PRICED" or c.get("final_cif_over_lots"):
+        return "Fixed"
+    if status == "PARTIAL":
+        return "Partially fixed"
+    return "Unpriced"
+
+
+def current_cost(c, latest_fx, latest_cbot):
+    """CIF, FX and landed cost (with and without inland transport) as of today.
+
+    Fixed contracts keep their recorded CIF; an unpriced CBOT contract is
+    valued at the latest stored CBOT + its own premium (indicative, and a
+    proxy when the stored front month is not the contract's month). FX: the
+    recorded Form 4, else the contract's historical FX for a closed
+    contract, else the latest daily FX (provisional).
+    """
+    f, base = c["fix"], c["base"]
+    factor = f.get("factor")
+    premium = _n(c.get("premium"))
+    cif_rec = _n(c.get("cif_usd_mt"))
+    pclass = c["pricing_class"]
+    cbot_d, cbot_v = latest_cbot.get(base, (None, None))
+    cm = c.get("contract_month")
+    cbot_note = ""
+    if cbot_d is not None and cm:
+        series_m = series_month_label(cbot_d, base)
+        cbot_note = (f"Latest stored CBOT is on {cm['code']} (front month)" if series_m == cm["code"] else
+                     f"Indicative proxy: stored series is the front month ({series_m}), not the contract's "
+                     f"{cm['code']} — contract-month prices are not stored")
+    elif cbot_d is not None:
+        cbot_note = "Indicative proxy: no futures month recorded on the contract"
+    issues = []
+    if pclass == "Fixed" and cif_rec is not None:
+        cif, cif_basis = cif_rec, "Final CIF (fixed)"
+    elif pclass in ("Unpriced", "Partially fixed") and premium and factor and cbot_v is not None:
+        lots = c.get("pricing_lots") or []
+        lot_mt = sum(_n(x.get("qty_mt")) or 0 for x in lots if _n(x.get("cbot")) is not None)
+        qty = _n(c.get("qty_mt")) or 0.0
+        if lot_mt and qty:
+            lot_fix = sum((_n(x["qty_mt"]) or 0) * _n(x["cbot"]) for x in lots if _n(x.get("cbot")) is not None) / lot_mt
+            share = min(lot_mt / qty, 1.0)
+            cif = ((lot_fix + premium) * share + (cbot_v + premium) * (1 - share)) * factor
+            cif_basis = f"Indicative CIF: lots {lot_mt:,.0f} MT fixed + rest at latest CBOT + premium"
+        else:
+            cif = (cbot_v + premium) * factor
+            cif_basis = "Indicative CIF: (latest CBOT + premium) × factor"
+    elif cif_rec is not None:
+        cif, cif_basis = cif_rec, ("Provisional CIF (saved, not final)" if pclass != "Flat-priced" else "Contract CIF (flat price)")
+    else:
+        cif, cif_basis = None, "N/A — Missing Source Data (no CIF)"
+        issues.append("no CIF")
+    if not cif_basis.startswith("Indicative"):
+        cbot_note = "Not used — the contract's own CIF applies"
+    f4 = _n(c.get("form4_fx"))
+    if f4:
+        fx, fx_basis, fx_date = f4, "Form 4", c.get("form4_date") or ""
+    elif not c.get("is_open") and _n(c.get("fx")):
+        fx, fx_basis, fx_date = _n(c.get("fx")), f"{c.get('fx_basis') or 'Recorded FX'} (historical)", c.get("fx_date") or ""
+    elif _n(latest_fx.get("rate")):
+        fx, fx_basis, fx_date = _n(latest_fx["rate"]), "Latest market FX — provisional (Form 4 pending)", latest_fx.get("date", "")
+    else:
+        fx, fx_basis, fx_date = None, "N/A — Missing Source Data (no FX)", ""
+        issues.append("no FX")
+    disc, clr, freight = _n(c.get("discharge_egp_mt")) or 0.0, _n(c.get("clearance_egp_mt")) or 0.0, _n(c.get("freight_egp_mt"))
+    cost_excl = (cif * fx + disc + clr) if None not in (cif, fx) else None
+    cost_incl = (cost_excl + freight) if None not in (cost_excl, freight) else None
+    if freight is None:
+        issues.append("no inland transport on the contract")
+    return {"cif": cif, "cif_basis": cif_basis, "fx": fx, "fx_basis": fx_basis, "fx_date": fx_date,
+            "form4": f4, "cbot": cbot_v, "cbot_date": cbot_d.isoformat() if cbot_d else "", "cbot_note": cbot_note,
+            "disc": disc, "clr": clr, "freight": freight, "cost_excl": cost_excl, "cost_incl": cost_incl,
+            "issues": issues}
+
+
+def open_valuation(c, remaining, latest_fx, latest_cbot, as_of, opts):
+    """Current valuation of a contract's unconsumed tonnes against the latest local price."""
+    f, base = c["fix"], c["base"]
+    cm = c.get("contract_month")
+    pclass = c["pricing_class"]
+    cur = c.get("current") or current_cost(c, latest_fx, latest_cbot)
+    cif, cif_basis, fx, fx_basis, fx_date = cur["cif"], cur["cif_basis"], cur["fx"], cur["fx_basis"], cur["fx_date"]
+    disc, clr, freight, cost_excl, cost_incl = cur["disc"], cur["clr"], cur["freight"], cur["cost_excl"], cur["cost_incl"]
+    issues = list(cur["issues"])
+    f4, cbot_v, cbot_note = cur["form4"], cur["cbot"], cur["cbot_note"]
+    cbot_d = _d(cur["cbot_date"])
+    premium = _n(c.get("premium"))
+    l_price, l_trans = _n(c.get("local_today_price")), _n(c.get("local_today_transport"))
+    l_incl = _n(c.get("local_today"))
+    l_date = _d(c.get("local_today_date"))
+    age = (as_of - l_date).days if l_date else None
+    if l_price is None and None not in (l_incl, l_trans):
+        l_price = l_incl - l_trans
+    if l_incl is None and None not in (l_price, l_trans):
+        l_incl = l_price + l_trans
+    if l_date is None:
+        issues.append("no local price")
+    sx = (l_price - cost_excl) if None not in (l_price, cost_excl) else None
+    si = (l_incl - cost_incl) if None not in (l_incl, cost_incl) else None
+    if not c["received"]:
+        cls = "Current market valuation — not received"
+    elif issues or (sx is None and si is None):
+        cls = "Not assessable"
+    elif cif_basis.startswith("Final CIF") and not fx_basis.startswith("Latest"):
+        cls = "Fixed price"
+    elif cif_basis.startswith("Final CIF"):
+        cls = "Fixed CIF — provisional FX"
+    else:
+        cls = "Indicative (unpriced)"
+    if c["received"] and pclass == "Flat-priced" and cls == "Indicative (unpriced)":
+        cls = "Fixed price" if not fx_basis.startswith("Latest") else "Fixed CIF — provisional FX"
+    if issues and cls != "Not assessable":
+        cls += " · incomplete"
+    return {
+        "contract_id": c["id"], "contract": c["contract"], "supplier": c.get("supplier", ""),
+        "commodity": c.get("commodity", ""), "origin": c.get("origin", ""), "base": base,
+        "status": c.get("status", ""), "is_open": bool(c.get("is_open")), "qty_mt": c.get("qty_mt"),
+        "delivered_mt": c["delivered_mt"], "consumed_mt": c["consumed_mt"], "available_mt": c["available_mt"],
+        "outstanding_mt": c["outstanding_mt"], "unconsumed_mt": remaining,
+        "storage_start": c.get("storage_start") or "", "storage_status": c["storage_status"],
+        "receipt_status": c["receipt_status"], "received": c["received"],
+        "pricing_status": c.get("pricing_status", ""), "pricing_class": pclass,
+        "premium": premium, "unit": f.get("unit", ""), "futures": (cm or {}).get("code", c.get("futures_month", "")),
+        "fixed_cbot": f.get("value"), "fix_type": f.get("type", ""),
+        "latest_cbot": cbot_v, "latest_cbot_date": cbot_d.isoformat() if cbot_d else "", "cbot_note": cbot_note,
+        "cif": cif, "cif_basis": cif_basis, "fx": fx, "fx_basis": fx_basis, "fx_date": fx_date,
+        "form4_status": "Recorded" if f4 else ("Pending / Not recorded" if c.get("is_open") else "Not recorded"),
+        "discharge": disc, "clearance": clr, "freight": freight,
+        "disc_missing": bool(c.get("disc_missing")), "clr_missing": bool(c.get("clr_missing")),
+        "notes": [n for n, m in (("discharge not recorded — cost excludes it", c.get("disc_missing")),
+                                 ("clearance not recorded — cost excludes it", c.get("clr_missing"))) if m],
+        "cost_excl": cost_excl, "cost_incl": cost_incl, "landed": cost_incl,
+        "local_excl": l_price, "local_transport": l_trans, "local_incl": l_incl, "local": l_incl,
+        "local_date": l_date.isoformat() if l_date else "", "local_age": age,
+        "local_stale": age is not None and age > opts["carry_days"],
+        "local_key": c.get("local_today_key", ""),
+        "saving_excl_mt": sx, "saving_mt": si,
+        "potential_excl": sx * remaining if sx is not None else None,
+        "potential": si * remaining if si is not None else None,
+        "class": cls, "issues": issues, "delivery_status": c["delivery_status"],
+    }
 
 
 def assessment(c):
@@ -801,6 +1024,16 @@ def validate(m):
           f"CBOT net {k['cbot_net_usd']:,.0f} USD = daily rows = contract rows; open fixed potential "
           f"{k['open_fixed_potential_egp']:,.0f} EGP = open rows")
     limit = m["options"].get("max_carry_days")
+    both = [r for r in m["savings"] if r["saving_excl"] is not None]
+    lhs = sum(r["saving"] - r["saving_excl"] for r in both)
+    rhs = sum(((r["local_transport"] or 0.0) - (r["freight"] or 0.0)) * r["mt"] for r in both)
+    check("Transport scenarios reconcile", abs(lhs - rhs) < 1.0,
+          f"incl − excl savings {lhs:,.0f} EGP = (local transport − import inland freight) × MT {rhs:,.0f} EGP "
+          f"over {len(both)} day-rows; each side uses its own recorded transport")
+    o_fixed = sum((r["potential"] or 0.0) for r in m["open"] if r["class"] == "Fixed price")
+    check("Open totals reconcile to their rows", abs(o_fixed - k["open_fixed_potential_egp"]) < 0.5,
+          f"confirmed {k['open_fixed_potential_egp']:,.0f} EGP incl. transport; indicative / provisional "
+          f"{k['open_indicative_potential_egp']:,.0f} EGP kept separate; not-assessable rows excluded")
     unsupported = [r for r in m["savings"] if r["local_age"] is None or (limit is not None and r["local_age"] > limit)]
     check("Manager figures exclude unsupported inputs", not unsupported,
           "every local price used is a stored price in force on that day (the last one entered); days with no "

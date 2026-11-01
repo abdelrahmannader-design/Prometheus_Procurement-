@@ -42,12 +42,12 @@ _TEMPLATE = r"""<!doctype html>
 <style>
 :root{color-scheme:light;--page:#f4f5f7;--surface:#fcfcfb;--ink:#0b0b0b;--ink2:#52514e;--muted:#898781;--grid:#e1e0d9;--axis:#c3c2b7;
 --line:rgba(11,11,11,.10);--navy:#1f3a5f;--s1:#2a78d6;--s2:#eb6834;--good:#0ca30c;--good-ink:#006300;--bad:#d03b3b;--bad-ink:#b3261e;
---warn:#fab219;--warn-ink:#8a5a00;--chip:#eef1f5;--good-bg:rgba(12,163,12,.10);--bad-bg:rgba(208,59,59,.10);--warn-bg:rgba(250,178,25,.16);--hover:#f1f5fb}
+--warn:#fab219;--warn-ink:#8a5a00;--chip:#eef1f5;--good-bg:rgba(12,163,12,.10);--bad-bg:rgba(208,59,59,.10);--warn-bg:rgba(250,178,25,.16);--hover:#f1f5fb;--s1l:#9cc3f0;--badl:#eba3a3;--stale-bg:#ffe3b3;--stale-ink:#8a4b00}
 @media (prefers-color-scheme:dark){:root:where(:not([data-theme="light"])){color-scheme:dark;--page:#0d0d0d;--surface:#1a1a19;--ink:#f0efec;--ink2:#c3c2b7;--muted:#898781;
 --grid:#2c2c2a;--axis:#383835;--line:rgba(255,255,255,.10);--navy:#9cc3f5;--s1:#3987e5;--s2:#d95926;--good-ink:#0ca30c;--bad-ink:#e66767;--warn-ink:#fab219;
---chip:#26262a;--hover:#22252b}}
+--chip:#26262a;--hover:#22252b;--s1l:#2f5f99;--badl:#7d3434;--stale-bg:rgba(255,150,40,.24);--stale-ink:#ffb35c}}
 :root[data-theme="dark"]{color-scheme:dark;--page:#0d0d0d;--surface:#1a1a19;--ink:#f0efec;--ink2:#c3c2b7;--muted:#898781;--grid:#2c2c2a;--axis:#383835;
---line:rgba(255,255,255,.10);--navy:#9cc3f5;--s1:#3987e5;--s2:#d95926;--good-ink:#0ca30c;--bad-ink:#e66767;--warn-ink:#fab219;--chip:#26262a;--hover:#22252b}
+--line:rgba(255,255,255,.10);--navy:#9cc3f5;--s1:#3987e5;--s2:#d95926;--good-ink:#0ca30c;--bad-ink:#e66767;--warn-ink:#fab219;--chip:#26262a;--hover:#22252b;--s1l:#2f5f99;--badl:#7d3434;--stale-bg:rgba(255,150,40,.24);--stale-ink:#ffb35c}
 *{box-sizing:border-box}
 html,body{background:var(--page)}
 body{margin:0;font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;color:var(--ink)}
@@ -92,9 +92,8 @@ th.n,td.n{text-align:right;font-variant-numeric:tabular-nums}
 tr.row{cursor:pointer}tr.row:hover td{background:var(--hover)}
 tr.det>td{background:var(--page);padding:14px}
 tr.tot td{font-weight:700;border-top:2px solid var(--axis)}
-.panels{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
-@media(max-width:1100px){.panels{grid-template-columns:repeat(2,minmax(0,1fr))}}
-@media(max-width:640px){.panels{grid-template-columns:minmax(0,1fr)}}
+.panels{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(300px,100%),1fr));gap:10px}
+.pn dl{grid-template-columns:minmax(80px,max-content) minmax(0,1fr)!important}.pn dd{overflow-wrap:anywhere}.pn .stale,.pn .tag{white-space:normal}
 .pn{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:10px 12px}
 .pn h4{margin:0 0 6px;font-size:12.5px}
 .pn dl{display:grid;grid-template-columns:auto auto;gap:2px 10px;margin:0;font-size:12px}
@@ -120,6 +119,27 @@ body.mgmt .tech{display:none!important}
 body.mgmt .filters{display:none}
 body.mgmt .mgmt-only{display:block!important}
 .mgmt-only{display:none}
+.txbar{max-width:1440px;margin:10px auto 0;padding:0 24px;display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+@media(max-width:640px){.txbar{padding-left:16px;padding-right:16px}}
+.seg{display:inline-flex;flex-wrap:wrap;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--surface)}
+.seg button{border:0;background:transparent;color:var(--ink2);padding:6px 12px;font:inherit;font-size:12.5px;font-weight:600;cursor:pointer}
+.seg button.on{background:var(--navy);color:var(--surface)}
+.stale{display:inline-block;border-radius:6px;padding:1px 7px;font-size:11px;font-weight:700;background:var(--stale-bg);color:var(--stale-ink);white-space:nowrap}
+tr.stl>td{background:var(--stale-bg)}
+.nr{color:var(--warn-ink);font-weight:700}
+.nm{font-size:11px;white-space:normal}
+.kpi .v2{display:flex;flex-wrap:wrap;gap:4px 18px;margin:6px 0 2px}
+.kpi .v2 div{display:flex;flex-direction:column}.kpi .v2 small{font-size:11px;color:var(--ink2);font-weight:600}.kpi .v2 span{font-size:21px;font-weight:700}
+tr.rs>td:first-child{box-shadow:inset 4px 0 var(--good)}tr.rd>td:first-child{box-shadow:inset 4px 0 var(--bad)}
+tr.rp>td:first-child{box-shadow:inset 4px 0 var(--warn)}tr.rx>td:first-child{box-shadow:inset 4px 0 var(--muted)}
+tr.rd>td{background:var(--bad-bg)}tr.rx>td{color:var(--ink2)}
+.ofl{display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;margin:0 0 10px;font-size:12px;color:var(--ink2)}
+.ofl label{display:flex;flex-direction:column;gap:3px}
+.warnbox{border-left-color:var(--warn)}
+#tO td{white-space:nowrap}
+.detwrap{position:sticky;left:0;width:calc(100vw - 110px);max-width:1370px;white-space:normal}
+@media(max-width:640px){.detwrap{width:calc(100vw - 64px)}}
+.wf{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:8px}
 @media print{
  body{background:#fff}nav,.filters,.btn,.noprint{display:none!important}
  .panel{display:block!important}.tech-print-hide{display:none!important}
@@ -150,6 +170,11 @@ body.mgmt .mgmt-only{display:block!important}
  <button class="btn tech" id="bXlsx">Export view to Excel</button>
  <button class="btn" onclick="window.print()">Print / PDF</button>
 </nav>
+<div class="txbar" id="txbar">
+ <span class="note"><b>Transport basis</b></span>
+ <div class="seg" id="txSeg" role="group" aria-label="Transport scenario"><button data-tx="side" class="on">Side-by-side</button><button data-tx="incl">Including transportation</button><button data-tx="excl">Excluding transportation</button></div>
+ <span class="note" id="txNote"></span>
+</div>
 <div class="filters" id="filters">
  <label>Commodity<select id="fBase"></select></label>
  <label>Origin<select id="fOrigin"></select></label>
@@ -161,6 +186,7 @@ body.mgmt .mgmt-only{display:block!important}
  <label>Status<select id="fOpen"><option value="">Open &amp; closed</option><option value="open">Open</option><option value="closed">Closed</option></select></label>
  <label>CBOT fixing<select id="fFix"><option value="">All</option><option value="Recorded">Fixed — recorded lots</option><option value="Implied">Fixed — implied</option><option value="Not fixed">Not fixed (unpriced)</option><option value="other">Flat / not eligible</option></select></label>
  <label>Data quality<select id="fDQ"><option value="">All supported rows</option><option value="final">Final CIF only</option><option value="prov">Provisional CIF only</option><option value="same">Same-day local quote</option><option value="carry">Last local price in force</option></select></label>
+ <label>Local quote age<select id="fAge"><option value="">Any age</option><option value="stale-c">Contracts using quotes &gt; 5 days old</option><option value="stale-d">Only days on quotes &gt; 5 days old</option><option value="fresh">Only quotes 0–5 days old</option></select></label>
  <button class="btn" id="bReset">Reset</button>
 </div>
 <main>
@@ -185,7 +211,7 @@ body.mgmt .mgmt-only{display:block!important}
   <div class="card"><h2>Saving vs loss, by contract</h2><p class="sub">Every consumed contract, best to worst · EGP · click a bar to open it</p><div id="svChart" style="max-height:520px;overflow-y:auto"></div></div>
  </div>
  <div class="card"><h2>Savings vs local — contract by contract</h2>
-  <p class="sub">Daily saving = (local delivered price − our landed cost) × tonnes consumed that day. Click a contract to see its days, the local quote used and its date.</p>
+  <p class="sub">Daily saving = (local price − our landed cost) × tonnes consumed that day, including transport (local quote + local transport vs landed cost with inland freight) and excluding it (local quote vs landed cost without inland freight). Quotes more than 5 days old are shown <span class="stale">STALE</span>. Click a contract to see its days, the local quote used and its date.</p>
   <div class="tw"><table id="svT"></table></div></div>
 </section>
 
@@ -205,8 +231,13 @@ body.mgmt .mgmt-only{display:block!important}
 
 <section class="panel" id="p-open">
  <div class="kpis" id="okpis"></div>
- <div class="card"><h2>Landed cost vs today's local price</h2><p class="sub">Per contract with tonnes not yet consumed · EGP/MT · green = cheaper than local, red = dearer</p><div id="chOpen"></div></div>
- <div class="card"><h2>Open contracts and stock</h2><p class="sub">Fixed-price contracts are the confirmed potential; unpriced contracts are an indicative scenario totalled separately.</p><div class="tw"><table id="tO"></table></div></div>
+ <div class="card"><h2>Imported cost vs the latest local price</h2><p class="sub">Per contract with tonnes not yet consumed · EGP/MT · green = cheaper than local, red = dearer · hollow markers = excluding transport</p><div id="chOpen"></div></div>
+ <div class="card"><h2>Open contracts vs local — decision table</h2><p class="sub">Every contract with tonnes not yet consumed. Confirmed = fixed price with Form 4; indicative / provisional (unpriced CBOT, provisional FX, not yet received) is totalled separately; rows missing a source input show N/A and are left out of both totals. Click a column to sort, a row to open the contract.</p>
+  <div class="ofl"><label>Valuation<select class="ctl" id="oBucket"><option value="">All</option><option value="c">Confirmed</option><option value="i">Indicative / provisional</option><option value="x">Excluded — missing source data</option></select></label>
+   <label>Result<select class="ctl" id="oRes"><option value="">All</option><option value="save">Saving vs local</option><option value="dear">Dearer than local</option><option value="na">Not assessable</option></select></label>
+   <label>Tonnes<select class="ctl" id="oRem"><option value="">All rows</option><option value="rem">Only rows with tonnes remaining</option></select></label>
+   <span class="legend" style="margin:0"><span><i style="background:var(--good)"></i>Saving (confirmed)</span><span><i style="background:var(--warn)"></i>Provisional / indicative</span><span><i style="background:var(--bad)"></i>Dearer than local</span><span><i style="background:var(--muted)"></i>Not assessable</span></span></div>
+  <div class="tw"><table id="tO"></table></div></div>
 </section>
 
 <section class="panel" id="p-trends">
@@ -249,7 +280,7 @@ const short = v => { if (!isN(v)) return "—"; const a = Math.abs(v), s = v < 0
   return s + (a >= 1e6 ? fx(a / 1e6, 1) + "M" : a >= 1e3 ? fx(a / 1e3, 0) + "k" : fx(a, 0)); };
 const sum = (rows, fn) => rows.reduce((a, r) => { const v = fn(r); return isN(v) ? a + v : a; }, 0);
 const td = (v, f, col) => `<td class="n ${col ? sg(v) : ""}">${(f || f0)(v)}</td>`;
-const S = {tab: "overview", sort: {}, open: new Set(), dqTile: "", cb: ""};
+const S = {tab: "overview", sort: {}, open: new Set(), dqTile: "", cb: "", tx: "side"};
 const MATCHED = "Consumption-day CBOT";
 
 // ── filters ──────────────────────────────────────────────────────────
@@ -260,7 +291,7 @@ opts("fSupplier", [...new Set(C.map(c => c.supplier || "—"))].sort(), "All sup
 $("dlC").innerHTML = C.map(c => `<option value="${esc(c.contract)}">${esc(c.id)}</option>`).join("");
 function F() {
   return {base: $("fBase").value, origin: $("fOrigin").value, supplier: $("fSupplier").value, q: $("fQ").value.trim().toLowerCase(),
-          from: $("fFrom").value, to: $("fTo").value, open: $("fOpen").value, fix: $("fFix").value, dq: $("fDQ").value};
+          from: $("fFrom").value, to: $("fTo").value, open: $("fOpen").value, fix: $("fFix").value, dq: $("fDQ").value, age: $("fAge").value};
 }
 function contractOk(c, f) {
   if (f.base && c.base !== f.base) return false;
@@ -279,30 +310,109 @@ function dqOk(r, f) {
   if (f.dq === "final") return r.cif_basis === "Final CIF";
   if (f.dq === "prov") return r.cif_basis !== "Final CIF";
   if (f.dq === "same") return r.local_status.startsWith("Same");
-  if (f.dq === "carry") return r.local_status.startsWith("Last price");
+  if (f.dq === "carry") return !r.local_status.startsWith("Same");
   return true;
 }
+const CD = () => M.options.carry_days;
+const ageOk = (r, f) => f.age === "stale-d" ? !!r.local_stale : f.age === "fresh" ? !r.local_stale && isN(r.local_age) : true;
+const STALE_IDS = new Set(M.savings.filter(r => r.local_stale).map(r => r.contract_id).concat(M.open.filter(r => r.local_stale).map(r => r.contract_id)));
 function view() {
-  const f = F(), ids = new Set(C.filter(c => contractOk(c, f)).map(c => c.id));
-  const sav = M.savings.filter(r => ids.has(r.contract_id) && inDates(r.date, f) && dqOk(r, f));
+  const f = F(), ids = new Set(C.filter(c => contractOk(c, f) && (f.age !== "stale-c" || STALE_IDS.has(c.id))).map(c => c.id));
+  const sav = M.savings.filter(r => ids.has(r.contract_id) && inDates(r.date, f) && dqOk(r, f) && ageOk(r, f));
   const cb = M.cbot.filter(r => ids.has(r.contract_id) && inDates(r.date, f));
-  const op = M.open.filter(r => ids.has(r.contract_id));
+  const op = M.open.filter(r => ids.has(r.contract_id) && ageOk(r, f));
   return {f, ids, sav, cb, op, contracts: C.filter(c => ids.has(c.id)), filtered: Object.values(f).some(Boolean)};
 }
+// Transport scenarios: each side uses its own recorded transport; a row without the
+// input a scenario needs is left out of that scenario's totals (never counted as zero).
+const SCN = {
+  incl: {k: "incl", l: "Incl. transport", s: "incl. transport", h: "incl.", sav: r => r.saving, cost: r => r.cost, local: r => r.local, per: r => r.saving_mt,
+         ocost: o => o.cost_incl, olocal: o => o.local_incl, oper: o => o.saving_mt, pot: o => o.potential,
+         hs: "historical_saving_egp", hmt: "historical_mt", hpm: "historical_saving_egp_mt", of: "open_fixed_potential_egp", oi: "open_indicative_potential_egp", fin: "historical_final_egp", prov: "historical_provisional_egp"},
+  excl: {k: "excl", l: "Excl. transport", s: "excl. transport", h: "excl.", sav: r => r.saving_excl, cost: r => r.cost_excl, local: r => r.local_excl, per: r => r.saving_excl_mt,
+         ocost: o => o.cost_excl, olocal: o => o.local_excl, oper: o => o.saving_excl_mt, pot: o => o.potential_excl,
+         hs: "historical_saving_excl_egp", hmt: "historical_mt_excl", hpm: "historical_saving_excl_egp_mt", of: "open_fixed_potential_excl_egp", oi: "open_indicative_potential_excl_egp", fin: "historical_final_excl_egp", prov: "historical_provisional_excl_egp"}};
+const scs = () => S.tx === "side" ? [SCN.incl, SCN.excl] : [SCN[S.tx]];
+const PS = () => SCN[S.tx === "excl" ? "excl" : "incl"];
+function aggS(rows, sc) {
+  const r = rows.filter(x => isN(sc.sav(x))), mt = sum(r, x => x.mt), sv = sum(r, sc.sav);
+  return {mt, sav: r.length ? sv : null, per: mt ? sv / mt : null, cost: mt ? sum(r, x => sc.cost(x) * x.mt) / mt : null,
+          local: mt ? sum(r, x => sc.local(x) * x.mt) / mt : null, n: r.length};
+}
+const obucket = r => r.class === "Fixed price" ? "c" : (r.class === "Not assessable" || r.class.includes("incomplete")) ? "x" : "i";
 function kpis(v) {
-  const ass = v.cb.filter(r => r.assessable), fixed = v.op.filter(r => r.class === "Fixed price"), ind = v.op.filter(r => r.class === "Indicative (unpriced)");
+  const ass = v.cb.filter(r => r.assessable), fixed = v.op.filter(r => obucket(r) === "c"), ind = v.op.filter(r => obucket(r) === "i");
   const openC = v.contracts.filter(c => c.is_open), mt = sum(v.sav, r => r.mt), hs = sum(v.sav, r => r.saving);
+  const X = aggS(v.sav, SCN.excl), fin = v.sav.filter(r => r.cif_basis === "Final CIF"), prov = v.sav.filter(r => r.cif_basis !== "Final CIF");
   const fixedMt = sum(v.cb, r => r.mt), aMt = sum(ass, r => r.mt);
   return {historical_saving_egp: hs, historical_mt: mt, historical_saving_egp_mt: mt ? hs / mt : null,
-    historical_final_egp: sum(v.sav.filter(r => r.cif_basis === "Final CIF"), r => r.saving),
-    historical_provisional_egp: sum(v.sav.filter(r => r.cif_basis !== "Final CIF"), r => r.saving),
-    open_fixed_potential_egp: sum(fixed, r => r.potential), open_fixed_mt: sum(fixed, r => r.unconsumed_mt),
-    open_indicative_potential_egp: sum(ind, r => r.potential), open_indicative_mt: sum(ind, r => r.unconsumed_mt),
+    historical_final_egp: sum(fin, r => r.saving), historical_provisional_egp: sum(prov, r => r.saving),
+    historical_saving_excl_egp: X.sav || 0, historical_mt_excl: X.mt, historical_saving_excl_egp_mt: X.per,
+    historical_final_excl_egp: sum(fin, r => r.saving_excl), historical_provisional_excl_egp: sum(prov, r => r.saving_excl),
+    open_fixed_potential_egp: sum(fixed, r => r.potential), open_fixed_potential_excl_egp: sum(fixed, r => r.potential_excl), open_fixed_mt: sum(fixed, r => r.unconsumed_mt),
+    open_indicative_potential_egp: sum(ind, r => r.potential), open_indicative_potential_excl_egp: sum(ind, r => r.potential_excl), open_indicative_mt: sum(ind, r => r.unconsumed_mt),
+    open_not_received_mt: sum(v.op.filter(r => !r.received), r => r.unconsumed_mt),
     open_outstanding_mt: sum(openC.filter(c => c.delivery_verified), c => c.outstanding_mt),
     open_available_mt: sum(openC, c => c.available_mt), open_contracts: openC.length,
     cbot_advantage_usd: sum(ass.filter(r => r.usd > 0), r => r.usd), cbot_missed_usd: sum(ass.filter(r => r.usd < 0), r => r.usd),
     cbot_net_usd: sum(ass, r => r.usd), cbot_net_egp: sum(ass, r => r.egp), cbot_assessed_mt: aMt,
-    cbot_fixed_consumed_mt: fixedMt, cbot_coverage: fixedMt ? aMt / fixedMt : null, contracts: v.contracts.length};
+    cbot_fixed_consumed_mt: fixedMt, cbot_coverage: fixedMt ? aMt / fixedMt : null, contracts: v.contracts.length,
+    stale_rows: v.sav.filter(r => r.local_stale).length, stale_mt: sum(v.sav.filter(r => r.local_stale), r => r.mt)};
+}
+
+// ── cells shared by the tables ───────────────────────────────────────
+const NA_ = '<span class="na nm">N/A — Missing Source Data</span>';
+const flatC = pc => pc === "Flat-priced" || pc === "Not CBOT-based";
+function ageBadge(age) {
+  if (!isN(age)) return '<span class="tag bad">No local quote — missing data</span>';
+  if (age > CD()) return `<span class="stale">Local Market Price — ${age} Days Old — STALE</span>`;
+  return `<span class="note">${age === 0 ? "Same day" : age + (age === 1 ? " day old" : " days old")}</span>`;
+}
+function receiptTag(rs) {
+  rs = rs || "";
+  if (rs.startsWith("Confirmed")) return '<span class="tag good" title="Receipt logged">Receipt confirmed</span>';
+  if (rs.startsWith("Storage start")) return '<span class="tag act" title="Storage start recorded; no receipt logged">Storage date recorded</span>';
+  if (rs.startsWith("Not yet")) return `<span class="tag pot">${esc(rs)}</span>`;
+  return `<span class="tag bad" title="${esc(rs)}">Unverified — not received</span>`;
+}
+const storageCell = x => (x.storage_start ? esc(x.storage_start) : '<span class="nr">Not recorded</span>') + "<br>" + receiptTag(x.receipt_status);
+function pTag(pc) {
+  const cls = {"Fixed": "good", "Partially fixed": "pot", "Unpriced": "pot", "Flat-priced": "act"}[pc] || "";
+  return `<span class="tag ${cls}">${esc(pc || "—")}</span>`;
+}
+const futCode = c => c.contract_month ? c.contract_month.code + (c.contract_month.inferred ? " (year inferred)" : "") : (c.futures_month || "—");
+function fixCell(c) {
+  const f = c.fix;
+  if (f.fixed && isN(f.value)) {
+    const lab = f.type === "Implied" ? "Implied CBOT Fixing" : f.type === "Recorded" ? "Recorded fixing (lots)" : f.type;
+    return `${f2(f.value)} <span class="note">${esc(f.unit)}</span><br><span class="tag ${f.type === "Implied" ? "pot" : "act"}" title="${esc(f.status || "")}">${esc(lab)}</span>`;
+  }
+  if (flatC(c.pricing_class)) return '<span class="note">— flat price</span>';
+  return `<span class="tag pot">Not fixed</span>${isN(f.indicative) ? `<br><span class="note">indicative ${f2(f.indicative)}</span>` : ""}`;
+}
+function cifCell(c) {
+  if (!isN(c.cif_usd_mt)) return NA_;
+  const f = c.fix, t = f.fixed && isN(f.value) && isN(c.premium) && isN(f.factor) ? `Final CIF = (CBOT ${f2(f.value)} + premium ${f2(c.premium)}) × ${f.factor} = ${f2((f.value + c.premium) * f.factor)}` : (c.cif_final ? "Contract CIF" : "Provisional CIF");
+  return `<span title="${esc(t)}">${f2(c.cif_usd_mt)}</span><br>${c.cif_final ? '<span class="tag good">Final CIF</span>' : '<span class="tag pot">Provisional CIF</span>'}`;
+}
+const premCell = (prem, unit, pc) => flatC(pc) ? '<span class="note">— flat price</span>' : isN(prem) ? `${f2(prem)} <span class="note">${esc(unit || "")}</span>` : NA_;
+const pdate = c => c.fix.pricing_date || c.pricing_date || "";
+const COL = {
+  storage: {h: "Storage start", v: c => c.storage_start || "", html: storageCell},
+  premium: {h: "Premium", n: 1, v: c => flatC(c.pricing_class) ? null : c.premium, html: c => premCell(c.premium, c.fix.unit || c.premium_label, c.pricing_class)},
+  futures: {h: "Futures month", v: futCode},
+  fixing: {h: "CBOT fixing", n: 1, v: c => c.fix.value, html: fixCell},
+  cif: {h: "Final CIF $/MT", n: 1, v: c => c.cif_usd_mt, html: cifCell},
+  pdate: {h: "Pricing / fixing date", v: pdate, html: c => pdate(c) ? esc(pdate(c)) : (c.fix.fixed ? '<span class="note">Not recorded</span>' : "—")},
+  pstatus: {h: "Pricing status", v: c => c.pricing_class, html: c => pTag(c.pricing_class)}};
+function cell(col, r) {
+  const val = col.v(r);
+  if (col.html) return `<td class="${col.n ? "n" : ""}">${col.html(r, val)}</td>`;
+  if (col.n) return `<td class="n ${col.col ? sg(val) : ""}">${!isN(val) && col.na ? NA_ : (col.f || f0)(val)}</td>`;
+  return `<td>${esc(val)}</td>`;
+}
+function totRow(cols, rows, label) {
+  return `<tr class="tot">` + cols.map((c, i) => i === 0 ? `<td>${label}</td>` : c.tot ? td(c.tot(rows), c.tf || f0, c.col) : "<td></td>").join("") + "</tr>";
 }
 
 // ── tooltip ──────────────────────────────────────────────────────────
@@ -319,27 +429,42 @@ document.addEventListener("mousemove", e => {
 // ── charts ───────────────────────────────────────────────────────────
 function hbar(items, o) {
   if (!items.length) return '<p class="note">Nothing to show for this selection.</p>';
-  const W = 640, L = o.left || 150, R = 70, bh = 18, gap = 8, T = 6;
-  const H = T + items.length * (bh + gap) + 18;
-  const vals = items.map(i => i.value), mx = Math.max(0, ...vals), mn = Math.min(0, ...vals), sp = (mx - mn) || 1;
+  // value2 (when present) is the excluding-transport bar drawn under the including one.
+  const two = items.some(i => isN(i.value2));
+  const W = 640, L = o.left || 150, R = 70, bh = two ? 12 : 18, gap = 8, T = 6, rowH = two ? bh * 2 + 3 : bh;
+  const H = T + items.length * (rowH + gap) + 18;
+  const vals = items.flatMap(i => isN(i.value2) ? [i.value, i.value2] : [i.value]), mx = Math.max(0, ...vals), mn = Math.min(0, ...vals), sp = (mx - mn) || 1;
   const X = v => L + (v - mn) / sp * (W - L - R);
-  let s = `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="${esc(o.aria || "bar chart")}">`;
+  const bar = (val, y, col, inner) => { const x0 = X(Math.min(0, val)), w = Math.max(Math.abs(X(val) - X(0)), val ? 2 : 0), by = y + bh - (two ? 2 : 5);
+    let t = `<rect x="${x0}" y="${y}" width="${w}" height="${bh}" rx="${two ? 3 : 4}" fill="${col}"/>`;
+    const txt = esc(o.fmt ? o.fmt(val) : short(val));
+    if (val >= 0) t += `<text class="lbl" x="${X(val) + 5}" y="${by}">${txt}</text>`;
+    else if (w > 56) t += `<text x="${x0 + 6}" y="${by}" style="fill:${inner}">${txt}</text>`;
+    else t += `<text class="lbl" x="${X(0) + 5}" y="${by}">${txt}</text>`;
+    return t; };
+  let s = two ? `<div class="legend"><span><i style="background:var(--s1)"></i>Incl. transport</span><span><i style="background:var(--s1l)"></i>Excl. transport</span></div>` : "";
+  s += `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="${esc(o.aria || "bar chart")}">`;
   s += `<line x1="${X(0)}" x2="${X(0)}" y1="${T - 2}" y2="${H - 16}" stroke="var(--axis)"/>`;
   items.forEach((it, i) => {
-    const y = T + i * (bh + gap), x0 = X(Math.min(0, it.value)), w = Math.max(Math.abs(X(it.value) - X(0)), it.value ? 2 : 0);
+    const y = T + i * (rowH + gap);
     const col = it.color || (it.value < 0 ? "var(--bad)" : "var(--s1)");
     const lab = it.label.length > 24 ? it.label.slice(0, 23) + "…" : it.label;
-    s += `<text class="lbl" x="${L - 8}" y="${y + bh - 5}" text-anchor="end">${esc(lab)}</text>`;
+    s += `<text class="lbl" x="${L - 8}" y="${y + rowH / 2 + 4}" text-anchor="end">${esc(lab)}</text>`;
     s += `<g ${it.id ? `data-goto="${esc(it.id)}" style="cursor:pointer"` : ""} data-tip="${esc(it.tip || "")}">`;
-    s += `<rect x="${L - 4}" y="${y - 2}" width="${W - L}" height="${bh + 4}" fill="transparent"/>`;
-    s += `<rect x="${x0}" y="${y}" width="${w}" height="${bh}" rx="4" fill="${col}"/></g>`;
-    const txt = esc(o.fmt ? o.fmt(it.value) : short(it.value));
-    if (it.value >= 0) s += `<text class="lbl" x="${X(it.value) + 5}" y="${y + bh - 5}">${txt}</text>`;
-    else if (w > 56) s += `<text x="${x0 + 6}" y="${y + bh - 5}" style="fill:#fff">${txt}</text>`;
-    else s += `<text class="lbl" x="${X(0) + 5}" y="${y + bh - 5}">${txt}</text>`;
+    s += `<rect x="${L - 4}" y="${y - 2}" width="${W - L}" height="${rowH + 4}" fill="transparent"/>`;
+    s += bar(it.value, y, col, "#fff");
+    if (isN(it.value2)) s += bar(it.value2, y + bh + 3, it.value2 < 0 ? "var(--badl)" : "var(--s1l)", "var(--ink)");
+    s += "</g>";
   });
   return s + "</svg>";
 }
+// Chart items for grouped rows, one bar per transport scenario shown.
+function scItem(label, rows, extra) {
+  const L_ = scs(), A = L_.map(sc => aggS(rows, sc));
+  return Object.assign({label, value: A[0].sav || 0, value2: A[1] ? (A[1].sav || 0) : undefined,
+    tip: `<b>${esc(label)}</b><br>` + L_.map((sc, i) => `${sc.l}: ${money("EGP", A[i].sav)} on ${f0(A[i].mt)} MT (${isN(A[i].per) ? f0(A[i].per) : "—"} EGP/MT)`).join("<br>")}, extra || {});
+}
+function groupBy(rows, key) { const o = {}; rows.forEach(r => { const k = key(r) || "—"; (o[k] = o[k] || []).push(r); }); return o; }
 
 function cbotChart(c, rows) {
   rows = rows.filter(r => isN(r.cbot)).sort((a, b) => a.date < b.date ? -1 : 1);
@@ -380,34 +505,38 @@ function dailyBars(rows) {
   return s + "</svg>";
 }
 
-function waterfall(c) {
-  const h = c.hist; if (!isN(h.saving) || !h.priced_mt) return '<p class="note">No supported comparison against local for this contract.</p>';
-  const landed = c.landed_egp_mt * h.priced_mt, local = h.local_wavg * h.priced_mt, sav = h.saving;
+function waterfall(rows, sc) {
+  const A = aggS(rows, sc);
+  if (!isN(A.sav) || !A.mt) return `<p class="note">No supported comparison against local (${esc(sc.s)}) for this contract.</p>`;
+  const landed = A.cost * A.mt, local = A.local * A.mt, sav = A.sav;
   const bars = [["Imported landed cost", 0, landed, "var(--s1)"], [sav >= 0 ? "Local savings" : "Loss vs local", landed, landed + sav, sav >= 0 ? "var(--good)" : "var(--bad)"], ["Comparable local cost", 0, local, "var(--muted)"]];
   const W = 520, H = 190, L = 56, T = 12, B = 34, mx = Math.max(landed, local) * 1.06, bw = 90;
   const Y = v => T + (1 - v / mx) * (H - T - B);
-  let s = `<svg viewBox="0 0 ${W} ${H}" width="100%" style="max-width:560px" role="img" aria-label="Savings waterfall">`;
+  let s = `<p class="note" style="margin:0">${esc(sc.l)}</p><svg viewBox="0 0 ${W} ${H}" width="100%" style="max-width:560px" role="img" aria-label="Savings waterfall ${esc(sc.s)}">`;
   [0, mx / 2, mx].forEach(v => { s += `<line x1="${L}" x2="${W - 10}" y1="${Y(v)}" y2="${Y(v)}" stroke="var(--grid)"/><text x="${L - 6}" y="${Y(v) + 4}" text-anchor="end">${short(v)}</text>`; });
   bars.forEach(([lab, a, b2, col], i) => { const x = L + 24 + i * (bw + 50), y = Y(Math.max(a, b2)), hh = Math.max(Math.abs(Y(a) - Y(b2)), 1);
-    s += `<rect x="${x}" y="${y}" width="${bw}" height="${hh}" rx="4" fill="${col}" data-tip="${esc(`<b>${lab}</b><br>EGP ${f0(b2 - a)}<br>${f0(h.priced_mt)} MT compared`)}"/>`;
+    s += `<rect x="${x}" y="${y}" width="${bw}" height="${hh}" rx="4" fill="${col}" data-tip="${esc(`<b>${lab}</b> · ${sc.s}<br>EGP ${f0(b2 - a)}<br>${f0(A.mt)} MT compared`)}"/>`;
     s += `<text class="lbl" x="${x + bw / 2}" y="${H - 18}" text-anchor="middle">${esc(lab)}</text><text class="lbl" x="${x + bw / 2}" y="${y - 4}" text-anchor="middle">${short(b2 - a)}</text>`; });
   return s + "</svg>";
 }
 
 function dumbbell(rows) {
-  rows = rows.filter(r => isN(r.landed) && isN(r.local));
-  if (!rows.length) return '<p class="note">No open contract has both a landed cost and a local price.</p>';
-  const W = 1200, L = 240, R = 90, rh = 30, T = 18, H = T + rows.length * rh + 22;
-  const vals = rows.flatMap(r => [r.landed, r.local]), lo = Math.min(...vals) * 0.98, hi = Math.max(...vals) * 1.02;
+  const L_ = scs(), P_ = PS();
+  rows = rows.filter(r => L_.some(sc => isN(sc.ocost(r)) && isN(sc.olocal(r))));
+  if (!rows.length) return '<p class="note">No open contract has both an imported cost and a local price.</p>';
+  const W = 1200, L = 250, R = 150, rh = L_.length === 2 ? 40 : 30, T = 18, H = T + rows.length * rh + 22;
+  const vals = rows.flatMap(r => L_.flatMap(sc => [sc.ocost(r), sc.olocal(r)])).filter(isN), lo = Math.min(...vals) * 0.98, hi = Math.max(...vals) * 1.02;
   const X = v => L + (v - lo) / (hi - lo) * (W - L - R);
-  let s = `<div class="legend"><span><i style="background:var(--s1)"></i>Our landed cost</span><span><i style="background:var(--muted)"></i>Local delivered price today</span></div><svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Landed vs local">`;
-  rows.forEach((r, i) => { const y = T + i * rh + 8, good = r.local >= r.landed;
-    s += `<text class="lbl" x="${L - 10}" y="${y + 4}" text-anchor="end">${esc((r.contract + " · " + r.class).slice(0, 34))}</text>`;
-    s += `<g data-tip="${esc(`<b>${r.contract}</b> (${r.class})<br>Landed ${f2(r.landed)} vs local ${f2(r.local)} (${r.local_date})<br>${f2(r.saving_mt)} EGP/MT × ${f0(r.unconsumed_mt)} MT = <b>${money("EGP", r.potential)}</b>`)}">`;
-    s += `<rect x="${L}" y="${y - 12}" width="${W - L - R}" height="24" fill="transparent"/>`;
-    s += `<line x1="${X(r.landed)}" x2="${X(r.local)}" y1="${y}" y2="${y}" stroke="${good ? "var(--good)" : "var(--bad)"}" stroke-width="3"/>`;
-    s += `<circle cx="${X(r.landed)}" cy="${y}" r="6" fill="var(--s1)" stroke="var(--surface)" stroke-width="2"/><circle cx="${X(r.local)}" cy="${y}" r="6" fill="var(--muted)" stroke="var(--surface)" stroke-width="2"/></g>`;
-    s += `<text class="lbl" x="${W - R + 8}" y="${y + 4}">${short(r.potential)}</text>`; });
+  let s = `<div class="legend"><span><i style="background:var(--s1)"></i>Our imported cost</span><span><i style="background:var(--muted)"></i>Latest local price</span>${L_.length === 2 ? '<span><i style="background:transparent;border:2px solid var(--muted)"></i>Hollow = excluding transport</span>' : ""}</div><svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Imported cost vs local">`;
+  rows.forEach((r, i) => { const y0 = T + i * rh + 8;
+    s += `<text class="lbl" x="${L - 10}" y="${y0 + (L_.length === 2 ? 9 : 4)}" text-anchor="end">${esc((r.contract + " · " + r.class).slice(0, 36))}</text>`;
+    L_.forEach((sc, j) => { const a = sc.ocost(r), b = sc.olocal(r); if (!isN(a) || !isN(b)) return;
+      const y = y0 + j * 16, good = b >= a, hollow = sc.k === "excl" && L_.length === 2;
+      s += `<g data-tip="${esc(`<b>${r.contract}</b> (${r.class}) · ${sc.s}<br>Imported ${f2(a)} vs local ${f2(b)} (${r.local_date || "no date"})<br>${f2(sc.oper(r))} EGP/MT × ${f0(r.unconsumed_mt)} MT = <b>${money("EGP", sc.pot(r))}</b><br>${esc(r.cif_basis)} · ${esc(r.fx_basis)}`)}">`;
+      s += `<rect x="${L}" y="${y - 8}" width="${W - L - R}" height="16" fill="transparent"/>`;
+      s += `<line x1="${X(a)}" x2="${X(b)}" y1="${y}" y2="${y}" stroke="${good ? "var(--good)" : "var(--bad)"}" stroke-width="3"/>`;
+      s += `<circle cx="${X(a)}" cy="${y}" r="6" fill="${hollow ? "var(--surface)" : "var(--s1)"}" stroke="${hollow ? "var(--s1)" : "var(--surface)"}" stroke-width="2"/><circle cx="${X(b)}" cy="${y}" r="6" fill="${hollow ? "var(--surface)" : "var(--muted)"}" stroke="${hollow ? "var(--muted)" : "var(--surface)"}" stroke-width="2"/></g>`; });
+    s += `<text class="lbl" x="${W - R + 8}" y="${y0 + (L_.length === 2 ? 9 : 4)}">${L_.map(sc => short(sc.pot(r))).join(" / ")}${obucket(r) === "c" ? "" : " · prov."}</text>`; });
   return s + `<text x="${L}" y="${H - 4}">${f0(lo)}</text><text x="${W - R}" y="${H - 4}" text-anchor="end">${f0(hi)} EGP/MT</text></svg>`;
 }
 
@@ -415,40 +544,46 @@ function dumbbell(rows) {
 function kcard(label, val, txt, tag, sub) {
   return `<div class="kpi"><div class="l"><span>${esc(label)}</span>${tag}</div><div class="v ${sg(val)}">${txt}</div><div class="s">${sub}</div></div>`;
 }
+// One card, one figure per transport scenario shown.
+function kcardS(label, f, tag, sub) {
+  const L_ = scs();
+  if (L_.length === 1) { const [val, txt] = f(L_[0]); return kcard(`${label} · ${L_[0].s}`, val, txt, tag, sub); }
+  return `<div class="kpi"><div class="l"><span>${esc(label)}</span>${tag}</div><div class="v2">${L_.map(sc => { const [val, txt] = f(sc);
+    return `<div><small>${esc(sc.l)}</small><span class="${sg(val)}">${txt}</span></div>`; }).join("")}</div><div class="s">${sub}</div></div>`;
+}
 function renderOverview(v, K) {
   window.__K = K;
-  const A = '<span class="tag act">Actual · FIFO estimated</span>', P = '<span class="tag pot">Potential</span>', B = '<span class="tag ben">Benchmark</span>';
+  const A = '<span class="tag act">Actual · FIFO estimated</span>', P = '<span class="tag pot">Potential</span>', B = '<span class="tag ben">Benchmark</span>', L_ = scs(), P_ = PS();
   $("kpis").innerHTML = [
-    kcard("Historical savings vs local", K.historical_saving_egp, money("EGP", K.historical_saving_egp), A,
-      `${f0(K.historical_mt)} MT · ${isN(K.historical_saving_egp_mt) ? f0(K.historical_saving_egp_mt) : "—"} EGP/MT · final CIF ${short(K.historical_final_egp)}, provisional ${short(K.historical_provisional_egp)}`),
-    kcard("Open contracts potential vs local", K.open_fixed_potential_egp, money("EGP", K.open_fixed_potential_egp), P,
-      `Fixed-price · ${f0(K.open_fixed_mt)} MT · unpriced scenario ${money("EGP", K.open_indicative_potential_egp)} not included`),
+    kcardS("Historical savings vs local", sc => [K[sc.hs], money("EGP", K[sc.hs])], A,
+      L_.map(sc => `${sc.h} ${f0(K[sc.hmt])} MT · ${isN(K[sc.hpm]) ? f0(K[sc.hpm]) : "—"} EGP/MT`).join(" · ") + ` · final CIF ${short(K[P_.fin])}, provisional ${short(K[P_.prov])}`),
+    kcardS("Open potential vs local — confirmed", sc => [K[sc.of], money("EGP", K[sc.of])], P,
+      `Fixed price with Form 4 · ${f0(K.open_fixed_mt)} MT · indicative / provisional ${L_.map(sc => sc.h + " " + money("EGP", K[sc.oi])).join(" / ")} kept separate`),
     kcard("Open contract outstanding", K.open_outstanding_mt, f0(K.open_outstanding_mt) + " MT", '<span class="tag">Position</span>',
-      `Not yet delivered · ${f0(K.open_available_mt)} MT delivered and in stock · ${K.open_contracts} open contracts`),
-    kcard("Total CBOT pricing advantage", K.cbot_advantage_usd, money("USD", K.cbot_advantage_usd), B, "Consumption days the CBOT was above our fixing"),
-    kcard("Total CBOT missed opportunity", K.cbot_missed_usd, money("USD", K.cbot_missed_usd), B, "Consumption days the CBOT was below our fixing"),
+      `Not yet delivered · ${f0(K.open_available_mt)} MT delivered and in stock · ${K.open_contracts} open contracts · ${f0(K.open_not_received_mt)} MT not confirmed received`),
+    kcard("Total CBOT pricing advantage", K.cbot_advantage_usd, money("USD", K.cbot_advantage_usd), B, "Consumption days the CBOT was above our fixing · independent of transport"),
+    kcard("Total CBOT missed opportunity", K.cbot_missed_usd, money("USD", K.cbot_missed_usd), B, "Consumption days the CBOT was below our fixing · independent of transport"),
     kcard("Net CBOT pricing difference", K.cbot_net_usd, money("USD", K.cbot_net_usd), B,
       `${money("EGP", K.cbot_net_egp)} · ${isN(K.cbot_coverage) ? fx(K.cbot_coverage * 100, 0) : "—"}% of fixed-contract tonnes with a stored CBOT · never added to savings`),
   ].join("");
-  const q = M.quality, negs = v.contracts.filter(c => isN(c.hist.saving) && c.hist.saving < 0);
+  const q = M.quality, negs = Object.values(groupBy(v.sav, r => r.contract_id)).filter(r => { const a = aggS(r, P_).sav; return isN(a) && a < 0; });
   const lines = [
-    `Importing instead of buying locally ${K.historical_saving_egp >= 0 ? "saved" : "cost"} <b class="${sg(K.historical_saving_egp)}">${money("EGP", Math.abs(K.historical_saving_egp))}</b> on ${f0(K.historical_mt)} MT consumed, each tonne against the local price observed on its day.`,
-    `Fixed-price tonnes not yet consumed would save <b class="${sg(K.open_fixed_potential_egp)}">${money("EGP", K.open_fixed_potential_egp)}</b> at today's local price; unpriced contracts add an indicative ${money("EGP", K.open_indicative_potential_egp)} (scenario).`,
-    `Against the CBOT on the consumption days our fixings gained ${money("USD", K.cbot_advantage_usd)} and missed ${money("USD", Math.abs(K.cbot_missed_usd))} — net <b class="${sg(K.cbot_net_usd)}">${money("USD", K.cbot_net_usd)}</b>, a historical benchmark already inside the savings above.`,
-    negs.length ? `${negs.length} contract${negs.length > 1 ? "s" : ""} cost more than local on the days consumed (${money("EGP", sum(negs, c => c.hist.saving))} together).` : "No contract cost more than local on the days consumed.",
+    `Savings from importing instead of buying locally: ${L_.map(sc => `<b class="${sg(K[sc.hs])}">${money("EGP", K[sc.hs])}</b> ${sc.s} (${isN(K[sc.hpm]) ? f0(K[sc.hpm]) : "—"} EGP/MT)`).join(" and ")} on ${f0(K.historical_mt)} MT consumed, each tonne against the local price in force on its day.`,
+    `Fixed-price tonnes not yet consumed would save ${L_.map(sc => `<b class="${sg(K[sc.of])}">${money("EGP", K[sc.of])}</b> ${sc.s}`).join(" / ")} at the latest local price; unpriced or provisional contracts add an indicative ${L_.map(sc => money("EGP", K[sc.oi]) + " " + sc.h).join(" / ")}, kept separate.`,
+    `Against the CBOT on the consumption days our fixings gained ${money("USD", K.cbot_advantage_usd)} and missed ${money("USD", Math.abs(K.cbot_missed_usd))} — net <b class="${sg(K.cbot_net_usd)}">${money("USD", K.cbot_net_usd)}</b>, a historical benchmark already inside the savings above, never added to them.`,
+    negs.length ? `${negs.length} contract${negs.length > 1 ? "s" : ""} cost more than local on the days consumed (${P_.s}).` : `No contract cost more than local on the days consumed (${P_.s}).`,
+    K.stale_rows ? `${f0(K.stale_rows)} consumption day-rows (${f0(K.stale_mt)} MT) were compared with a local quote more than ${CD()} days old — marked <span class="stale">STALE</span>; the last quote stays in force until a new one is entered.` : `Every local quote used was at most ${CD()} days old.`,
   ];
   if (!v.filtered) lines.push(`Kept out of these figures: ${f0(q.excluded_unsourced_mt)} MT of unsourced consumption and ${f0(q.missing_cbot_mt)} MT without a stored CBOT for the day — see Data quality.`);
   $("says").innerHTML = lines.map(l => `<li>${l}</li>`).join("");
-  $("mgmtNote").innerHTML = `<b>${M.management_ready ? "✔ All validation checks passed" : "✖ Validation failed — not management-ready"}</b> · checksum ${esc(M.checksum)} · data as of ${esc(M.as_of)}. Actual = consumption already made (FIFO estimated); Potential = not yet consumed at today's local price; Benchmark = CBOT comparison, separate from savings.`;
-  const bases = [...new Set(v.contracts.map(c => c.base))].sort();
-  $("chCom").innerHTML = hbar(bases.map(b => { const r = v.sav.filter(x => x.base === b), val = sum(r, x => x.saving), mt = sum(r, x => x.mt);
-    return {label: b, value: val, tip: `<b>${b}</b><br>${money("EGP", val)} on ${f0(mt)} MT<br>${mt ? f0(val / mt) : "—"} EGP/MT`}; }).filter(i => i.value), {left: 90, aria: "Savings by commodity"});
+  $("mgmtNote").innerHTML = `<b>${M.management_ready ? "✔ All validation checks passed" : "✖ Validation failed — not management-ready"}</b> · checksum ${esc(M.checksum)} · data as of ${esc(M.as_of)} · transport basis: ${S.tx === "side" ? "side-by-side (incl. and excl.)" : esc(SCN[S.tx].s)}. Actual = consumption already made (FIFO estimated); Potential = not yet consumed at the latest local price; Benchmark = CBOT comparison, separate from savings.`;
+  const bases = [...new Set(v.contracts.map(c => c.base))].sort(), byB = groupBy(v.sav, r => r.base);
+  $("chCom").innerHTML = hbar(bases.filter(b => byB[b]).map(b => scItem(b, byB[b])).filter(i => i.value || i.value2), {left: 90, aria: "Savings by commodity"});
   $("chComCbot").innerHTML = hbar(bases.map(b => { const r = v.cb.filter(x => x.base === b && x.assessable), val = sum(r, x => x.usd);
     return {label: b, value: val, color: val >= 0 ? "var(--good)" : "var(--bad)", tip: `<b>${b}</b><br>${money("USD", val)} net on ${f0(sum(r, x => x.mt))} MT`}; }).filter(i => i.value), {left: 90, aria: "CBOT by commodity"});
-  const per = {};
-  v.sav.forEach(r => { per[r.contract_id] = (per[r.contract_id] || 0) + r.saving; });
-  const top = Object.entries(per).filter(([, x]) => x > 0).sort((a, b) => b[1] - a[1]).slice(0, 10);
-  $("chTop").innerHTML = hbar(top.map(([id, x]) => ({label: CI[id].contract, value: x, id, tip: `<b>${esc(CI[id].contract)}</b> · ${esc(CI[id].commodity)}<br>${money("EGP", x)}`})), {aria: "Top savings"});
+  const byC = groupBy(v.sav, r => r.contract_id);
+  const top = Object.entries(byC).map(([id, r]) => [id, r, aggS(r, P_).sav]).filter(x => isN(x[2]) && x[2] > 0).sort((a, b) => b[2] - a[2]).slice(0, 10);
+  $("chTop").innerHTML = hbar(top.map(([id, r]) => scItem(CI[id].contract, r, {id})), {aria: "Top savings"});
   const pc = {};
   v.cb.filter(r => r.assessable).forEach(r => { pc[r.contract_id] = (pc[r.contract_id] || 0) + r.usd; });
   const miss = Object.entries(pc).filter(([, x]) => x < 0).sort((a, b) => a[1] - b[1]).slice(0, 10);
@@ -456,22 +591,28 @@ function renderOverview(v, K) {
 }
 
 // ── contracts tab ────────────────────────────────────────────────────
-const CCOLS = [
-  {h: "Contract", v: c => c.contract}, {h: "Supplier", v: c => c.supplier}, {h: "Commodity", v: c => c.commodity},
-  {h: "Status", v: c => c.status}, {h: "Consumed MT", n: 1, v: c => c.x.mt}, {h: "Savings EGP", n: 1, v: c => c.x.sav, col: 1},
-  {h: "EGP/MT", n: 1, v: c => c.x.mt ? c.x.sav / c.x.cmt : null, col: 1},
-  {h: "CBOT fixed", n: 1, v: c => c.fix.value, f: f2}, {h: "Avg CBOT in consumption", n: 1, v: c => c.x.avg, f: f2},
-  {h: "Difference", n: 1, v: c => isN(c.x.avg) ? c.x.avg - c.fix.value : null, f: f2, col: 1},
-  {h: "CBOT result USD", n: 1, v: c => c.x.amt ? c.x.usd : null, col: 1}, {h: "Fixing", v: c => c.fix.type || "—"}, {h: "Data", v: c => c.cif_final ? "Final CIF" : "Provisional CIF"}];
+function ccols() {
+  const L_ = scs();
+  return [{h: "Contract", v: c => c.contract}, {h: "Supplier", v: c => c.supplier}, {h: "Commodity", v: c => c.commodity},
+    {h: "Status", v: c => c.status}, COL.storage, {h: "Consumed MT", n: 1, v: c => c.x.mt, tot: rs => sum(rs, c => c.x.mt)},
+    ...L_.flatMap(sc => [{h: `Savings ${sc.h} EGP`, n: 1, na: 1, v: c => c.x[sc.k].sav, col: 1, tot: rs => sum(rs, c => c.x[sc.k].sav)},
+      {h: `EGP/MT ${sc.h}`, n: 1, na: 1, v: c => c.x[sc.k].per, col: 1}]),
+    COL.premium, COL.futures, COL.fixing, COL.cif, COL.pdate, COL.pstatus,
+    {h: "Avg CBOT in consumption", n: 1, v: c => c.x.avg, f: f2},
+    {h: "Difference", n: 1, v: c => isN(c.x.avg) && isN(c.fix.value) ? c.x.avg - c.fix.value : null, f: f2, col: 1},
+    {h: "CBOT result USD", n: 1, v: c => c.x.amt ? c.x.usd : null, col: 1, tot: rs => sum(rs, c => c.x.amt ? c.x.usd : null)},
+    {h: "Oldest local quote", n: 1, v: c => c.x.maxAge, html: c => ageBadge(c.x.maxAge)}];
+}
 function contractRows(v) {
-  const sav = {}, cb = {};
-  v.sav.forEach(r => { const s = sav[r.contract_id] = sav[r.contract_id] || {mt: 0, sav: 0}; s.mt += r.mt; s.sav += r.saving; });
+  const g = groupBy(v.sav, r => r.contract_id), cb = {};
   v.cb.forEach(r => { if (!r.assessable) return; const s = cb[r.contract_id] = cb[r.contract_id] || {mt: 0, usd: 0, w: 0}; s.mt += r.mt; s.usd += r.usd; s.w += r.cbot * r.mt; });
-  return v.contracts.filter(c => c.consumed_mt > 0).map(c => Object.assign(c, {x: {mt: c.consumed_mt, cmt: (sav[c.id] || {}).mt || 0, sav: sav[c.id] ? sav[c.id].sav : null,
-    amt: (cb[c.id] || {}).mt || 0, usd: (cb[c.id] || {}).usd || 0, avg: cb[c.id] ? cb[c.id].w / cb[c.id].mt : null}}));
+  return v.contracts.filter(c => c.consumed_mt > 0).map(c => { const r = g[c.id] || [], ages = r.map(x => x.local_age).filter(isN);
+    return Object.assign(c, {x: {mt: c.consumed_mt, incl: aggS(r, SCN.incl), excl: aggS(r, SCN.excl), rows: r,
+      maxAge: ages.length ? Math.max(...ages) : null, staleMt: sum(r.filter(x => x.local_stale), x => x.mt),
+      amt: (cb[c.id] || {}).mt || 0, usd: (cb[c.id] || {}).usd || 0, avg: cb[c.id] ? cb[c.id].w / cb[c.id].mt : null}}); });
 }
 function sortBy(rows, key, cols) {
-  const st = S.sort[key]; if (!st) return rows; const col = cols[st.i];
+  const st = S.sort[key]; if (!st || !cols[st.i]) return rows; const col = cols[st.i];
   return rows.slice().sort((a, b) => { const x = col.v(a), y = col.v(b), nx = x == null || x === "", ny = y == null || y === "";
     if (nx && ny) return 0; if (nx) return 1; if (ny) return -1; return (typeof x === "number" ? x - y : String(x).localeCompare(String(y))) * st.dir; });
 }
@@ -480,37 +621,48 @@ function thead(key, cols) {
   return "<thead><tr>" + cols.map((c, i) => `<th class="${c.n ? "n" : ""}" data-sort="${key}" data-i="${i}">${esc(c.h)}${st.i === i ? (st.dir > 0 ? " ▲" : " ▼") : ""}</th>`).join("") + "</tr></thead>";
 }
 function renderContracts(v) {
+  const cols = ccols(), P_ = PS();
   let rows = contractRows(v);
-  if (!S.sort.c) rows.sort((a, b) => (b.x.sav || -1e18) - (a.x.sav || -1e18)); else rows = sortBy(rows, "c", CCOLS);
-  let s = thead("c", CCOLS) + "<tbody>";
+  if (!S.sort.c) rows.sort((a, b) => (isN(b.x[P_.k].sav) ? b.x[P_.k].sav : -1e18) - (isN(a.x[P_.k].sav) ? a.x[P_.k].sav : -1e18)); else rows = sortBy(rows, "c", cols);
+  let s = thead("c", cols) + "<tbody>";
   rows.forEach(c => {
-    s += `<tr class="row" data-id="${esc(c.id)}" id="r-${esc(c.id)}">` + CCOLS.map(col => { const val = col.v(c);
-      return col.n ? `<td class="n ${col.col ? sg(val) : ""}">${(col.f || f0)(val)}</td>` : `<td>${esc(val)}</td>`; }).join("") + "</tr>";
-    if (S.open.has(c.id)) s += `<tr class="det"><td colspan="${CCOLS.length}">${detail(c, v)}</td></tr>`;
+    s += `<tr class="row" data-id="${esc(c.id)}" id="r-${esc(c.id)}">` + cols.map(col => cell(col, c)).join("") + "</tr>";
+    if (S.open.has(c.id)) s += `<tr class="det"><td colspan="${cols.length}">${detail(c, v)}</td></tr>`;
   });
-  s += `<tr class="tot"><td colspan="4">Total · ${rows.length} contracts</td>${td(sum(rows, c => c.x.mt))}${td(sum(rows, c => c.x.sav), f0, 1)}<td></td><td></td><td></td><td></td>${td(sum(rows, c => c.x.amt ? c.x.usd : null), f0, 1)}<td></td><td></td></tr></tbody>`;
+  s += totRow(cols, rows, `Total · ${rows.length} contracts`) + "</tbody>";
   $("tC").innerHTML = s;
 }
 const dl = p => "<dl>" + p.map(([k, x]) => `<dt>${esc(k)}</dt><dd>${x}</dd>`).join("") + "</dl>";
 function detail(c, v) {
-  const h = c.hist, cb = c.cbot, f = c.fix, rows = v.cb.filter(r => r.contract_id === c.id);
+  const h = c.hist, cb = c.cbot, f = c.fix, rows = v.cb.filter(r => r.contract_id === c.id), srows = v.sav.filter(r => r.contract_id === c.id), L_ = scs();
+  const o = M.open.find(r => r.contract_id === c.id), ages = srows.map(r => r.local_age).filter(isN);
   const ov = dl([["Contract", esc(c.contract)], ["Supplier", esc(c.supplier)], ["Commodity / origin", esc(c.commodity + " · " + (c.origin || "—"))],
-    ["Quantity", f0(c.qty_mt) + " MT"], ["Delivery", esc(c.delivery_date) + `<br><span class="note">${esc(c.delivery_status)}</span>`],
-    ["CIF USD/MT", f2(c.cif_usd_mt)], ["FX", fx(c.fx, 4) + ` <span class="note">${esc(c.fx_basis)}</span>`], ["Landed EGP/MT", f2(c.landed_egp_mt)], ["Source", esc(c.source_id)]]);
-  const lo = dl([["Consumed", f0(c.consumed_mt) + " MT"], ["Compared vs local", f0(h.priced_mt) + " MT"], ["Period", esc((c.first_date || "—") + " → " + (c.last_date || "—"))],
-    ["Wtd avg local EGP/MT", f2(h.local_wavg)], ["Savings EGP/MT", `<span class="${sg(h.saving_mt)}">${f2(h.saving_mt)}</span>`],
-    ["Total savings", `<b class="${sg(h.saving)}">${money("EGP", h.saving)}</b>`], ["Basis", c.cif_final ? '<span class="tag act">Final CIF</span>' : '<span class="tag pot">Provisional CIF</span>']]);
+    ["Quantity", f0(c.qty_mt) + " MT"], ["Delivery", esc(c.delivery_date || "—") + `<br><span class="note">${esc(c.delivery_status)}</span>`],
+    ["Storage start", storageCell(c)], ["Receipt", esc(c.receipt_status)], ["Source", esc(c.source_id)]]);
+  const fxLine = fx(c.fx, 4) + ` <span class="note">${esc(c.fx_basis)}</span>` + (c.form4_fx ? `<br><span class="note">Form 4 ${fx(c.form4_fx, 4)} · ${esc(c.form4_date || "date not recorded")}</span>` : (c.is_open ? '<br><span class="note">Form 4: Pending / Not recorded</span>' : ""));
+  const pr = dl([["Pricing status", pTag(c.pricing_class)], ["Premium", premCell(c.premium, f.unit || c.premium_label, c.pricing_class)], ["Futures month", esc(futCode(c))],
+    ["CBOT fixing", fixCell(c)], ["Pricing / fixing date", pdate(c) ? esc(pdate(c)) : '<span class="note">Not recorded</span>'], ["CIF USD/MT", cifCell(c)], ["FX EGP/USD", fxLine],
+    ["Landed EGP/MT", f2(c.landed_egp_mt) + ` <span class="note">incl. transport</span>`],
+    ["Import inland transport", isN(c.freight_egp_mt) ? f2(c.freight_egp_mt) + " EGP/MT" : NA_]]);
+  const lo = dl([["Consumed", f0(c.consumed_mt) + " MT"], ["Compared vs local", f0(sum(srows, r => r.mt)) + " MT"], ["Period", esc((c.first_date || "—") + " → " + (c.last_date || "—"))],
+    ...L_.flatMap(sc => { const A = aggS(srows, sc); return [[`Wtd avg local ${sc.h}`, f2(A.local)], [`Landed ${sc.h}`, f2(A.cost)],
+      [`Savings EGP/MT ${sc.h}`, `<span class="${sg(A.per)}">${isN(A.per) ? f2(A.per) : "N/A"}</span>`], [`Total savings ${sc.h}`, `<b class="${sg(A.sav)}">${isN(A.sav) ? money("EGP", A.sav) : "N/A — Missing Source Data"}</b>`]]; }),
+    ["Oldest local quote used", ageBadge(ages.length ? Math.max(...ages) : null)], ["MT on quotes > " + CD() + " days", f0(sum(srows.filter(r => r.local_stale), r => r.mt))],
+    ["Basis", c.cif_final ? '<span class="tag act">Final CIF</span>' : '<span class="tag pot">Provisional CIF</span>']]);
   const cbx = f.fixed ? dl([["CBOT fixed", `<b>${f2(f.value)}</b> ${esc(f.unit)}`], ["Type", esc(f.status)], ["Pricing date", esc(f.pricing_date || "Not recorded")],
-    ["Futures month", esc(c.contract_month ? c.contract_month.code + (c.contract_month.inferred ? " (year inferred)" : "") : c.futures_month || "—")],
-    ["Premium / factor", f2(c.premium) + " / " + fx(f.factor, 4)], ["Avg CBOT, consumption days", f2(cb.avg_cbot)], ["Coverage", isN(cb.coverage) ? fx(cb.coverage * 100, 0) + "% of consumed MT" : "—"],
+    ["Futures month", esc(futCode(c))], ["Premium / factor", f2(c.premium) + " / " + fx(f.factor, 4)], ["Avg CBOT, consumption days", f2(cb.avg_cbot)], ["Coverage", isN(cb.coverage) ? fx(cb.coverage * 100, 0) + "% of consumed MT" : "—"],
     ["Result", `<b class="${sg(cb.usd)}">${money("USD", cb.usd)}</b> · ${esc(cb.assessment)}`]])
     : `<p class="note">${esc(f.status || "No CBOT fixing")}${isN(f.indicative) ? ` — indicative ${f2(f.indicative)} ${esc(f.unit)} (not a final fixing)` : ""}</p>`;
-  const op = dl([["Delivered", f0(c.delivered_mt) + " MT"], ["Consumed", f0(c.consumed_mt) + " MT"], ["Available stock", f0(c.available_mt) + " MT"], ["Outstanding", f0(c.outstanding_mt) + " MT"],
-    ["Local today", f2(c.local_today) + ` <span class="note">${esc(c.local_today_key)} ${esc(c.local_today_date)}</span>`]]);
-  return `<div class="panels"><div class="pn"><h4>Contract overview</h4>${ov}</div><div class="pn"><h4>Savings vs local market</h4>${lo}</div><div class="pn"><h4>CBOT pricing (benchmark)</h4>${cbx}</div><div class="pn"><h4>Open position</h4>${op}</div></div>
-   <div class="grid2" style="margin-top:10px"><div class="pn"><h4>Savings waterfall — compared tonnes</h4>${waterfall(c)}<p class="note">The CBOT result is a separate benchmark and is not part of this saving.</p></div>
+  const op = o ? dl([["Delivered", f0(c.delivered_mt) + " MT"], ["Consumed", f0(c.consumed_mt) + " MT"], ["Available stock", f0(c.available_mt) + " MT"], ["Outstanding", f0(c.outstanding_mt) + " MT"],
+      ["Remaining (unconsumed)", `<b>${f0(o.unconsumed_mt)} MT</b>`], ["Valuation", valTag(o)], ["CIF basis", esc(o.cif_basis)], ["FX basis", esc(o.fx_basis) + (o.fx_date ? ` · ${esc(o.fx_date)}` : "")],
+      ...L_.flatMap(sc => [[`Imported ${sc.h}`, isN(sc.ocost(o)) ? f2(sc.ocost(o)) : NA_], [`Local ${sc.h}`, isN(sc.olocal(o)) ? f2(sc.olocal(o)) : NA_], [`Potential ${sc.h}`, isN(sc.pot(o)) ? `<b class="${sg(sc.pot(o))}">${money("EGP", sc.pot(o))}</b>` : NA_]]),
+      ["Latest local quote", esc(o.local_date || "—") + "<br>" + ageBadge(o.local_age)]])
+    : dl([["Delivered", f0(c.delivered_mt) + " MT"], ["Consumed", f0(c.consumed_mt) + " MT"], ["Available stock", f0(c.available_mt) + " MT"], ["Outstanding", f0(c.outstanding_mt) + " MT"]]);
+  const flags = (c.flags || []).length ? `<div class="assess warnbox"><b>Reconciliation flags.</b> ${c.flags.map(esc).join(" · ")} — kept as recorded, not deleted or reclassified.</div>` : "";
+  return `<div class="detwrap"><div class="panels"><div class="pn"><h4>Contract overview</h4>${ov}</div><div class="pn"><h4>Pricing &amp; landed cost</h4>${pr}</div><div class="pn"><h4>Savings vs local market</h4>${lo}</div><div class="pn"><h4>CBOT pricing (benchmark)</h4>${cbx}</div><div class="pn"><h4>${o ? "Current valuation" : "Position"}</h4>${op}</div></div>
+   <div class="grid2" style="margin-top:10px"><div class="pn"><h4>Savings waterfall — compared tonnes</h4><div class="wf">${L_.map(sc => `<div>${waterfall(srows, sc)}</div>`).join("")}</div><p class="note">The CBOT result is a separate benchmark and is not part of this saving.</p></div>
    <div class="pn"><h4>CBOT fixed vs consumption</h4>${f.fixed ? cbotChart(c, rows) : '<p class="note">Not applicable.</p>'}</div></div>
-   <div class="assess"><b>Final assessment.</b> ${esc(c.assessment)}</div>`;
+   ${flags}<div class="assess"><b>Final assessment.</b> ${esc(c.assessment)}</div></div>`;
 }
 
 // ── CBOT tab ─────────────────────────────────────────────────────────
@@ -542,25 +694,78 @@ function renderCbot(v) {
 }
 
 // ── open tab ─────────────────────────────────────────────────────────
-const OCOLS = [{h: "Contract", v: r => r.contract}, {h: "Supplier", v: r => r.supplier}, {h: "Commodity", v: r => r.commodity},
-  {h: "Total MT", n: 1, v: r => r.qty_mt}, {h: "Delivered MT", n: 1, v: r => r.delivered_mt}, {h: "Available MT", n: 1, v: r => r.available_mt},
-  {h: "Outstanding MT", n: 1, v: r => r.outstanding_mt}, {h: "Pricing", v: r => r.pricing_status}, {h: "CIF USD/MT", n: 1, v: r => r.cif, f: f2},
-  {h: "FX", n: 1, v: r => r.fx, f: x => fx(x, 4)}, {h: "Landed EGP/MT", n: 1, v: r => r.landed, f: f2}, {h: "Local today", n: 1, v: r => r.local, f: f2},
-  {h: "Local date", v: r => r.local_date}, {h: "Savings EGP/MT", n: 1, v: r => r.saving_mt, f: f2, col: 1}, {h: "Potential EGP", n: 1, v: r => r.potential, col: 1},
-  {h: "Class", v: r => r.class}, {h: "Delivery", v: r => r.delivery_status}];
+function cbotCellO(r) {
+  if (flatC(r.pricing_class)) return '<span class="note">— flat price</span>';
+  const a = isN(r.fixed_cbot) ? `${f2(r.fixed_cbot)} <span class="tag ${r.fix_type === "Implied" ? "pot" : "act"}">${r.fix_type === "Implied" ? "Implied CBOT Fixing" : "Fixed"}</span>` : '<span class="tag pot">Not fixed</span>';
+  const b = isN(r.latest_cbot) ? `<br><span class="note">latest ${f2(r.latest_cbot)} · ${esc(r.latest_cbot_date)}</span>` : "";
+  const px = /proxy/i.test(r.cbot_note || "") ? `<br><span class="tag pot" title="${esc(r.cbot_note)}">Proxy series</span>` : "";
+  return a + b + px;
+}
+function cifCellO(r) {
+  if (!isN(r.cif)) return NA_;
+  const b = r.cif_basis || "", lab = b.startsWith("Final") ? "Final CIF" : b.startsWith("Contract") ? "Contract CIF (flat)" : b.startsWith("Indicative") ? "Indicative CIF" : "Provisional CIF";
+  return `${f2(r.cif)}<br><span class="tag ${/^(Final|Contract)/.test(b) ? "good" : "pot"}" title="${esc(b)}">${lab}</span>`;
+}
+function fxCellO(r) {
+  if (!isN(r.fx)) return NA_;
+  const f4 = r.form4_status === "Recorded", lat = (r.fx_basis || "").startsWith("Latest");
+  return `${fx(r.fx, 4)}<br><span class="tag ${f4 ? "good" : "pot"}" title="${esc(r.fx_basis)}">${f4 ? "Form 4" : lat ? "Latest Market FX — Provisional" : esc(r.fx_basis)}</span>` +
+    `<br><span class="note">${esc(r.fx_date || "")}${f4 ? "" : " · Form 4: " + esc(r.form4_status)}</span>`;
+}
+function valTag(r) {
+  const b = obucket(r);
+  if (b === "c") return '<span class="tag good">Confirmed — fixed price</span>';
+  if (b === "i") return `<span class="tag pot">${esc(r.class)}</span>`;
+  return `<span class="tag bad">${esc(r.class)}</span>${r.issues && r.issues.length ? `<br><span class="note">${esc(r.issues.join("; "))}</span>` : ""}`;
+}
+function oresult(r) { const p = PS().oper(r); return !isN(p) ? "na" : p < 0 ? "dear" : "save"; }
+function resultTag(r) {
+  const L_ = scs(), parts = L_.map(sc => { const p = sc.oper(r); return [sc, !isN(p) ? "na" : p < 0 ? "dear" : "save"]; });
+  const lab = {save: '<span class="tag good">Saving</span>', dear: '<span class="tag bad">Dearer than local</span>', na: '<span class="tag">Not assessable</span>'};
+  let t = parts.every(x => x[1] === parts[0][1]) ? lab[parts[0][1]] : parts.map(([sc, k]) => lab[k] + ` <span class="note">${sc.h}</span>`).join("<br>");
+  if (obucket(r) === "i") t += '<br><span class="tag pot">Provisional</span>';
+  return t;
+}
+const orow = r => { const b = obucket(r), k = oresult(r); return b === "x" || k === "na" ? "rx" : k === "dear" ? "rd" : b === "i" ? "rp" : "rs"; };
+function ocols() {
+  const L_ = scs();
+  return [
+    {h: "Contract / Supplier", v: r => r.contract, html: r => `<b>${esc(r.contract)}</b><br><span class="note">${esc(r.supplier)} · ${esc(r.contract_id)}</span>`},
+    {h: "Commodity / Origin", v: r => r.commodity, html: r => `${esc(r.commodity)}<br><span class="note">${esc(r.origin || "—")}</span>`},
+    {h: "Qty MT", n: 1, v: r => r.qty_mt, tot: rs => sum(rs, r => r.qty_mt)},
+    {h: "Remaining MT", n: 1, v: r => r.unconsumed_mt, html: r => `<b>${f0(r.unconsumed_mt)}</b><br><span class="note">stock ${f0(r.available_mt)} · outstanding ${f0(r.outstanding_mt)}</span>`, tot: rs => sum(rs, r => r.unconsumed_mt)},
+    {h: "Storage start", v: r => r.storage_start, html: storageCell},
+    {h: "Premium / Futures", n: 1, v: r => r.premium, html: r => flatC(r.pricing_class) ? '<span class="note">— flat price</span>' : `${premCell(r.premium, r.unit, r.pricing_class)}<br><span class="note">${esc(r.futures || "—")}</span>`},
+    {h: "Fixed / Latest CBOT", n: 1, v: r => isN(r.fixed_cbot) ? r.fixed_cbot : r.latest_cbot, html: cbotCellO},
+    {h: "Final / Indicative CIF $/MT", n: 1, v: r => r.cif, html: cifCellO},
+    {h: "Form 4 / Latest FX", n: 1, v: r => r.fx, html: fxCellO},
+    ...L_.flatMap(sc => [{h: `Imported cost ${sc.h}`, n: 1, na: 1, v: sc.ocost, f: f2}, {h: `Local ${sc.h}`, n: 1, na: 1, v: sc.olocal, f: f2}]),
+    {h: "Local date / age", v: r => r.local_age, html: r => (r.local_date ? esc(r.local_date) + "<br>" : "") + ageBadge(r.local_age)},
+    ...L_.map(sc => ({h: `Savings/MT ${sc.h}`, n: 1, na: 1, v: sc.oper, f: f2, col: 1})),
+    ...L_.map(sc => ({h: `Total potential ${sc.h}`, n: 1, na: 1, v: sc.pot, col: 1, tot: rs => sum(rs, sc.pot)})),
+    {h: "Result", v: r => oresult(r), html: resultTag},
+    {h: "Pricing status", v: r => r.pricing_class, html: r => pTag(r.pricing_class)},
+    {h: "Valuation status", v: r => obucket(r) + r.class, html: valTag}];
+}
 function renderOpen(v) {
-  const K = kpis(v), rows = S.sort.o ? sortBy(v.op, "o", OCOLS) : v.op.slice().sort((a, b) => (b.potential || -1e18) - (a.potential || -1e18));
-  const latest = rows.map(r => r.local_date).filter(Boolean).sort().pop() || "—";
-  const ranked = rows.filter(r => isN(r.saving_mt)).sort((a, b) => b.saving_mt - a.saving_mt);
+  const K = kpis(v), cols = ocols(), L_ = scs(), P_ = PS();
+  const fb = $("oBucket").value, fr = $("oRes").value, rem = $("oRem").value;
+  let rows = v.op.filter(r => (!fb || obucket(r) === fb) && (!fr || oresult(r) === fr) && (!rem || r.unconsumed_mt > 0));
+  rows = S.sort.o ? sortBy(rows, "o", cols) : rows.slice().sort((a, b) => (isN(P_.pot(b)) ? P_.pot(b) : -1e18) - (isN(P_.pot(a)) ? P_.pot(a) : -1e18));
+  const latest = v.op.map(r => r.local_date).filter(Boolean).sort().pop() || "—";
+  const ranked = v.op.filter(r => isN(P_.oper(r)) && r.unconsumed_mt > 0).sort((a, b) => P_.oper(b) - P_.oper(a));
+  const provFx = v.op.filter(r => (r.fx_basis || "").startsWith("Latest")).length, stale = v.op.filter(r => r.local_stale).length;
   $("okpis").innerHTML = [
-    kcard("Confirmed potential (fixed price)", K.open_fixed_potential_egp, money("EGP", K.open_fixed_potential_egp), '<span class="tag pot">Potential</span>', `${f0(K.open_fixed_mt)} MT not yet consumed`),
-    kcard("Unpriced scenario (indicative)", K.open_indicative_potential_egp, money("EGP", K.open_indicative_potential_egp), '<span class="tag">Scenario</span>', `${f0(K.open_indicative_mt)} MT · CIF not final · not in the confirmed total`),
-    kcard("Quantities", K.open_available_mt, `${f0(K.open_available_mt)} MT`, '<span class="tag">Position</span>', `in stock on open contracts · ${f0(K.open_outstanding_mt)} MT outstanding · ${f0(sum(rows, r => r.unconsumed_mt))} MT not yet consumed incl. closed-contract stock · latest local quote ${esc(latest)}`),
-  ].join("") + (ranked.length ? kcard("Best / worst outstanding", ranked[0].saving_mt, esc(ranked[0].contract), "", `best ${f2(ranked[0].saving_mt)} EGP/MT · worst ${esc(ranked[ranked.length - 1].contract)} ${f2(ranked[ranked.length - 1].saving_mt)} EGP/MT`) : "");
-  $("chOpen").innerHTML = dumbbell(rows.filter(r => r.unconsumed_mt > 0));
-  $("tO").innerHTML = thead("o", OCOLS) + "<tbody>" + rows.map(r => `<tr class="row" data-goto="${esc(r.contract_id)}">` + OCOLS.map(col => { const val = col.v(r);
-    return col.n ? `<td class="n ${col.col ? sg(val) : ""}">${(col.f || f0)(val)}</td>` : `<td>${esc(val)}</td>`; }).join("") + "</tr>").join("") +
-    `<tr class="tot"><td colspan="3">Total · ${rows.length}</td>${td(sum(rows, r => r.qty_mt))}${td(sum(rows, r => r.delivered_mt))}${td(sum(rows, r => r.available_mt))}${td(sum(rows, r => r.outstanding_mt))}<td colspan="7"></td>${td(sum(rows.filter(r => r.class === "Fixed price"), r => r.potential), f0, 1)}<td>fixed only</td><td></td></tr></tbody>`;
+    kcardS("Confirmed potential (fixed price)", sc => [K[sc.of], money("EGP", K[sc.of])], '<span class="tag pot">Potential</span>', `${f0(K.open_fixed_mt)} MT not yet consumed · fixed CIF with Form 4`),
+    kcardS("Indicative / provisional", sc => [K[sc.oi], money("EGP", K[sc.oi])], '<span class="tag">Scenario</span>', `${f0(K.open_indicative_mt)} MT · unpriced CBOT, provisional FX or not yet received · not in the confirmed total`),
+    kcard("Quantities", K.open_available_mt, `${f0(K.open_available_mt)} MT`, '<span class="tag">Position</span>', `in stock on open contracts · ${f0(K.open_outstanding_mt)} MT outstanding · ${f0(sum(v.op, r => r.unconsumed_mt))} MT not yet consumed incl. closed-contract stock · ${f0(K.open_not_received_mt)} MT not confirmed received · latest local quote ${esc(latest)}`),
+    kcard("Valuation inputs", null, `${provFx} provisional FX`, '<span class="tag">Inputs</span>', `${provFx} contract${provFx === 1 ? "" : "s"} on the latest market FX (Form 4 pending) · ${stale} on a local quote more than ${CD()} days old · ${v.op.filter(r => obucket(r) === "x").length} not assessable`),
+  ].join("") + (ranked.length ? kcard(`Best / worst remaining · ${P_.s}`, P_.oper(ranked[0]), esc(ranked[0].contract), "", `best ${f2(P_.oper(ranked[0]))} EGP/MT · worst ${esc(ranked[ranked.length - 1].contract)} ${f2(P_.oper(ranked[ranked.length - 1]))} EGP/MT`) : "");
+  $("chOpen").innerHTML = dumbbell(v.op.filter(r => r.unconsumed_mt > 0));
+  const conf = rows.filter(r => obucket(r) === "c"), ind = rows.filter(r => obucket(r) === "i"), exc = rows.filter(r => obucket(r) === "x");
+  $("tO").innerHTML = thead("o", cols) + "<tbody>" + rows.map(r => `<tr class="row ${orow(r)}" data-goto="${esc(r.contract_id)}">` + cols.map(col => cell(col, r)).join("") + "</tr>").join("") +
+    totRow(cols, conf, `Confirmed total · ${conf.length}`) + totRow(cols, ind, `Indicative / provisional · ${ind.length} (separate)`) +
+    (exc.length ? `<tr><td colspan="${cols.length}" class="note">${exc.length} row${exc.length > 1 ? "s" : ""} not assessable (N/A — Missing Source Data) — left out of both totals: ${exc.map(r => esc(r.contract) + " (" + esc((r.issues || []).join("; ") || r.class) + ")").join(", ")}.</td></tr>` : "") + "</tbody>";
 }
 
 // ── data quality tab ─────────────────────────────────────────────────
@@ -572,6 +777,11 @@ function renderQuality() {
     ["CBOT comparison not assessable", "Days without a stored CBOT", q.missing_cbot, `rows · ${f0(q.missing_cbot_mt)} MT`],
     ["No usable local price", "Missing local observations", q.missing_local, `rows · ${f0(q.missing_local_mt)} MT`],
     ["stale", "Days on the last local price in force", q.carried_local, `rows · ${f0(q.carried_local_mt || 0)} MT · no new quote = no change`],
+    ["stale5", `Days on local quotes > ${CD()} days old (STALE)`, q.stale_local, `rows · ${f0(q.stale_local_mt || 0)} MT · still used, flagged orange`],
+    ["missing-storage", "Contracts without a storage start", q.missing_storage, "shown as Not recorded · never assumed"],
+    ["Reconciliation flag", "Reconciliation flags", q.reconciliation_flags, "kept as recorded, not deleted"],
+    ["prov-fx", "Open contracts on provisional FX", q.provisional_fx_open, "latest market FX · Form 4 pending"],
+    ["not-received", "Open contracts not confirmed received", q.not_received_open, "current market valuation"],
     ["Logged entry not used", "Logged entries not used", M.excluded.filter(e => e.category === "Logged entry not used").length, "see reason"]];
   $("dqTiles").innerHTML = tiles.map(([k, l, val, sub]) => `<button data-dq="${esc(k)}" class="${S.dqTile === k && k ? "on" : ""}"><div class="v">${f0(val)}</div><div class="l">${esc(l)}<br>${esc(sub)}</div></button>`).join("");
   $("checks").innerHTML = `<p><span class="badge ${M.management_ready ? "ok" : "no"}">${M.management_ready ? "✔ Management-ready" : "✖ Not management-ready"}</span> <span class="note">checksum ${esc(M.checksum)} — the Excel workbook prints the same</span></p>` +
@@ -580,7 +790,11 @@ function renderQuality() {
     M.audit.map(a => `<tr><td>${esc(a.base)}</td>${td(a.consumed_mt)}${td(a.allocated_mt)}${td(a.excluded_mt)}${td(a.difference_mt)}</tr>`).join("") + "</tbody>";
   let ex = M.excluded, title = "Excluded & missing data";
   if (S.dqTile === "missing-dates") { ex = C.filter(c => c.fix.fixed && !c.fix.pricing_date_known).map(c => ({category: "Pricing date not recorded", contract: c.contract, contract_id: c.id, commodity: c.base, reason: `CBOT fixing implied from CIF ${f2(c.cif_usd_mt)} ÷ ${c.fix.factor} − premium ${f2(c.premium)} = ${f2(c.fix.value)}; the date it was fixed is not stored.`, source: c.source_id})); title = "Fixed contracts without a pricing date"; }
-  else if (S.dqTile === "stale") { ex = M.savings.filter(r => r.local_status.startsWith("Last price")).map(r => ({category: r.local_status, date: r.date, contract: r.contract, contract_id: r.contract_id, commodity: r.base, mt: r.mt, reason: `Local price set on ${r.local_date} still in force (${r.local_age} days, no new price entered = no change).`, source: r.local_source})); title = "Days on the last local price in force"; }
+  else if (S.dqTile === "stale5") { ex = M.savings.filter(r => r.local_stale).map(r => ({category: `Local Market Price — ${r.local_age} Days Old — STALE`, date: r.date, contract: r.contract, contract_id: r.contract_id, commodity: r.base, mt: r.mt, reason: `Local quote of ${r.local_date} (${r.local_key}) used ${r.local_age} days later; no newer quote was entered, so it stays in force.`, source: r.local_source})); title = `Days on local quotes more than ${CD()} days old`; }
+  else if (S.dqTile === "missing-storage") { ex = C.filter(c => !c.storage_start && (c.consumed_mt > 0 || c.is_open)).map(c => ({category: "Storage start not recorded", contract: c.contract, contract_id: c.id, commodity: c.base, mt: c.qty_mt, reason: `${c.receipt_status}. Delivery date ${c.delivery_date || "—"} is not used as the storage date.`, source: c.source_id})); title = "Contracts without a storage start"; }
+  else if (S.dqTile === "prov-fx") { ex = M.open.filter(r => (r.fx_basis || "").startsWith("Latest")).map(r => ({category: "Latest market FX — provisional", date: r.fx_date, contract: r.contract, contract_id: r.contract_id, commodity: r.base, mt: r.unconsumed_mt, reason: `FX ${fx(r.fx, 4)} from the daily FX of ${r.fx_date}; Form 4 ${r.form4_status}. Switches to Form 4 automatically once entered.`, source: "fx_history"})); title = "Open contracts on provisional FX"; }
+  else if (S.dqTile === "not-received") { ex = M.open.filter(r => !r.received).map(r => ({category: r.receipt_status, contract: r.contract, contract_id: r.contract_id, commodity: r.base, mt: r.unconsumed_mt, reason: `${r.class}: valued at the latest local price, FX and CBOT.`, source: ""})); title = "Open contracts not confirmed received"; }
+  else if (S.dqTile === "stale") { ex = M.savings.filter(r => !r.local_status.startsWith("Same")).map(r => ({category: r.local_status, date: r.date, contract: r.contract, contract_id: r.contract_id, commodity: r.base, mt: r.mt, reason: `Local price set on ${r.local_date} still in force (${r.local_age} days, no new price entered = no change).`, source: r.local_source})); title = "Days on the last local price in force"; }
   else if (S.dqTile) { ex = M.excluded.filter(e => e.category === S.dqTile); title = S.dqTile; }
   $("exTitle").textContent = title;
   $("exSub").textContent = `${ex.length} records${S.dqTile ? " · click the tile again to show all" : ""}. Nothing here is counted as zero or filled with an assumed value.`;
@@ -591,8 +805,10 @@ function renderQuality() {
   const src = M.sources || {}, o = M.options;
   $("src").innerHTML = `<p>Data as of ${esc(M.as_of)} · generated ${esc(M.generated)} · consumption: ${esc(M.walk_mode)} · rates ${esc(Object.entries(M.rates || {}).map(([k, x]) => k + " " + x).join(", "))} MT/day.</p>
    <p>CBOT: ${esc(src.cbot_source || "")}; ${esc(Object.entries(src.cbot || {}).map(([k, x]) => `${k} ${x[0]} → ${x[1]}`).join(" · "))}. Each consumption day is compared with the CBOT stored for that day (the contract's futures month is only the month its premium is quoted over); one-day spikes and prints older than ${o.cbot_max_age_days} days are not used. Advantage when CBOT − fixed ≥ ${o.neutral_cbot}, missed when ≤ −${o.neutral_cbot}, else neutral.</p>
-   <p>Local: origin-matched delivered price (price + freight) observed on or before the day; the last price entered stays in force until the next one (no new price = no change), shown with the date it was set; days with no earlier price are excluded. Latest quotes: ${esc(Object.entries(src.local_latest || {}).map(([k, x]) => k + " " + x).join(" · "))}.</p>
-   <p>Landed cost: CIF × FX (Form 4 once entered, except SBM; else delivery FX) + discharge + clearance + inland freight. CBOT fixed: pricing lots, else CIF ÷ factor − premium (CORN 0.3937; SOYBEAN, WHEAT 0.36745; SBM 1.1023 with premium in $/short ton). Unpriced contracts are never shown as fixed.</p>`;
+   <p>Local: origin-matched local market quote observed on or before the day; the last quote entered stays in force until the next one (no new quote = no change), shown with its date and age. A quote more than ${CD()} days old is marked <span class="stale">Local Market Price — N Days Old — STALE</span> but still used; days with no earlier quote are excluded as missing. Latest quotes: ${esc(Object.entries(src.local_latest || {}).map(([k, x]) => k + " " + x).join(" · "))}.</p>
+   <p>Transport scenarios: including = landed cost with inland freight vs local quote + local transport; excluding = landed cost without inland freight vs the local quote itself. Each side uses its own recorded transport; ocean freight stays in CIF. Missing transport is shown as N/A — Missing Source Data, never as zero, and left out of that scenario's totals.</p>
+   <p>Landed cost: CIF × FX + discharge + clearance (+ inland freight when including transport). FX: Form 4 once entered (all commodities except SBM); historical rows keep their recorded basis; open contracts without Form 4 use the latest daily market FX ("Latest Market FX — Provisional") and switch automatically once Form 4 is entered. CBOT fixed: pricing lots, else Implied CBOT Fixing = CIF ÷ factor − premium (CORN 0.3937; SOYBEAN, WHEAT 0.36745; SBM 1.1023 with premium in $/short ton), so Final CIF = (fixed CBOT + premium) × factor. Unpriced contracts are never shown as fixed: their open tonnes are valued at (latest stored CBOT + premium) × factor, labelled a proxy when that series is not the contract's own futures month. Flat-priced contracts keep their contract CIF.</p>
+   <p>Storage start dates are shown as recorded (Not recorded when absent) and never taken from the delivery date. A contract with no storage start and no receipt is not treated as received: it gets a current market valuation and stays out of the FIFO stock; consumption already allocated to one is flagged for reconciliation, not deleted. Historical savings, current open potential and the CBOT benchmark are separate measures and are never added together.</p>`;
 }
 
 // ── export the filtered view to a real .xlsx (stored zip, no library) ─
@@ -619,19 +835,40 @@ function sheetXml(rows) {
       return `<c r="${ref}" t="inlineStr"${ri === 0 ? ' s="1"' : ""}><is><t>${x(v)}</t></is></c>`; }).join("") + "</row>").join("") + "</sheetData></worksheet>";
 }
 function exportXlsx() {
-  const v = view(), K = kpis(v), F_ = v.f;
+  const v = view(), K = kpis(v), F_ = v.f, L_ = scs(), NA = "N/A — Missing Source Data", nv = x => isN(x) ? x : NA;
+  const ageTxt = a => !isN(a) ? "No local quote — missing data" : a > CD() ? `Local Market Price — ${a} Days Old — STALE` : a === 0 ? "Same day" : a + " days old";
   const sheets = [
     ["Summary", [["Procurement savings — filtered view"], ["Data as of", M.as_of], ["Checksum (unfiltered model)", M.checksum],
-      ["Filters", Object.entries(F_).filter(([, x]) => x).map(([k, x]) => k + "=" + x).join("; ") || "none"], [],
+      ["Filters", Object.entries(F_).filter(([, x]) => x).map(([k, x]) => k + "=" + x).join("; ") || "none"],
+      ["Transport scenario", S.tx === "side" ? "Side-by-side (including and excluding transport)" : SCN[S.tx].l], [],
       ["Measure", "Value"], ...Object.entries(K).map(([k, x]) => [k, x])]],
-    ["Contracts", [["Contract ID", "Contract", "Supplier", "Commodity", "Origin", "Status", "Consumed MT", "Compared MT", "Savings EGP", "CBOT fixed", "Fixing type", "Avg CBOT consumption days", "CBOT net USD", "Assessment"],
-      ...contractRows(v).map(c => [c.id, c.contract, c.supplier, c.commodity, c.origin, c.status, c.consumed_mt, c.x.cmt, c.x.sav, c.fix.value, c.fix.type, c.x.avg, c.x.amt ? c.x.usd : null, c.assessment])]],
-    ["Savings vs Local", [["Date", "Contract", "Contract ID", "Commodity", "MT", "Landed EGP/MT", "Local EGP/MT", "Local date", "Quote age", "Savings EGP/MT", "Savings EGP", "Data quality", "Local record"],
-      ...v.sav.map(r => [r.date, r.contract, r.contract_id, r.commodity, r.mt, r.cost, r.local, r.local_date, r.local_age, r.saving_mt, r.saving, r.quality, r.local_source])]],
+    ["Contracts", [["Contract ID", "Contract", "Supplier", "Commodity", "Origin", "Status", "Storage Start", "Receipt Status", "Consumed MT",
+        ...L_.flatMap(sc => [`Compared MT ${sc.h}`, `Savings EGP ${sc.h}`, `Savings EGP/MT ${sc.h}`]),
+        "Premium", "Premium Unit", "Futures Month", "CBOT Fixing", "Fixing Type", "Final CIF USD/MT", "CIF Basis", "Pricing / Fixing Date", "Pricing Status",
+        "FX", "FX Basis", "Form 4 Date", "Avg CBOT consumption days", "CBOT net USD", "Oldest Local Quote (days)", "MT on Quotes > 5 Days", "Reconciliation Flags", "Assessment"],
+      ...contractRows(v).map(c => [c.id, c.contract, c.supplier, c.commodity, c.origin, c.status, c.storage_start || "Not recorded", c.receipt_status, c.consumed_mt,
+        ...L_.flatMap(sc => [c.x[sc.k].mt, nv(c.x[sc.k].sav), nv(c.x[sc.k].per)]),
+        flatC(c.pricing_class) ? "flat price" : nv(c.premium), c.fix.unit || c.premium_label, futCode(c), c.fix.fixed ? c.fix.value : (flatC(c.pricing_class) ? "flat price" : "Not fixed"),
+        c.fix.type === "Implied" ? "Implied CBOT Fixing" : c.fix.type === "Recorded" ? "Recorded fixing (lots)" : c.fix.type, nv(c.cif_usd_mt), c.cif_final ? "Final CIF" : "Provisional CIF",
+        pdate(c) || "Not recorded", c.pricing_class, nv(c.fx), c.fx_basis, c.form4_date || "", c.x.avg, c.x.amt ? c.x.usd : null, c.x.maxAge, c.x.staleMt, (c.flags || []).join("; "), c.assessment])]],
+    ["Savings vs Local", [["Date", "Contract", "Contract ID", "Commodity", "MT", "Storage Start",
+        ...L_.flatMap(sc => [`Landed EGP/MT ${sc.h}`, `Local EGP/MT ${sc.h}`, `Savings EGP/MT ${sc.h}`, `Savings EGP ${sc.h}`]),
+        "Import Inland Transport EGP/MT", "Local Transport EGP/MT", "Local date", "Quote age (days)", "Local Price Age Status", "Data quality", "Local record"],
+      ...v.sav.map(r => [r.date, r.contract, r.contract_id, r.commodity, r.mt, r.storage_start || "Not recorded",
+        ...L_.flatMap(sc => [nv(sc.cost(r)), nv(sc.local(r)), nv(sc.per(r)), nv(sc.sav(r))]),
+        nv(r.freight), nv(r.local_transport), r.local_date, r.local_age, ageTxt(r.local_age), r.quality, r.local_source])]],
     ["CBOT vs Consumption", [["Date", "Contract", "Contract ID", "MT", "CBOT fixed", "CBOT that day", "Price date", "Benchmark status", "Difference", "USD/MT", "USD", "EGP", "Result"],
       ...v.cb.map(r => [r.date, r.contract, r.contract_id, r.mt, r.fix, r.cbot, r.cbot_date, r.benchmark, r.diff, r.usd_mt, r.usd, r.egp, r.result])]],
-    ["Open vs Local", [["Contract", "Contract ID", "Commodity", "Available MT", "Outstanding MT", "Landed EGP/MT", "Local EGP/MT", "Local date", "Savings EGP/MT", "Potential EGP", "Class", "Delivery"],
-      ...v.op.map(r => [r.contract, r.contract_id, r.commodity, r.available_mt, r.outstanding_mt, r.landed, r.local, r.local_date, r.saving_mt, r.potential, r.class, r.delivery_status])]]];
+    ["Open vs Local", [["Contract", "Contract ID", "Supplier", "Commodity", "Origin", "Qty MT", "Available MT", "Outstanding MT", "Remaining MT", "Storage Start", "Receipt Status",
+        "Premium", "Premium Unit", "Futures Month", "Fixed CBOT", "Latest CBOT", "Latest CBOT Date", "CBOT Note", "CIF USD/MT", "CIF Basis", "FX", "FX Basis", "FX Date", "Form 4 Status",
+        "Discharge EGP/MT", "Clearance EGP/MT", "Import Inland Transport EGP/MT", ...L_.flatMap(sc => [`Imported Cost ${sc.h}`, `Local ${sc.h}`]), "Local Date", "Local Age (days)", "Local Price Age Status",
+        ...L_.flatMap(sc => [`Savings/MT ${sc.h}`, `Total Potential ${sc.h}`]), "Pricing Status", "Valuation Class", "Totals Bucket", "Issues"],
+      ...v.op.map(r => [r.contract, r.contract_id, r.supplier, r.commodity, r.origin, r.qty_mt, r.available_mt, r.outstanding_mt, r.unconsumed_mt, r.storage_start || "Not recorded", r.receipt_status,
+        flatC(r.pricing_class) ? "flat price" : nv(r.premium), r.unit, r.futures, isN(r.fixed_cbot) ? r.fixed_cbot : (flatC(r.pricing_class) ? "" : "Not fixed"), r.latest_cbot, r.latest_cbot_date, r.cbot_note,
+        nv(r.cif), r.cif_basis, nv(r.fx), r.fx_basis, r.fx_date, r.form4_status,
+        r.disc_missing ? "Not recorded" : r.discharge, r.clr_missing ? "Not recorded" : r.clearance, nv(r.freight), ...L_.flatMap(sc => [nv(sc.ocost(r)), nv(sc.olocal(r))]), r.local_date || NA, r.local_age, ageTxt(r.local_age),
+        ...L_.flatMap(sc => [nv(sc.oper(r)), nv(sc.pot(r))]), r.pricing_class, r.class,
+        {c: "Confirmed", i: "Indicative / provisional", x: "Excluded — missing source data"}[obucket(r)], (r.issues || []).concat(r.notes || []).join("; ")])]]];
   const files = [["[Content_Types].xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>` +
       sheets.map((_, i) => `<Override PartName="/xl/worksheets/sheet${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join("") + "</Types>"],
     ["_rels/.rels", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`],
@@ -649,78 +886,96 @@ function exportXlsx() {
 }
 
 // ── savings vs local tab ────────────────────────────────────────────
-const SVC = [{h: "Contract", v: c => c.contract}, {h: "Supplier", v: c => c.supplier}, {h: "Commodity", v: c => c.commodity},
-  {h: "Compared MT", n: 1, v: c => c.z.mt}, {h: "Landed EGP/MT", n: 1, v: c => c.z.cost, f: f2}, {h: "Wtd avg local EGP/MT", n: 1, v: c => c.z.local, f: f2},
-  {h: "Savings EGP/MT", n: 1, v: c => c.z.per, f: f2, col: 1}, {h: "Total savings EGP", n: 1, v: c => c.z.sav, col: 1},
-  {h: "Savings %", n: 1, v: c => c.z.pct, f: x => isN(x) ? fx(x, 1) + "%" : "—", col: 1}, {h: "First day", v: c => c.z.first}, {h: "Last day", v: c => c.z.last},
-  {h: "CIF", v: c => c.cif_final ? "Final" : "Provisional"}, {h: "Local quotes", v: c => c.z.q}];
+function svcols() {
+  const L_ = scs(), P_ = PS();
+  return [{h: "Contract", v: c => c.contract}, {h: "Supplier", v: c => c.supplier}, {h: "Commodity", v: c => c.commodity}, COL.storage,
+    COL.premium, COL.futures, COL.fixing, COL.cif, COL.pstatus,
+    {h: "Compared MT", n: 1, v: c => c.z.incl.mt, tot: rs => sum(rs, c => c.z.incl.mt)},
+    ...L_.flatMap(sc => [{h: `Landed ${sc.h} EGP/MT`, n: 1, na: 1, v: c => c.z[sc.k].cost, f: f2},
+      {h: `Wtd avg local ${sc.h} EGP/MT`, n: 1, na: 1, v: c => c.z[sc.k].local, f: f2},
+      {h: `Savings ${sc.h} EGP/MT`, n: 1, na: 1, v: c => c.z[sc.k].per, f: f2, col: 1, tf: f2, tot: rs => { const m = sum(rs, c => isN(c.z[sc.k].sav) ? c.z[sc.k].mt : null); return m ? sum(rs, c => c.z[sc.k].sav) / m : null; }},
+      {h: `Total savings ${sc.h} EGP`, n: 1, na: 1, v: c => c.z[sc.k].sav, col: 1, tot: rs => sum(rs, c => c.z[sc.k].sav)}]),
+    {h: `Savings % ${P_.h}`, n: 1, v: c => isN(c.z[P_.k].sav) && c.z[P_.k].local ? c.z[P_.k].sav / (c.z[P_.k].local * c.z[P_.k].mt) * 100 : null, f: x => isN(x) ? fx(x, 1) + "%" : "—", col: 1},
+    {h: "First day", v: c => c.z.first}, {h: "Last day", v: c => c.z.last},
+    {h: "Oldest local quote", n: 1, v: c => c.z.maxAge, html: c => ageBadge(c.z.maxAge)},
+    {h: `MT on quotes > ${CD()} days`, n: 1, v: c => c.z.staleMt, html: c => c.z.staleMt ? `<span class="stale">${f0(c.z.staleMt)}</span>` : "0", tot: rs => sum(rs, c => c.z.staleMt)},
+    {h: "Local quotes", v: c => c.z.q}];
+}
 function svRows(v) {
-  const by = {};
-  v.sav.forEach(r => { const o = by[r.contract_id] = by[r.contract_id] || {mt: 0, sav: 0, c: 0, l: 0, first: r.date, last: r.date, rows: [], same: 0, carry: 0, stale: 0};
-    o.mt += r.mt; o.sav += r.saving; o.c += r.cost * r.mt; o.l += r.local * r.mt; o.rows.push(r);
-    if (r.date < o.first) o.first = r.date; if (r.date > o.last) o.last = r.date;
-    if (r.local_status.startsWith("Same")) o.same += r.mt; else o.carry += r.mt; });
-  return Object.entries(by).map(([id, o]) => Object.assign(CI[id], {z: {mt: o.mt, sav: o.sav, cost: o.c / o.mt, local: o.l / o.mt, per: o.sav / o.mt,
-    pct: o.l ? o.sav / o.l * 100 : null, first: o.first, last: o.last, rows: o.rows.sort((a, b) => a.date < b.date ? -1 : 1),
-    q: [o.same && `${fx(o.same / o.mt * 100, 0)}% same day`, o.carry && `${fx(o.carry / o.mt * 100, 0)}% last price in force`].filter(Boolean).join(" · ")}}));
+  return Object.entries(groupBy(v.sav, r => r.contract_id)).map(([id, rows]) => {
+    rows = rows.slice().sort((a, b) => a.date < b.date ? -1 : 1);
+    const mt = sum(rows, r => r.mt), same = sum(rows.filter(r => r.local_status.startsWith("Same")), r => r.mt), stale = sum(rows.filter(r => r.local_stale), r => r.mt), ages = rows.map(r => r.local_age).filter(isN);
+    return Object.assign(CI[id], {z: {incl: aggS(rows, SCN.incl), excl: aggS(rows, SCN.excl), first: rows[0].date, last: rows[rows.length - 1].date, rows,
+      maxAge: ages.length ? Math.max(...ages) : null, staleMt: stale,
+      q: [same && `${fx(same / mt * 100, 0)}% same day`, (mt - same - stale) > 0.5 && `${fx((mt - same - stale) / mt * 100, 0)}% last quote ≤ ${CD()} d`, stale && `${fx(stale / mt * 100, 0)}% STALE > ${CD()} d`].filter(Boolean).join(" · ")}});
+  });
 }
 function renderSavings(v) {
+  const cols = svcols(), L_ = scs(), P_ = PS();
   let rows = svRows(v);
-  const tot = sum(rows, c => c.z.sav), mt = sum(rows, c => c.z.mt), win = rows.filter(c => c.z.sav >= 0), loss = rows.filter(c => c.z.sav < 0);
-  const fin = sum(v.sav.filter(r => r.cif_basis === "Final CIF"), r => r.saving);
+  const pv = c => c.z[P_.k].sav, win = rows.filter(c => isN(pv(c)) && pv(c) >= 0), loss = rows.filter(c => isN(pv(c)) && pv(c) < 0);
+  const fin = v.sav.filter(r => r.cif_basis === "Final CIF"), st = v.sav.filter(r => r.local_stale);
   $("svKpis").innerHTML = [
-    kcard("Total savings vs local", tot, money("EGP", tot), '<span class="tag act">Actual · FIFO estimated</span>', `${f0(mt)} MT compared · ${mt ? f0(tot / mt) : "—"} EGP/MT · final CIF ${short(fin)}, provisional ${short(tot - fin)}`),
-    kcard("Contracts cheaper than local", sum(win, c => c.z.sav), `${win.length} contracts`, '<span class="tag good">Saving</span>', `${money("EGP", sum(win, c => c.z.sav))} on ${f0(sum(win, c => c.z.mt))} MT`),
-    kcard("Contracts dearer than local", sum(loss, c => c.z.sav), `${loss.length} contracts`, '<span class="tag bad">Loss</span>', `${money("EGP", sum(loss, c => c.z.sav))} on ${f0(sum(loss, c => c.z.mt))} MT`)].join("");
-  const bases = [...new Set(rows.map(c => c.base))].sort();
-  $("svCom").innerHTML = `<thead><tr><th>Commodity</th><th class="n">Contracts</th><th class="n">Compared MT</th><th class="n">Landed EGP/MT</th><th class="n">Local EGP/MT</th><th class="n">EGP/MT</th><th class="n">Savings EGP</th></tr></thead><tbody>` +
-    bases.map(b => { const r = rows.filter(c => c.base === b), m = sum(r, c => c.z.mt), sv = sum(r, c => c.z.sav);
-      return `<tr><td><b>${esc(b)}</b></td>${td(r.length)}${td(m)}${td(sum(r, c => c.z.cost * c.z.mt) / m, f2)}${td(sum(r, c => c.z.local * c.z.mt) / m, f2)}${td(sv / m, f0, 1)}${td(sv, f0, 1)}</tr>`; }).join("") +
-    `<tr class="tot"><td>Total</td>${td(rows.length)}${td(mt)}<td></td><td></td>${td(mt ? tot / mt : null, f0, 1)}${td(tot, f0, 1)}</tr></tbody>`;
-  const ranked = rows.slice().sort((a, b) => b.z.sav - a.z.sav);
-  $("svChart").innerHTML = hbar(ranked.map(c => ({label: c.contract, value: c.z.sav, id: c.id,
-    tip: `<b>${esc(c.contract)}</b> · ${esc(c.commodity)}<br>${money("EGP", c.z.sav)} on ${f0(c.z.mt)} MT (${f2(c.z.per)} EGP/MT)<br>landed ${f2(c.z.cost)} vs local ${f2(c.z.local)}`})), {aria: "Savings by contract", left: 170});
-  rows = S.sort.sv ? sortBy(rows, "sv", SVC) : ranked;
-  let h = thead("sv", SVC) + "<tbody>";
+    kcardS("Total savings vs local", sc => { const A = aggS(v.sav, sc); return [A.sav, money("EGP", A.sav)]; }, '<span class="tag act">Actual · FIFO estimated</span>',
+      L_.map(sc => { const A = aggS(v.sav, sc); return `${sc.h} ${f0(A.mt)} MT · ${isN(A.per) ? f0(A.per) : "—"} EGP/MT`; }).join(" · ") + ` · final CIF ${short(sum(fin, P_.sav))}, provisional ${short(aggS(v.sav, P_).sav - sum(fin, P_.sav))} (${P_.h})`),
+    kcard(`Contracts cheaper than local · ${P_.s}`, sum(win, pv), `${win.length} contracts`, '<span class="tag good">Saving</span>', `${money("EGP", sum(win, pv))} on ${f0(sum(win, c => c.z[P_.k].mt))} MT`),
+    kcard(`Contracts dearer than local · ${P_.s}`, sum(loss, pv), `${loss.length} contracts`, '<span class="tag bad">Loss</span>', `${money("EGP", sum(loss, pv))} on ${f0(sum(loss, c => c.z[P_.k].mt))} MT`),
+    kcard(`Days on local quotes > ${CD()} days old`, null, `${f0(st.length)} day-rows`, '<span class="stale">STALE</span>', `${f0(sum(st, r => r.mt))} MT · ${L_.map(sc => sc.h + " " + money("EGP", aggS(st, sc).sav)).join(" / ")} of the savings · use the Local quote age filter to isolate them`)].join("");
+  const bases = [...new Set(rows.map(c => c.base))].sort(), byB = groupBy(v.sav, r => r.base);
+  $("svCom").innerHTML = `<thead><tr><th>Commodity</th><th class="n">Contracts</th><th class="n">Compared MT</th>${L_.map(sc => `<th class="n">Landed ${sc.h}</th><th class="n">Local ${sc.h}</th><th class="n">EGP/MT ${sc.h}</th><th class="n">Savings ${sc.h} EGP</th>`).join("")}</tr></thead><tbody>` +
+    bases.map(b => { const A = L_.map(sc => aggS(byB[b] || [], sc));
+      return `<tr><td><b>${esc(b)}</b></td>${td(rows.filter(c => c.base === b).length)}${td(sum(byB[b] || [], r => r.mt))}${A.map(a => td(a.cost, f2) + td(a.local, f2) + td(a.per, f0, 1) + td(a.sav, f0, 1)).join("")}</tr>`; }).join("") +
+    `<tr class="tot"><td>Total</td>${td(rows.length)}${td(sum(v.sav, r => r.mt))}${L_.map(sc => { const a = aggS(v.sav, sc); return td(a.cost, f2) + td(a.local, f2) + td(a.per, f0, 1) + td(a.sav, f0, 1); }).join("")}</tr></tbody>`;
+  const ranked = rows.slice().sort((a, b) => (isN(pv(b)) ? pv(b) : -1e18) - (isN(pv(a)) ? pv(a) : -1e18));
+  $("svChart").innerHTML = hbar(ranked.map(c => scItem(c.contract, c.z.rows, {id: c.id})), {aria: "Savings by contract", left: 170});
+  rows = S.sort.sv ? sortBy(rows, "sv", cols) : ranked;
+  let h = thead("sv", cols) + "<tbody>";
   rows.forEach(c => {
-    h += `<tr class="row" data-sv="${esc(c.id)}" id="sv-${esc(c.id)}">` + SVC.map(col => { const val = col.v(c);
-      return col.n ? `<td class="n ${col.col ? sg(val) : ""}">${(col.f || f0)(val)}</td>` : `<td>${esc(val)}</td>`; }).join("") + "</tr>";
-    if (S.svOpen && S.svOpen.has(c.id)) h += `<tr class="det"><td colspan="${SVC.length}"><div class="detbox" style="width:auto"><table><thead><tr><th>Date</th><th class="n">MT</th><th class="n">Landed EGP/MT</th><th class="n">Local EGP/MT</th><th>Local quote of</th><th class="n">Age (days)</th><th class="n">Saving EGP/MT</th><th class="n">Saving EGP</th><th>Local record</th><th>Data quality</th></tr></thead><tbody>` +
-      c.z.rows.map(r => `<tr><td>${esc(r.date)}</td>${td(r.mt)}${td(r.cost, f2)}${td(r.local, f2)}<td>${esc(r.local_date)} <span class="note">${esc(r.local_key)}</span></td>${td(r.local_age)}${td(r.saving_mt, f2, 1)}${td(r.saving, f0, 1)}<td>${esc(r.local_source)}</td><td class="note">${esc(r.quality)}</td></tr>`).join("") +
-      `<tr class="tot"><td>Total</td>${td(c.z.mt)}${td(c.z.cost, f2)}${td(c.z.local, f2)}<td></td><td></td>${td(c.z.per, f2, 1)}${td(c.z.sav, f0, 1)}<td></td><td></td></tr></tbody></table></div></td></tr>`;
+    h += `<tr class="row" data-sv="${esc(c.id)}" id="sv-${esc(c.id)}">` + cols.map(col => cell(col, c)).join("") + "</tr>";
+    if (S.svOpen && S.svOpen.has(c.id)) h += `<tr class="det"><td colspan="${cols.length}"><div class="detwrap" style="overflow-x:auto"><table><thead><tr><th>Date</th><th class="n">MT</th>${L_.map(sc => `<th class="n">Landed ${sc.h}</th><th class="n">Local ${sc.h}</th><th class="n">Saving/MT ${sc.h}</th><th class="n">Saving ${sc.h} EGP</th>`).join("")}<th class="n">Import transport</th><th class="n">Local transport</th><th>Local quote of</th><th>Quote age</th><th>Local record</th><th>Data quality</th></tr></thead><tbody>` +
+      c.z.rows.map(r => `<tr class="${r.local_stale ? "stl" : ""}"><td>${esc(r.date)}</td>${td(r.mt)}${L_.map(sc => (isN(sc.cost(r)) ? td(sc.cost(r), f2) : `<td class="n">${NA_}</td>`) + td(sc.local(r), f2) + (isN(sc.per(r)) ? td(sc.per(r), f2, 1) + td(sc.sav(r), f0, 1) : `<td class="n">${NA_}</td><td class="n">${NA_}</td>`)).join("")}${isN(r.freight) ? td(r.freight, f2) : `<td class="n">${NA_}</td>`}${isN(r.local_transport) ? td(r.local_transport, f2) : `<td class="n">${NA_}</td>`}<td>${esc(r.local_date)} <span class="note">${esc(r.local_key)}</span></td><td>${ageBadge(r.local_age)}</td><td>${esc(r.local_source)}</td><td class="note">${esc(r.quality)}</td></tr>`).join("") +
+      `<tr class="tot"><td>Total</td>${td(c.z.incl.mt)}${L_.map(sc => td(c.z[sc.k].cost, f2) + td(c.z[sc.k].local, f2) + td(c.z[sc.k].per, f2, 1) + td(c.z[sc.k].sav, f0, 1)).join("")}<td></td><td></td><td></td><td></td><td></td><td></td></tr></tbody></table></div></td></tr>`;
   });
-  h += `<tr class="tot"><td colspan="3">Total · ${rows.length} contracts</td>${td(mt)}<td></td><td></td>${td(mt ? tot / mt : null, f2, 1)}${td(tot, f0, 1)}<td colspan="5"></td></tr></tbody>`;
+  h += totRow(cols, rows, `Total · ${rows.length} contracts`) + "</tbody>";
   $("svT").innerHTML = h;
 }
 
 // ── trends & breakdowns ─────────────────────────────────────────────
 function vbars(items, o) {
   if (!items.length) return '<p class="note">Nothing to show for this selection.</p>';
+  const two = items.some(i => isN(i.value2));
   const W = 640, H = 230, L = 56, R = 10, T = 16, B = 30;
-  const vals = items.map(i => i.value), mx = Math.max(0, ...vals), mn = Math.min(0, ...vals), sp = (mx - mn) || 1;
+  const vals = items.flatMap(i => isN(i.value2) ? [i.value, i.value2] : [i.value]), mx = Math.max(0, ...vals), mn = Math.min(0, ...vals), sp = (mx - mn) || 1;
   const Y = v => T + (mx - v) / sp * (H - T - B), slot = (W - L - R) / items.length, bw = Math.min(46, slot * 0.7);
-  let s = `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="${esc(o.aria || "bar chart")}">`;
+  let s = two ? `<div class="legend"><span><i style="background:var(--s1)"></i>Incl. transport</span><span><i style="background:var(--s1l)"></i>Excl. transport</span></div>` : "";
+  s += `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="${esc(o.aria || "bar chart")}">`;
   [mx, (mx + mn) / 2, mn].forEach(v => { s += `<line x1="${L}" x2="${W - R}" y1="${Y(v)}" y2="${Y(v)}" stroke="var(--grid)"/><text x="${L - 6}" y="${Y(v) + 4}" text-anchor="end">${short(v)}</text>`; });
   s += `<line x1="${L}" x2="${W - R}" y1="${Y(0)}" y2="${Y(0)}" stroke="var(--axis)"/>`;
-  items.forEach((it, i) => { const x = L + i * slot + (slot - bw) / 2, y0 = Y(0), y1 = Y(it.value);
+  items.forEach((it, i) => { const x = L + i * slot + (slot - bw) / 2, y0 = Y(0);
     const col = it.color || (it.value < 0 ? "var(--bad)" : "var(--s1)");
     s += `<g data-tip="${esc(it.tip || "")}"><rect x="${L + i * slot}" y="${T}" width="${slot}" height="${H - T - B}" fill="transparent"/>`;
-    s += `<rect x="${x}" y="${Math.min(y0, y1)}" width="${bw}" height="${Math.max(Math.abs(y1 - y0), it.value ? 1 : 0)}" rx="4" fill="${col}"/></g>`;
+    const one = (val, xx, w, c) => `<rect x="${xx}" y="${Math.min(y0, Y(val))}" width="${w}" height="${Math.max(Math.abs(Y(val) - y0), val ? 1 : 0)}" rx="3" fill="${c}"/>`;
+    if (isN(it.value2)) s += one(it.value, x, bw / 2 - 1, col) + one(it.value2, x + bw / 2 + 1, bw / 2 - 1, it.value2 < 0 ? "var(--badl)" : "var(--s1l)");
+    else s += one(it.value, x, bw, col);
+    s += "</g>";
     s += `<text class="lbl" x="${x + bw / 2}" y="${H - 12}" text-anchor="middle">${esc(it.label)}</text>`; });
   return s + "</svg>";
 }
 const monthName = m => { const [y, mm] = m.split("-"); return ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][+mm - 1] + " " + y.slice(2); };
 function lines2(rows, o) {
   if (rows.length < 2) return '<p class="note">Not enough consumption days for this selection.</p>';
+  // a/b = first scenario (solid); a2/b2 = excluding transport when shown side by side (dashed).
+  const two = rows.some(r => isN(r.a2));
   const W = 1200, H = 280, L = 60, R = 16, T = 14, B = 30;
-  const ys = rows.flatMap(r => [r.a, r.b]), pad = (Math.max(...ys) - Math.min(...ys)) * 0.08 || 50;
+  const ys = rows.flatMap(r => [r.a, r.b, r.a2, r.b2]).filter(isN), pad = (Math.max(...ys) - Math.min(...ys)) * 0.08 || 50;
   const lo = Math.min(...ys) - pad, hi = Math.max(...ys) + pad, t0 = Date.parse(rows[0].d), t1 = Date.parse(rows[rows.length - 1].d), sp = (t1 - t0) || 1;
   const X = d => L + (Date.parse(d) - t0) / sp * (W - L - R), Y = v => T + (1 - (v - lo) / (hi - lo)) * (H - T - B);
-  let s = `<div class="legend"><span><i style="background:var(--s1)"></i>${esc(o.a)}</span><span><i style="background:var(--s2)"></i>${esc(o.b)}</span></div><svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="${esc(o.aria)}">`;
+  let s = `<div class="legend"><span><i style="background:var(--s1)"></i>${esc(o.a)}</span><span><i style="background:var(--s2)"></i>${esc(o.b)}</span>${two ? `<span><i style="background:transparent;border-top:2px dashed var(--ink2);height:0;border-radius:0"></i>Dashed = excluding transport</span>` : ""}</div><svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="${esc(o.aria)}">`;
   for (let k = 0; k <= 4; k++) { const v = lo + (hi - lo) * k / 4; s += `<line x1="${L}" x2="${W - R}" y1="${Y(v)}" y2="${Y(v)}" stroke="var(--grid)"/><text x="${L - 6}" y="${Y(v) + 4}" text-anchor="end">${fx(v, 0)}</text>`; }
   // A gap of more than 4 days without consumption breaks the line rather than bridging it.
-  const path = key => rows.map((r, i) => ((i && Date.parse(r.d) - Date.parse(rows[i - 1].d) <= 4 * 864e5) ? "L" : "M")
-    + X(r.d).toFixed(1) + "," + Y(r[key]).toFixed(1)).join(" ");
+  const path = key => { let prev = null; return rows.map(r => { if (!isN(r[key])) { prev = null; return ""; }
+    const seg = (prev && Date.parse(r.d) - Date.parse(prev.d) <= 4 * 864e5 ? "L" : "M") + X(r.d).toFixed(1) + "," + Y(r[key]).toFixed(1); prev = r; return seg; }).join(" "); };
+  if (two) s += `<path d="${path("b2")}" fill="none" stroke="var(--s2)" stroke-width="1.5" stroke-dasharray="5 4"/><path d="${path("a2")}" fill="none" stroke="var(--s1)" stroke-width="1.5" stroke-dasharray="5 4"/>`;
   s += `<path d="${path("b")}" fill="none" stroke="var(--s2)" stroke-width="2"/><path d="${path("a")}" fill="none" stroke="var(--s1)" stroke-width="2"/>`;
   const step = (W - L - R) / rows.length;
   rows.forEach(r => { s += `<rect x="${X(r.d) - step / 2}" y="${T}" width="${Math.max(step, 2)}" height="${H - T - B}" fill="transparent" data-tip="${esc(o.tip(r))}"/>`; });
@@ -756,30 +1011,28 @@ function stacked100(rows) {
   return s + "</svg>";
 }
 function renderTrends(v) {
-  const byM = {}, cbM = {};
-  v.sav.forEach(r => { const m = r.date.slice(0, 7), o = byM[m] = byM[m] || {s: 0, mt: 0, fin: 0}; o.s += r.saving; o.mt += r.mt; if (r.cif_basis === "Final CIF") o.fin += r.saving; });
+  const L_ = scs(), cbM = {}, byM = groupBy(v.sav, r => r.date.slice(0, 7));
   v.cb.filter(r => r.assessable).forEach(r => { const m = r.date.slice(0, 7), o = cbM[m] = cbM[m] || {u: 0, mt: 0, adv: 0, mis: 0}; o.u += r.usd; o.mt += r.mt; if (r.usd > 0) o.adv += r.usd; else o.mis += r.usd; });
-  $("trMonth").innerHTML = vbars(Object.keys(byM).sort().map(m => ({label: monthName(m), value: byM[m].s,
-    tip: `<b>${monthName(m)}</b><br>${money("EGP", byM[m].s)} on ${f0(byM[m].mt)} MT (${f0(byM[m].s / byM[m].mt)} EGP/MT)<br>final CIF ${short(byM[m].fin)} · provisional ${short(byM[m].s - byM[m].fin)}`})), {aria: "Savings by month"});
+  $("trMonth").innerHTML = vbars(Object.keys(byM).sort().map(m => { const it = scItem(monthName(m), byM[m]); it.label = monthName(m);
+    const fin = byM[m].filter(r => r.cif_basis === "Final CIF"); it.tip += `<br>final CIF ${short(sum(fin, PS().sav))} · provisional ${short(aggS(byM[m], PS()).sav - sum(fin, PS().sav))} (${PS().h})`; return it; }), {aria: "Savings by month"});
   $("trCbotMonth").innerHTML = vbars(Object.keys(cbM).sort().map(m => ({label: monthName(m), value: cbM[m].u, color: cbM[m].u >= 0 ? "var(--good)" : "var(--bad)",
     tip: `<b>${monthName(m)}</b><br>Net ${money("USD", cbM[m].u)} on ${f0(cbM[m].mt)} MT<br>advantage ${money("USD", cbM[m].adv)} · missed ${money("USD", cbM[m].mis)}`})), {aria: "CBOT by month"});
   const bases = [...new Set(v.sav.map(r => r.base))].sort();
   const keep = (sel, list, pref) => { const cur = $(sel).value; $(sel).innerHTML = list.map(b => `<option>${esc(b)}</option>`).join(""); $(sel).value = list.includes(cur) ? cur : (list.includes(pref) ? pref : list[0] || ""); };
   keep("trLocBase", bases, "CORN");
-  const lb = $("trLocBase").value, day = {};
-  v.sav.filter(r => r.base === lb).forEach(r => { const o = day[r.date] = day[r.date] || {mt: 0, c: 0, l: 0}; o.mt += r.mt; o.c += r.cost * r.mt; o.l += r.local * r.mt; });
-  $("trLocal").innerHTML = lines2(Object.keys(day).sort().map(d => ({d, a: day[d].c / day[d].mt, b: day[d].l / day[d].mt, mt: day[d].mt})),
-    {a: "Our landed cost (tonnes consumed that day)", b: "Local delivered price that day", aria: "Local vs landed",
-     tip: r => `<b>${r.d}</b> · ${f0(r.mt)} MT<br>Landed ${f2(r.a)} · local ${f2(r.b)}<br>Saving <b class="${sg(r.b - r.a)}">${f2(r.b - r.a)} EGP/MT</b>`});
+  const lb = $("trLocBase").value, day = groupBy(v.sav.filter(r => r.base === lb), r => r.date);
+  const dRows = Object.keys(day).sort().map(d => { const A = L_.map(sc => aggS(day[d], sc)); return {d, a: A[0].cost, b: A[0].local, a2: A[1] ? A[1].cost : undefined, b2: A[1] ? A[1].local : undefined, A, mt: sum(day[d], r => r.mt)}; }).filter(r => isN(r.a) && isN(r.b));
+  $("trLocal").innerHTML = lines2(dRows,
+    {a: `Our landed cost (${L_[0].s})`, b: `Local price that day (${L_[0].s})`, aria: "Local vs landed",
+     tip: r => `<b>${r.d}</b> · ${f0(r.mt)} MT<br>` + L_.map((sc, i) => `${sc.l}: landed ${f2(r.A[i].cost)} · local ${f2(r.A[i].local)} · saving <b class="${sg(r.A[i].per)}">${f2(r.A[i].per)} EGP/MT</b>`).join("<br>")});
   const cbBases = Object.keys(M.cbot_series || {}).filter(b => v.contracts.some(c => c.base === b && c.fix.fixed)).sort();
   keep("trCbBase", cbBases, "CORN");
   $("trCbot").innerHTML = $("trCbBase").value ? cbotHistory($("trCbBase").value, v) : '<p class="note">No fixed contracts in this selection.</p>';
-  const agg = key => { const o = {}; v.sav.forEach(r => { const k = key(r) || "—", x = o[k] = o[k] || {s: 0, mt: 0}; x.s += r.saving; x.mt += r.mt; });
-    return Object.entries(o).sort((a, b) => b[1].s - a[1].s); };
-  const sup = agg(r => r.supplier).slice(0, 12);
-  $("trSupplier").innerHTML = hbar(sup.map(([k, x]) => ({label: k, value: x.s, sup: k, tip: `<b>${esc(k)}</b><br>${money("EGP", x.s)} on ${f0(x.mt)} MT · ${f0(x.s / x.mt)} EGP/MT`})), {aria: "Savings by supplier"});
-  const org = agg(r => (CI[r.contract_id] || {}).origin);
-  $("trOrigin").innerHTML = hbar(org.map(([k, x]) => ({label: k, value: x.s, tip: `<b>${esc(k)}</b><br>${money("EGP", x.s)} on ${f0(x.mt)} MT · ${f0(x.s / x.mt)} EGP/MT`})), {aria: "Savings by origin"});
+  const P_ = PS(), rank = g => Object.entries(g).sort((a, b) => (aggS(b[1], P_).sav || 0) - (aggS(a[1], P_).sav || 0));
+  const sup = rank(groupBy(v.sav, r => r.supplier)).slice(0, 12);
+  $("trSupplier").innerHTML = hbar(sup.map(([k, r]) => scItem(k, r)), {aria: "Savings by supplier"});
+  const org = rank(groupBy(v.sav, r => (CI[r.contract_id] || {}).origin));
+  $("trOrigin").innerHTML = hbar(org.map(([k, r]) => scItem(k, r)), {aria: "Savings by origin"});
   const f = v.f;
   $("trSource").innerHTML = stacked100(M.commodities.filter(c => !f.base || c.base === f.base).map(c => ({base: c.base,
     vals: [c.priced_mt, Math.max(c.allocated_import_mt - c.priced_mt, 0), c.allocated_local_mt, c.excluded_mt]})));
@@ -805,12 +1058,18 @@ $("badges").innerHTML = `<button class="badge ${M.management_ready ? "ok" : "no"
   `<span class="tag act">Actual = consumed (FIFO estimated)</span><span class="tag pot">Potential = not yet consumed</span><span class="tag ben">Benchmark = CBOT comparison</span>`;
 $("bReady").addEventListener("click", () => { if (!document.body.classList.contains("mgmt")) showTab("quality"); });
 document.querySelectorAll(".tab").forEach(t => t.addEventListener("click", () => showTab(t.dataset.p)));
-["fBase", "fOrigin", "fSupplier", "fFrom", "fTo", "fOpen", "fFix", "fDQ"].forEach(id => $(id).addEventListener("change", render));
+["fBase", "fOrigin", "fSupplier", "fFrom", "fTo", "fOpen", "fFix", "fDQ", "fAge"].forEach(id => $(id).addEventListener("change", render));
+["oBucket", "oRes", "oRem"].forEach(id => $(id).addEventListener("change", () => renderOpen(view())));
+const TXN = {side: "Side-by-side: including transport = inland transport on both sides; excluding = without it. Ocean freight stays in CIF.",
+  incl: "Including transportation: landed cost with inland freight vs local quote + local transport.", excl: "Excluding transportation: landed cost without inland freight vs the local quote itself."};
+$("txNote").textContent = TXN.side;
+$("txSeg").addEventListener("click", e => { const b = e.target.closest("button[data-tx]"); if (!b) return;
+  S.tx = b.dataset.tx; S.sort = {}; document.querySelectorAll("#txSeg button").forEach(x => x.classList.toggle("on", x === b)); $("txNote").textContent = TXN[S.tx]; render(); });
 $("fQ").addEventListener("input", render);
 $("fPreset").addEventListener("change", e => { const v = e.target.value, end = M.as_of; let start = "";
   if (v === "ytd") start = end.slice(0, 4) + "-01-01"; else if (v) { const d = new Date(end); d.setDate(d.getDate() - +v); start = d.toISOString().slice(0, 10); }
   $("fFrom").value = start; $("fTo").value = v ? end : ""; render(); });
-$("bReset").addEventListener("click", () => { ["fBase", "fOrigin", "fSupplier", "fQ", "fFrom", "fTo", "fPreset", "fOpen", "fFix", "fDQ"].forEach(id => $(id).value = ""); render(); });
+$("bReset").addEventListener("click", () => { ["fBase", "fOrigin", "fSupplier", "fQ", "fFrom", "fTo", "fPreset", "fOpen", "fFix", "fDQ", "fAge", "oBucket", "oRes", "oRem"].forEach(id => $(id).value = ""); render(); });
 $("cbSel").addEventListener("change", e => { S.cb = e.target.value; renderCbot(view()); });
 $("trLocBase").addEventListener("change", () => renderTrends(view()));
 $("trCbBase").addEventListener("change", () => renderTrends(view()));

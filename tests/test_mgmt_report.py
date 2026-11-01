@@ -97,13 +97,16 @@ def inputs(**over):
          "origin": "BRAZIL", "status": "Closed", "is_open": False, "pricing_status": "PRICED",
          "qty_mt": 1000.0, "delivery_date": "2026-10-01", "storage_start": "2026-10-01",
          "futures_month": "DEC", "cif_usd_mt": 285.0, "premium": 207.0, "cif_final": True,
-         "fx": 50.0, "landed_egp_mt": 15000.0, "source_id": "contracts.C1"},
+         "fx": 50.0, "landed_egp_mt": 15000.0, "source_id": "contracts.C1",
+         "freight_egp_mt": 400.0, "discharge_egp_mt": 200.0, "clearance_egp_mt": 150.0, "form4_fx": 50.0},
         {"id": "C2", "contract": "B-2", "supplier": "S", "commodity": "CORN-BRZ", "base": "CORN",
          "origin": "BRAZIL", "status": "Open", "is_open": True, "pricing_status": "UNPRICED",
          "qty_mt": 1000.0, "delivery_date": "2026-10-03", "storage_start": "2026-10-03",
          "futures_month": "DEC", "cif_usd_mt": 250.0, "premium": 180.0, "cif_final": False,
          "fx": 50.0, "landed_egp_mt": 14000.0, "landed_today": 14100.0, "local_today": 15000.0,
-         "local_today_date": "2026-10-04", "source_id": "contracts.C2"},
+         "local_today_price": 14676.87, "local_today_transport": 323.13,
+         "local_today_date": "2026-10-04", "source_id": "contracts.C2",
+         "freight_egp_mt": 400.0, "discharge_egp_mt": 200.0, "clearance_egp_mt": 150.0},
     ]
     local = {"price": 15500.0, "date": "2026-10-01", "key": "CORN-BRZ"}
     draws = [
@@ -115,6 +118,7 @@ def inputs(**over):
     ]
     cbot = [(D(2026, 9, 28) + dt.timedelta(days=i), 520.0) for i in range(10)]
     inp = {"as_of": "2026-10-04", "contracts": contracts, "draws": draws, "cbot": {"CORN": cbot},
+           "latest_fx": {"rate": 52.0, "date": "2026-10-04", "source": "fx_history"},
            "local_obs": [{"key": "CORN-BRZ", "base": "CORN", "date": "2026-10-01", "price": 15176.87,
                           "transport": 323.13, "delivered": 15500.0, "source": "manual",
                           "source_id": "local_prices[7]", "status": "Observed"}],
@@ -153,7 +157,8 @@ class BuildTests(unittest.TestCase):
         inp["draws"][1]["local"] = {"price": 15500.0, "date": "2026-08-22", "key": "CORN-BRZ"}
         inp["local_obs"].append({"key": "CORN-BRZ", "date": "2026-08-22", "source_id": "local_prices[3]"})
         row = next(s for s in mr.build(inp)["savings"] if s["date"] == "2026-10-01")
-        self.assertEqual(row["local_status"], "Last price in force (40 d)")
+        self.assertEqual(row["local_status"], "STALE — 40 days old (last price in force)")
+        self.assertTrue(row["local_stale"])
         self.assertAlmostEqual(row["saving"], (15500 - 15000) * 500)
 
     def test_cbot_only_for_fixed_contracts_and_month_matched_days(self):
@@ -166,11 +171,60 @@ class BuildTests(unittest.TestCase):
         self.assertAlmostEqual(r["usd"], (520 - fix) * 0.3937 * 500)
         self.assertEqual(r["result"], "Advantage")
 
-    def test_unpriced_contract_is_open_indicative_not_fixed(self):
+    def test_unpriced_contract_is_valued_at_latest_cbot_plus_premium_and_latest_fx(self):
         o = next(r for r in self.m["open"] if r["contract_id"] == "C2")
         self.assertEqual(o["class"], "Indicative (unpriced)")
-        self.assertAlmostEqual(o["potential"], (15000 - 14100) * 500)
+        cif = (520.0 + 180.0) * 0.3937                       # latest CBOT + premium
+        self.assertAlmostEqual(o["cif"], cif)
+        self.assertEqual(o["fx_basis"], "Latest market FX — provisional (Form 4 pending)")
+        self.assertAlmostEqual(o["cost_excl"], cif * 52.0 + 200 + 150)
+        self.assertAlmostEqual(o["cost_incl"], cif * 52.0 + 200 + 150 + 400)
+        self.assertAlmostEqual(o["potential"], (15000 - o["cost_incl"]) * 500)
+        self.assertAlmostEqual(o["potential_excl"], (14676.87 - o["cost_excl"]) * 500)
+        self.assertIn("on DEC-26 (front month)", o["cbot_note"])   # 7 Oct: DEC is the front month
+        inp = inputs()
+        inp["contracts"][1]["futures_month"] = "MAR-27"
+        o2 = next(r for r in mr.build(inp)["open"] if r["contract_id"] == "C2")
+        self.assertIn("Indicative proxy", o2["cbot_note"])          # MAR-27 is not stored
         self.assertEqual(self.m["kpis"]["open_fixed_potential_egp"], 0)
+
+    def test_a_recorded_form4_wins_over_the_latest_fx(self):
+        inp = inputs()
+        inp["contracts"][1]["form4_fx"] = 51.0
+        o = next(r for r in mr.build(inp)["open"] if r["contract_id"] == "C2")
+        self.assertEqual((o["fx"], o["fx_basis"]), (51.0, "Form 4"))
+
+    def test_both_transport_scenarios_use_each_sides_own_transport(self):
+        s = next(r for r in self.m["savings"] if r["date"] == "2026-10-01")
+        self.assertAlmostEqual(s["cost_excl"], 15000 - 400)          # CIF incl. ocean freight kept
+        self.assertAlmostEqual(s["local_excl"], 15176.87)
+        self.assertAlmostEqual(s["saving_excl"], (15176.87 - 14600) * 500)
+        self.assertAlmostEqual(s["saving"] - s["saving_excl"], (323.13 - 400) * 500)
+
+    def test_an_unreceived_contract_gets_a_current_market_valuation_only(self):
+        inp = inputs()
+        inp["contracts"][1].update(storage_start="", delivery_date="2026-10-03", is_open=True)
+        inp["draws"] = [d for d in inp["draws"] if d.get("lot_id") != "CONTRACT-C2"]
+        inp["stock_by_contract"] = {"C1": 0.0}
+        m = mr.build(inp)
+        c2 = next(c for c in m["contracts"] if c["id"] == "C2")
+        self.assertEqual((c2["storage_status"], c2["received"], c2["consumed_mt"]), ("Not recorded", False, 0))
+        o = next(r for r in m["open"] if r["contract_id"] == "C2")
+        self.assertTrue(o["class"].startswith("Current market valuation"))
+        self.assertAlmostEqual(o["unconsumed_mt"], 1000.0)
+        self.assertNotIn("C2", {r["contract_id"] for r in m["savings"]})
+
+    def test_consumption_without_storage_start_is_flagged_not_reclassified(self):
+        inp = inputs()
+        inp["contracts"][0]["storage_start"] = ""
+        m = mr.build(inp)
+        c1 = next(c for c in m["contracts"] if c["id"] == "C1")
+        self.assertTrue(any("reconcile" in f for f in c1["flags"]))
+        self.assertIn("C1", {r["contract_id"] for r in m["savings"]})
+
+    def test_pricing_classes(self):
+        self.assertEqual(next(c for c in self.m["contracts"] if c["id"] == "C1")["pricing_class"], "Fixed")
+        self.assertEqual(next(c for c in self.m["contracts"] if c["id"] == "C2")["pricing_class"], "Unpriced")
 
     def test_the_report_passes_its_own_validation(self):
         failed = [v for v in self.m["validation"] if not v["passed"]]
