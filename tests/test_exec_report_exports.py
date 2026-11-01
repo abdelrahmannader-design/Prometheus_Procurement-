@@ -136,7 +136,7 @@ class HtmlTests(unittest.TestCase):
         self.assertEqual(self.doc.count("</script>"), 2)
 
     def test_dashboard_controls_exist(self):
-        for hook in ('data-p="trends"', 'id="trMonth"', 'id="trLocal"', 'id="trCbot"', 'id="trSupplier"', 'id="trSource"', 'id="bMgmt"', 'id="bTheme"', 'id="bXlsx"', "window.print()", 'id="fFrom"', 'id="fDQ"',
+        for hook in ('data-p="savings"', 'id="svT"', 'data-p="trends"', 'id="trMonth"', 'id="trLocal"', 'id="trCbot"', 'id="trSupplier"', 'id="trSource"', 'id="bMgmt"', 'id="bTheme"', 'id="bXlsx"', "window.print()", 'id="fFrom"', 'id="fDQ"',
                      'data-p="cbot"', 'data-p="open"', 'data-p="quality"', "@media print",
                      'prefers-color-scheme:dark'):
             self.assertIn(hook, self.doc)

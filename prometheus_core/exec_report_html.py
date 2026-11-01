@@ -88,7 +88,7 @@ table{border-collapse:collapse;width:100%;font-size:12.5px}
 th{text-align:left;font-weight:600;color:var(--ink2);padding:7px 8px;border-bottom:1px solid var(--axis);white-space:nowrap;cursor:pointer;position:sticky;top:0;background:var(--surface)}
 td{padding:6px 8px;border-bottom:1px solid var(--grid);vertical-align:top}
 th.n,td.n{text-align:right;font-variant-numeric:tabular-nums}
-#tO td,#tCP td,#tC td{white-space:nowrap}
+#tO td,#tCP td,#tC td,#svT td,#svCom td{white-space:nowrap}
 tr.row{cursor:pointer}tr.row:hover td{background:var(--hover)}
 tr.det>td{background:var(--page);padding:14px}
 tr.tot td{font-weight:700;border-top:2px solid var(--axis)}
@@ -126,7 +126,7 @@ body.mgmt .mgmt-only{display:block!important}
  .card,.kpi{break-inside:avoid;border-color:#ccc}
  main{max-width:none;padding:0}header{padding:0 0 6px}
  *{-webkit-print-color-adjust:exact;print-color-adjust:exact}
- body.mgmt .panel:not(#p-overview):not(#p-open):not(#p-trends){display:none!important}
+ body.mgmt .panel:not(#p-overview):not(#p-savings):not(#p-open):not(#p-trends){display:none!important}
 }
 </style>
 </head>
@@ -138,6 +138,7 @@ body.mgmt .mgmt-only{display:block!important}
 </header>
 <nav>
  <button class="tab on" data-p="overview">Overview</button>
+ <button class="tab" data-p="savings">Savings vs local</button>
  <button class="tab" data-p="contracts">Contracts</button>
  <button class="tab" data-p="cbot">CBOT fixed vs consumption</button>
  <button class="tab" data-p="open">Open contracts vs local</button>
@@ -175,6 +176,17 @@ body.mgmt .mgmt-only{display:block!important}
   <div class="card"><h2>Top 10 contracts by local market savings</h2><p class="sub">Click a bar to open the contract</p><div id="chTop"></div></div>
   <div class="card"><h2>Top 10 contracts by CBOT missed opportunity</h2><p class="sub">Historical benchmark, not a proven avoidable loss · click to open</p><div id="chMiss"></div></div>
  </div>
+</section>
+
+<section class="panel" id="p-savings">
+ <div class="kpis" id="svKpis"></div>
+ <div class="grid2">
+  <div class="card"><h2>By commodity</h2><p class="sub">Imported tonnes consumed, each against the local delivered price observed on its day</p><div class="tw"><table id="svCom"></table></div></div>
+  <div class="card"><h2>Saving vs loss, by contract</h2><p class="sub">Every consumed contract, best to worst · EGP · click a bar to open it</p><div id="svChart" style="max-height:520px;overflow-y:auto"></div></div>
+ </div>
+ <div class="card"><h2>Savings vs local — contract by contract</h2>
+  <p class="sub">Daily saving = (local delivered price − our landed cost) × tonnes consumed that day. Click a contract to see its days, the local quote used and its date.</p>
+  <div class="tw"><table id="svT"></table></div></div>
 </section>
 
 <section class="panel" id="p-contracts">
@@ -637,6 +649,51 @@ function exportXlsx() {
   window.__lastExport = files.map(f => f[0]);
 }
 
+// ── savings vs local tab ────────────────────────────────────────────
+const SVC = [{h: "Contract", v: c => c.contract}, {h: "Supplier", v: c => c.supplier}, {h: "Commodity", v: c => c.commodity},
+  {h: "Compared MT", n: 1, v: c => c.z.mt}, {h: "Landed EGP/MT", n: 1, v: c => c.z.cost, f: f2}, {h: "Wtd avg local EGP/MT", n: 1, v: c => c.z.local, f: f2},
+  {h: "Savings EGP/MT", n: 1, v: c => c.z.per, f: f2, col: 1}, {h: "Total savings EGP", n: 1, v: c => c.z.sav, col: 1},
+  {h: "Savings %", n: 1, v: c => c.z.pct, f: x => isN(x) ? fx(x, 1) + "%" : "—", col: 1}, {h: "First day", v: c => c.z.first}, {h: "Last day", v: c => c.z.last},
+  {h: "CIF", v: c => c.cif_final ? "Final" : "Provisional"}, {h: "Local quotes", v: c => c.z.q}];
+function svRows(v) {
+  const by = {};
+  v.sav.forEach(r => { const o = by[r.contract_id] = by[r.contract_id] || {mt: 0, sav: 0, c: 0, l: 0, first: r.date, last: r.date, rows: [], same: 0, carry: 0, stale: 0};
+    o.mt += r.mt; o.sav += r.saving; o.c += r.cost * r.mt; o.l += r.local * r.mt; o.rows.push(r);
+    if (r.date < o.first) o.first = r.date; if (r.date > o.last) o.last = r.date;
+    if (r.local_status.startsWith("Same")) o.same += r.mt; else if (r.local_status.startsWith("Stale")) o.stale += r.mt; else o.carry += r.mt; });
+  return Object.entries(by).map(([id, o]) => Object.assign(CI[id], {z: {mt: o.mt, sav: o.sav, cost: o.c / o.mt, local: o.l / o.mt, per: o.sav / o.mt,
+    pct: o.l ? o.sav / o.l * 100 : null, first: o.first, last: o.last, rows: o.rows.sort((a, b) => a.date < b.date ? -1 : 1),
+    q: [o.same && `${fx(o.same / o.mt * 100, 0)}% same day`, o.carry && `${fx(o.carry / o.mt * 100, 0)}% carried`, o.stale && `${fx(o.stale / o.mt * 100, 0)}% stale`].filter(Boolean).join(" · ")}}));
+}
+function renderSavings(v) {
+  let rows = svRows(v);
+  const tot = sum(rows, c => c.z.sav), mt = sum(rows, c => c.z.mt), win = rows.filter(c => c.z.sav >= 0), loss = rows.filter(c => c.z.sav < 0);
+  const fin = sum(v.sav.filter(r => r.cif_basis === "Final CIF"), r => r.saving);
+  $("svKpis").innerHTML = [
+    kcard("Total savings vs local", tot, money("EGP", tot), '<span class="tag act">Actual · FIFO estimated</span>', `${f0(mt)} MT compared · ${mt ? f0(tot / mt) : "—"} EGP/MT · final CIF ${short(fin)}, provisional ${short(tot - fin)}`),
+    kcard("Contracts cheaper than local", sum(win, c => c.z.sav), `${win.length} contracts`, '<span class="tag good">Saving</span>', `${money("EGP", sum(win, c => c.z.sav))} on ${f0(sum(win, c => c.z.mt))} MT`),
+    kcard("Contracts dearer than local", sum(loss, c => c.z.sav), `${loss.length} contracts`, '<span class="tag bad">Loss</span>', `${money("EGP", sum(loss, c => c.z.sav))} on ${f0(sum(loss, c => c.z.mt))} MT`)].join("");
+  const bases = [...new Set(rows.map(c => c.base))].sort();
+  $("svCom").innerHTML = `<thead><tr><th>Commodity</th><th class="n">Contracts</th><th class="n">Compared MT</th><th class="n">Landed EGP/MT</th><th class="n">Local EGP/MT</th><th class="n">EGP/MT</th><th class="n">Savings EGP</th></tr></thead><tbody>` +
+    bases.map(b => { const r = rows.filter(c => c.base === b), m = sum(r, c => c.z.mt), sv = sum(r, c => c.z.sav);
+      return `<tr><td><b>${esc(b)}</b></td>${td(r.length)}${td(m)}${td(sum(r, c => c.z.cost * c.z.mt) / m, f2)}${td(sum(r, c => c.z.local * c.z.mt) / m, f2)}${td(sv / m, f0, 1)}${td(sv, f0, 1)}</tr>`; }).join("") +
+    `<tr class="tot"><td>Total</td>${td(rows.length)}${td(mt)}<td></td><td></td>${td(mt ? tot / mt : null, f0, 1)}${td(tot, f0, 1)}</tr></tbody>`;
+  const ranked = rows.slice().sort((a, b) => b.z.sav - a.z.sav);
+  $("svChart").innerHTML = hbar(ranked.map(c => ({label: c.contract, value: c.z.sav, id: c.id,
+    tip: `<b>${esc(c.contract)}</b> · ${esc(c.commodity)}<br>${money("EGP", c.z.sav)} on ${f0(c.z.mt)} MT (${f2(c.z.per)} EGP/MT)<br>landed ${f2(c.z.cost)} vs local ${f2(c.z.local)}`})), {aria: "Savings by contract", left: 170});
+  rows = S.sort.sv ? sortBy(rows, "sv", SVC) : ranked;
+  let h = thead("sv", SVC) + "<tbody>";
+  rows.forEach(c => {
+    h += `<tr class="row" data-sv="${esc(c.id)}" id="sv-${esc(c.id)}">` + SVC.map(col => { const val = col.v(c);
+      return col.n ? `<td class="n ${col.col ? sg(val) : ""}">${(col.f || f0)(val)}</td>` : `<td>${esc(val)}</td>`; }).join("") + "</tr>";
+    if (S.svOpen && S.svOpen.has(c.id)) h += `<tr class="det"><td colspan="${SVC.length}"><div class="detbox" style="width:auto"><table><thead><tr><th>Date</th><th class="n">MT</th><th class="n">Landed EGP/MT</th><th class="n">Local EGP/MT</th><th>Local quote of</th><th class="n">Age (days)</th><th class="n">Saving EGP/MT</th><th class="n">Saving EGP</th><th>Local record</th><th>Data quality</th></tr></thead><tbody>` +
+      c.z.rows.map(r => `<tr><td>${esc(r.date)}</td>${td(r.mt)}${td(r.cost, f2)}${td(r.local, f2)}<td>${esc(r.local_date)} <span class="note">${esc(r.local_key)}</span></td>${td(r.local_age)}${td(r.saving_mt, f2, 1)}${td(r.saving, f0, 1)}<td>${esc(r.local_source)}</td><td class="note">${esc(r.quality)}</td></tr>`).join("") +
+      `<tr class="tot"><td>Total</td>${td(c.z.mt)}${td(c.z.cost, f2)}${td(c.z.local, f2)}<td></td><td></td>${td(c.z.per, f2, 1)}${td(c.z.sav, f0, 1)}<td></td><td></td></tr></tbody></table></div></td></tr>`;
+  });
+  h += `<tr class="tot"><td colspan="3">Total · ${rows.length} contracts</td>${td(mt)}<td></td><td></td>${td(mt ? tot / mt : null, f2, 1)}${td(tot, f0, 1)}<td colspan="5"></td></tr></tbody>`;
+  $("svT").innerHTML = h;
+}
+
 // ── trends & breakdowns ─────────────────────────────────────────────
 function vbars(items, o) {
   if (!items.length) return '<p class="note">Nothing to show for this selection.</p>';
@@ -732,7 +789,7 @@ function renderTrends(v) {
 // ── wiring ───────────────────────────────────────────────────────────
 function render() {
   const v = view(), K = kpis(v);
-  renderOverview(v, K); renderContracts(v); renderCbot(v); renderOpen(v); renderTrends(v);
+  renderOverview(v, K); renderSavings(v); renderContracts(v); renderCbot(v); renderOpen(v); renderTrends(v);
 }
 function showTab(p) { S.tab = p; document.querySelectorAll(".tab").forEach(t => t.classList.toggle("on", t.dataset.p === p));
   document.querySelectorAll(".panel").forEach(x => x.classList.toggle("on", x.id === "p-" + p)); }
@@ -772,6 +829,8 @@ document.addEventListener("click", e => {
   const th = e.target.closest("th[data-sort]");
   if (th) { const k = th.dataset.sort, i = +th.dataset.i, cur = S.sort[k]; S.sort[k] = {i, dir: cur && cur.i === i ? -cur.dir : -1}; render(); return; }
   const g = e.target.closest("[data-goto]"); if (g) { openContract(g.getAttribute("data-goto")); return; }
+  const svr = e.target.closest("tr.row[data-sv]");
+  if (svr) { S.svOpen = S.svOpen || new Set(); const id = svr.dataset.sv; S.svOpen.has(id) ? S.svOpen.delete(id) : S.svOpen.add(id); renderSavings(view()); return; }
   const row = e.target.closest("tr.row[data-id]");
   if (row) { const id = row.dataset.id; S.open.has(id) ? S.open.delete(id) : S.open.add(id); renderContracts(view()); }
 });
