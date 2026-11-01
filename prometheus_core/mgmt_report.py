@@ -48,8 +48,8 @@ MONTH_NAMES = {"JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6, "JUL"
 CODE_MONTHS = {v: k for k, v in MONTH_CODES.items()}
 
 DEFAULTS = {
-    "carry_days": 7,        # a local quote up to this old is "carried forward"
-    "max_carry_days": 30,   # older than this, the comparison is excluded
+    "carry_days": 7,        # kept for reference; a local price stays in force until the next one
+    "max_carry_days": None, # None: no limit — no new local price means the price had not changed
     "cbot_max_age_days": 7, # a CBOT print older than this is not used
     "neutral_cbot": 1.0,    # |CBOT difference| below this (price units) is Neutral
     "year_lookback_days": 75,
@@ -301,15 +301,21 @@ def market_check(fix, history, delivery, opts=DEFAULTS):
 # ── 3. building the model ────────────────────────────────────────────────
 
 def _local_status(age, opts):
+    """A local price stays in force until the next one is entered.
+
+    No new local price means the market price had not changed, so the last
+    one is used however old, and labelled with the date it was set. Only a
+    day with no local price before it at all is left out. (``max_carry_days``
+    can still impose a limit, but none is set by default.)
+    """
     if age is None:
         return None, "No local price observation on or before the day"
-    if age > opts["max_carry_days"]:
-        return None, f"Local quote {age} days old — older than {opts['max_carry_days']} days"
+    limit = opts.get("max_carry_days")
+    if limit is not None and age > limit:
+        return None, f"Local quote {age} days old — older than {limit} days"
     if age == 0:
         return "Same-day observation", ""
-    if age <= opts["carry_days"]:
-        return f"Carried forward ({age} d)", ""
-    return f"Stale — carried forward ({age} d)", ""
+    return f"Last price in force ({age} d)", ""
 
 
 def build(inp, **overrides):
@@ -631,9 +637,10 @@ def build(inp, **overrides):
         "missing_cbot_mt": _s([r for r in cbot_rows if not r["assessable"]], lambda r: r["mt"]),
         "missing_local": sum(1 for e in excluded if e["category"] == "No usable local price"),
         "missing_local_mt": _s([e for e in excluded if e["category"] == "No usable local price"], lambda e: e["mt"]),
-        "stale_local": sum(1 for r in savings_rows if r["local_status"].startswith("Stale")),
-        "stale_local_mt": _s([r for r in savings_rows if r["local_status"].startswith("Stale")], lambda r: r["mt"]),
-        "carried_local": sum(1 for r in savings_rows if r["local_status"].startswith("Carried")),
+        "stale_local": 0,
+        "stale_local_mt": 0.0,
+        "carried_local": sum(1 for r in savings_rows if r["local_status"].startswith("Last price")),
+        "carried_local_mt": _s([r for r in savings_rows if r["local_status"].startswith("Last price")], lambda r: r["mt"]),
         "same_day_local": sum(1 for r in savings_rows if r["local_status"].startswith("Same")),
     }
     for e in inp.get("ignored_entries") or []:
@@ -793,8 +800,9 @@ def validate(m):
           and abs(op - k["open_fixed_potential_egp"]) < 0.5,
           f"CBOT net {k['cbot_net_usd']:,.0f} USD = daily rows = contract rows; open fixed potential "
           f"{k['open_fixed_potential_egp']:,.0f} EGP = open rows")
-    unsupported = [r for r in m["savings"] if r["local_age"] is None or r["local_age"] > m["options"]["max_carry_days"]]
+    limit = m["options"].get("max_carry_days")
+    unsupported = [r for r in m["savings"] if r["local_age"] is None or (limit is not None and r["local_age"] > limit)]
     check("Manager figures exclude unsupported inputs", not unsupported,
-          f"local quotes used are at most {m['options']['max_carry_days']} days old; older or missing ones are "
-          "listed under Excluded & Missing Data" if not unsupported else f"{len(unsupported)} rows")
+          "every local price used is a stored price in force on that day (the last one entered); days with no "
+          "local price before them are listed under Excluded & Missing Data" if not unsupported else f"{len(unsupported)} rows")
     return out

@@ -363,7 +363,8 @@ def value_draws(draws, local_series=None, cbot_series=None, fx_series=None,
                 factor=0.3937, stale_days=DEFAULT_STALE_DAYS,
                 local_lookup: Callable[[dict], Any] | None = None,
                 import_fees_for: Callable[[dict], Any] | None = None,
-                import_terms_for: Callable[[dict], Any] | None = None):
+                import_terms_for: Callable[[dict], Any] | None = None,
+                local_stays_valid: bool = False):
     """Price each draw against what that day's alternatives would have cost.
 
     ``import_fees_for(draw)`` gives the discharge + clearance + inland
@@ -444,7 +445,9 @@ def value_draws(draws, local_series=None, cbot_series=None, fx_series=None,
                 (local - cost) if None not in (local, cost) else None,
             "saving_vs_cbot_egp_mt":
                 (cbot_cost - cost) if None not in (cbot_cost, cost) else None,
-            "stale": max([a for a in (local_age, board_age, fx_age)
+            # With local_stays_valid, the last local price entered is the price
+            # until it changes, so only the board and FX can be stale.
+            "stale": max([a for a in ((None if local_stays_valid else local_age), board_age, fx_age)
                           if a is not None], default=None),
             "local_at_delivery_egp_mt": local_del,
         })
@@ -494,7 +497,8 @@ def savings_report(lots, events, commodity=None, start=None, end=None,
                    local_series=None, cbot_series=None, fx_series=None,
                    basis_for=None, factor=0.3937,
                    stale_days=DEFAULT_STALE_DAYS, origin=None, draws=None,
-                   local_lookup=None, import_fees_for=None, import_terms_for=None):
+                   local_lookup=None, import_fees_for=None, import_terms_for=None,
+                   local_stays_valid=False):
     """Draws, the same rolled up by day, cargo and origin, and the totals.
 
     ``draws`` takes the withdrawals from the inventory walk (see
@@ -517,7 +521,8 @@ def savings_report(lots, events, commodity=None, start=None, end=None,
     draws = [d for d in draws if (d.get("contract_ref") or "") != "(unsourced)"]
     rows = value_draws(draws, local_series, cbot_series, fx_series,
                        basis_for, factor, stale_days, local_lookup,
-                       import_fees_for=import_fees_for, import_terms_for=import_terms_for)
+                       import_fees_for=import_fees_for, import_terms_for=import_terms_for,
+                       local_stays_valid=local_stays_valid)
 
     by_day, by_contract, by_origin = {}, {}, {}
     for row in rows:

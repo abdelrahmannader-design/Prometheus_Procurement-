@@ -160,7 +160,7 @@ body.mgmt .mgmt-only{display:block!important}
  <label>Period<select id="fPreset"><option value="">All dates</option><option value="30">Last 30 days</option><option value="90">Last 90 days</option><option value="ytd">Year to date</option></select></label>
  <label>Status<select id="fOpen"><option value="">Open &amp; closed</option><option value="open">Open</option><option value="closed">Closed</option></select></label>
  <label>CBOT fixing<select id="fFix"><option value="">All</option><option value="Recorded">Fixed — recorded lots</option><option value="Implied">Fixed — implied</option><option value="Not fixed">Not fixed (unpriced)</option><option value="other">Flat / not eligible</option></select></label>
- <label>Data quality<select id="fDQ"><option value="">All supported rows</option><option value="final">Final CIF only</option><option value="prov">Provisional CIF only</option><option value="same">Same-day local quote</option><option value="carry">Carried forward ≤ 7 d</option><option value="stale">Stale reference (8–30 d)</option></select></label>
+ <label>Data quality<select id="fDQ"><option value="">All supported rows</option><option value="final">Final CIF only</option><option value="prov">Provisional CIF only</option><option value="same">Same-day local quote</option><option value="carry">Last local price in force</option></select></label>
  <button class="btn" id="bReset">Reset</button>
 </div>
 <main>
@@ -279,8 +279,7 @@ function dqOk(r, f) {
   if (f.dq === "final") return r.cif_basis === "Final CIF";
   if (f.dq === "prov") return r.cif_basis !== "Final CIF";
   if (f.dq === "same") return r.local_status.startsWith("Same");
-  if (f.dq === "carry") return r.local_status.startsWith("Carried");
-  if (f.dq === "stale") return r.local_status.startsWith("Stale");
+  if (f.dq === "carry") return r.local_status.startsWith("Last price");
   return true;
 }
 function view() {
@@ -572,7 +571,7 @@ function renderQuality() {
     ["missing-dates", "Fixed contracts without a pricing date", q.missing_pricing_dates, "fixing implied from CIF"],
     ["CBOT comparison not assessable", "Days without a stored CBOT", q.missing_cbot, `rows · ${f0(q.missing_cbot_mt)} MT`],
     ["No usable local price", "Missing local observations", q.missing_local, `rows · ${f0(q.missing_local_mt)} MT`],
-    ["stale", "Stale local references (8–30 d)", q.stale_local, `rows · ${f0(q.stale_local_mt)} MT · used, flagged`],
+    ["stale", "Days on the last local price in force", q.carried_local, `rows · ${f0(q.carried_local_mt || 0)} MT · no new quote = no change`],
     ["Logged entry not used", "Logged entries not used", M.excluded.filter(e => e.category === "Logged entry not used").length, "see reason"]];
   $("dqTiles").innerHTML = tiles.map(([k, l, val, sub]) => `<button data-dq="${esc(k)}" class="${S.dqTile === k && k ? "on" : ""}"><div class="v">${f0(val)}</div><div class="l">${esc(l)}<br>${esc(sub)}</div></button>`).join("");
   $("checks").innerHTML = `<p><span class="badge ${M.management_ready ? "ok" : "no"}">${M.management_ready ? "✔ Management-ready" : "✖ Not management-ready"}</span> <span class="note">checksum ${esc(M.checksum)} — the Excel workbook prints the same</span></p>` +
@@ -581,7 +580,7 @@ function renderQuality() {
     M.audit.map(a => `<tr><td>${esc(a.base)}</td>${td(a.consumed_mt)}${td(a.allocated_mt)}${td(a.excluded_mt)}${td(a.difference_mt)}</tr>`).join("") + "</tbody>";
   let ex = M.excluded, title = "Excluded & missing data";
   if (S.dqTile === "missing-dates") { ex = C.filter(c => c.fix.fixed && !c.fix.pricing_date_known).map(c => ({category: "Pricing date not recorded", contract: c.contract, contract_id: c.id, commodity: c.base, reason: `CBOT fixing implied from CIF ${f2(c.cif_usd_mt)} ÷ ${c.fix.factor} − premium ${f2(c.premium)} = ${f2(c.fix.value)}; the date it was fixed is not stored.`, source: c.source_id})); title = "Fixed contracts without a pricing date"; }
-  else if (S.dqTile === "stale") { ex = M.savings.filter(r => r.local_status.startsWith("Stale")).map(r => ({category: r.local_status, date: r.date, contract: r.contract, contract_id: r.contract_id, commodity: r.base, mt: r.mt, reason: `Local quote of ${r.local_date} (${r.local_age} days old) carried forward — used and flagged.`, source: r.local_source})); title = "Stale local references (used, flagged)"; }
+  else if (S.dqTile === "stale") { ex = M.savings.filter(r => r.local_status.startsWith("Last price")).map(r => ({category: r.local_status, date: r.date, contract: r.contract, contract_id: r.contract_id, commodity: r.base, mt: r.mt, reason: `Local price set on ${r.local_date} still in force (${r.local_age} days, no new price entered = no change).`, source: r.local_source})); title = "Days on the last local price in force"; }
   else if (S.dqTile) { ex = M.excluded.filter(e => e.category === S.dqTile); title = S.dqTile; }
   $("exTitle").textContent = title;
   $("exSub").textContent = `${ex.length} records${S.dqTile ? " · click the tile again to show all" : ""}. Nothing here is counted as zero or filled with an assumed value.`;
@@ -592,7 +591,7 @@ function renderQuality() {
   const src = M.sources || {}, o = M.options;
   $("src").innerHTML = `<p>Data as of ${esc(M.as_of)} · generated ${esc(M.generated)} · consumption: ${esc(M.walk_mode)} · rates ${esc(Object.entries(M.rates || {}).map(([k, x]) => k + " " + x).join(", "))} MT/day.</p>
    <p>CBOT: ${esc(src.cbot_source || "")}; ${esc(Object.entries(src.cbot || {}).map(([k, x]) => `${k} ${x[0]} → ${x[1]}`).join(" · "))}. Each consumption day is compared with the CBOT stored for that day (the contract's futures month is only the month its premium is quoted over); one-day spikes and prints older than ${o.cbot_max_age_days} days are not used. Advantage when CBOT − fixed ≥ ${o.neutral_cbot}, missed when ≤ −${o.neutral_cbot}, else neutral.</p>
-   <p>Local: origin-matched delivered price (price + freight) observed on or before the day; ≤ ${o.carry_days} days carried forward, ≤ ${o.max_carry_days} days stale but used and flagged, older excluded. Latest quotes: ${esc(Object.entries(src.local_latest || {}).map(([k, x]) => k + " " + x).join(" · "))}.</p>
+   <p>Local: origin-matched delivered price (price + freight) observed on or before the day; the last price entered stays in force until the next one (no new price = no change), shown with the date it was set; days with no earlier price are excluded. Latest quotes: ${esc(Object.entries(src.local_latest || {}).map(([k, x]) => k + " " + x).join(" · "))}.</p>
    <p>Landed cost: CIF × FX (Form 4 once entered, except SBM; else delivery FX) + discharge + clearance + inland freight. CBOT fixed: pricing lots, else CIF ÷ factor − premium (CORN 0.3937; SOYBEAN, WHEAT 0.36745; SBM 1.1023 with premium in $/short ton). Unpriced contracts are never shown as fixed.</p>`;
 }
 
@@ -660,10 +659,10 @@ function svRows(v) {
   v.sav.forEach(r => { const o = by[r.contract_id] = by[r.contract_id] || {mt: 0, sav: 0, c: 0, l: 0, first: r.date, last: r.date, rows: [], same: 0, carry: 0, stale: 0};
     o.mt += r.mt; o.sav += r.saving; o.c += r.cost * r.mt; o.l += r.local * r.mt; o.rows.push(r);
     if (r.date < o.first) o.first = r.date; if (r.date > o.last) o.last = r.date;
-    if (r.local_status.startsWith("Same")) o.same += r.mt; else if (r.local_status.startsWith("Stale")) o.stale += r.mt; else o.carry += r.mt; });
+    if (r.local_status.startsWith("Same")) o.same += r.mt; else o.carry += r.mt; });
   return Object.entries(by).map(([id, o]) => Object.assign(CI[id], {z: {mt: o.mt, sav: o.sav, cost: o.c / o.mt, local: o.l / o.mt, per: o.sav / o.mt,
     pct: o.l ? o.sav / o.l * 100 : null, first: o.first, last: o.last, rows: o.rows.sort((a, b) => a.date < b.date ? -1 : 1),
-    q: [o.same && `${fx(o.same / o.mt * 100, 0)}% same day`, o.carry && `${fx(o.carry / o.mt * 100, 0)}% carried`, o.stale && `${fx(o.stale / o.mt * 100, 0)}% stale`].filter(Boolean).join(" · ")}}));
+    q: [o.same && `${fx(o.same / o.mt * 100, 0)}% same day`, o.carry && `${fx(o.carry / o.mt * 100, 0)}% last price in force`].filter(Boolean).join(" · ")}}));
 }
 function renderSavings(v) {
   let rows = svRows(v);

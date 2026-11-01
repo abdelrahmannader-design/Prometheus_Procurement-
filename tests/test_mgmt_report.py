@@ -144,8 +144,17 @@ class BuildTests(unittest.TestCase):
         s = next(r for r in self.m["savings"] if r["date"] == "2026-10-01")
         self.assertAlmostEqual(s["saving"], (15500 - 15000) * 500)
         later = next(r for r in self.m["savings"] if r["date"] == "2026-10-03")
-        self.assertEqual(later["local_status"], "Carried forward (2 d)")
+        self.assertEqual(later["local_status"], "Last price in force (2 d)")
         self.assertEqual(later["cif_basis"], mr.PROVISIONAL)
+
+    def test_the_last_local_price_stays_in_force_however_old(self):
+        """No new local price means no change: a 40-day-old price is still the price."""
+        inp = inputs()
+        inp["draws"][1]["local"] = {"price": 15500.0, "date": "2026-08-22", "key": "CORN-BRZ"}
+        inp["local_obs"].append({"key": "CORN-BRZ", "date": "2026-08-22", "source_id": "local_prices[3]"})
+        row = next(s for s in mr.build(inp)["savings"] if s["date"] == "2026-10-01")
+        self.assertEqual(row["local_status"], "Last price in force (40 d)")
+        self.assertAlmostEqual(row["saving"], (15500 - 15000) * 500)
 
     def test_cbot_only_for_fixed_contracts_and_month_matched_days(self):
         rows = self.m["cbot"]

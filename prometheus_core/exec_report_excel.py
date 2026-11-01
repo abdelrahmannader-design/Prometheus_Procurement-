@@ -270,8 +270,8 @@ def _savings(b, m):
     ws = b.ws(4)
     rows = m["savings"]
     b.title(ws, "Savings vs Local", "Daily Savings = (Local Delivered Price − Imported Landed Cost) × "
-            "Consumed MT. Only rows with a real contract, a landed cost and a local observation at most "
-            f"{m['options']['max_carry_days']} days old; the rest are on Excluded & Missing Data, not counted as zero.")
+            "Consumed MT. Only rows with a real contract, a landed cost and a local price in force that day (the last "
+            "price entered stays in force until it changes); the rest are on Excluded & Missing Data, not counted as zero.")
     heads = ["Contract Number", "Contract ID", "Supplier", "Commodity", "Consumption Date", "Consumed MT",
              "Imported Landed Cost EGP/MT", "Local Delivered Price EGP/MT", "Local Price Observation Date",
              "Quote Age (days)", "Local Price Record ID", "Savings EGP/MT", "Total Savings EGP", "CIF Basis",
@@ -570,8 +570,8 @@ def _validation(b, m, last):
         "Consumption: FIFO allocation of the configured daily rate from each delivery, oldest cargo first "
         "(FIFO Estimated). Logged withdrawals are used as Actual only when they are credible; see Excluded.",
         "Unsourced consumption (days with no cargo or local purchase in stock) is excluded, never allocated.",
-        f"Local price: the origin-matched delivered price (price + freight) observed on or before the day; "
-        f"up to {o['carry_days']} days old = carried forward, up to {o['max_carry_days']} = stale but used and "
+        "Local price: the origin-matched delivered price (price + freight) in force on the day — the last price "
+        "entered stays in force until the next one, because no new price means no change; the date it was set "
         "flagged, older = excluded.",
         "Landed cost: CIF × FX (Form 4 once entered, except SBM; else delivery FX) + discharge + clearance + "
         "inland freight. Final CIF for priced contracts, provisional otherwise.",
