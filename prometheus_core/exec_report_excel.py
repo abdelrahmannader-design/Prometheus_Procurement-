@@ -112,7 +112,7 @@ def build_workbook(model, path):
     _contract_master_consumed(b, model, last)
     last["sv"] = _savings(b, model)
     last["cs"] = _contract_savings(b, model, last)
-    last["cb"] = _cbot(b, model)
+    last["cb"] = _cbot(b, model, last)
     last["cp"] = _cbot_performance(b, model, last)
     _monthly(b, model, last)
     last["op"] = _open(b, model)
@@ -437,7 +437,7 @@ def _contract_savings(b, m, last):
 
 # ── 5. CBOT Fixed vs Consumption ─────────────────────────────────────────
 
-def _cbot(b, m):
+def _cbot(b, m, last):
     ws = b.ws(6)
     rows = m["cbot"]
     n = m["options"]["neutral_cbot"]
@@ -454,10 +454,15 @@ def _cbot(b, m):
              "Total Advantage / Missed EGP", "Result", "CBOT x MT", "Base", "Series Month That Day", "Month",
              "Contract FX Basis", "Storage Avg Window Start", "Storage Avg Window End", "CBOT Price Days in Window",
              "Avg CBOT Storage Date to Last Consumption", "Difference (Storage Avg)", "Advantage / Missed USD (Storage Avg)",
-             "Advantage / Missed EGP (Storage Avg)"]
+             "Advantage / Missed EGP (Storage Avg)", "Local Price Incl. Transport (Savings vs Local)",
+             "Local Price Excl. Transport (Savings vs Local)", "Local Equivalent Premium (CIF basis)",
+             "Premium Gap (Local Equivalent − Contract)"]
+    sv_last = last["sv"]
+    SV = lambda c_: col(4, c_, sv_last)
+    svi = {(s_["contract_id"], s_["date"]): s_ for s_ in m["savings"]}
     last = b.table(ws, "CbotVsConsumption", heads, len(rows),
                    [22, 9, 16, 11, 12, 9, 9, 9, 10, 9, 10, 11, 9, 11, 12, 22, 10, 10, 13, 10, 14, 16, 12, 8, 20, 9, 22,
-                    12, 12, 9, 14, 12, 14, 14])
+                    12, 12, 9, 14, 12, 14, 14, 13, 13, 14, 14])
     fxb = {c["id"]: c.get("fx_basis") or "" for c in m["contracts"]}
     for i, x in enumerate(rows):
         r = FIRST + i
@@ -483,9 +488,18 @@ def _cbot(b, m):
         b.f(ws, r, 32, f'=IF(ISNUMBER(AE{r}),AE{r}-K{r},"")', blank(x.get("win_diff")), M2)
         b.f(ws, r, 33, f'=IF(ISNUMBER(AF{r}),AF{r}*J{r}*F{r},"")', blank(x.get("win_usd")), M0)
         b.f(ws, r, 34, f'=IF(AND(ISNUMBER(AG{r}),ISNUMBER(T{r})),AG{r}*T{r},"")', blank(x.get("win_egp")), M0)
+        # The same day on Savings vs Local: local price and the premium it amounts to.
+        sv_ = svi.get((x["contract_id"], x["date"]), {})
+        na_ = "N/A — Missing Source Data"
+        for j_, (letter, key) in enumerate((("H", "local"), ("X", "local_excl"), ("AK", "eq_premium")), start=35):
+            b.f(ws, r, j_, f'=IFERROR(AVERAGEIFS({SV(letter)},{SV("B")},B{r},{SV("E")},E{r}),{NA})',
+                sv_.get(key) if sv_.get(key) is not None else na_, M2)
+        b.f(ws, r, 38, f'=IF(AND(ISNUMBER(AK{r}),ISNUMBER(H{r})),AK{r}-H{r},{NA})',
+            (sv_["eq_premium"] - x["premium"]) if (sv_.get("eq_premium") is not None and x.get("premium") is not None) else na_, M2)
         b.put(ws, r, 25, x.get("series_month") or "")
         b.put(ws, r, 26, x["date"][:7])
     b.signs(ws, f"Q{FIRST}:U{last}")
+    b.signs(ws, f"AL{FIRST}:AL{last}")
     return last
 
 

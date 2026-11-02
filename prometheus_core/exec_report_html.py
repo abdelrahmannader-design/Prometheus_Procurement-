@@ -320,6 +320,22 @@ function dqOk(r, f) {
 }
 const CD = () => M.options.carry_days;
 const ageOk = (r, f) => f.age === "stale-d" ? !!r.local_stale : f.age === "fresh" ? !r.local_stale && isN(r.local_age) : true;
+const SVI = {}; M.savings.forEach(r => { SVI[r.contract_id + "|" + r.date] = r; });
+// Local price and equivalent premium of a consumption day, from Savings vs local.
+const svOf = r => SVI[r.contract_id + "|" + r.date] || {};
+function eqAvg(rows) {
+  const w = rows.map(r => [r, svOf(r)]), wt = (k) => { const x = w.filter(([, s]) => isN(s[k])), m = sum(x, ([r]) => r.mt); return m ? sum(x, ([r, s]) => s[k] * r.mt) / m : null; };
+  return {local: wt("local"), local_excl: wt("local_excl"), eq: wt("eq_premium"), gap: wt("premium_gap"),
+          prem: (w.find(([, s]) => isN(s.contract_premium)) || [{}, {}])[1].contract_premium, unit: (w.find(([, s]) => s.premium_unit) || [{}, {}])[1].premium_unit || ""};
+}
+const LOCAL_TH = `<th class="n">Local price incl.</th><th class="n">Local price excl.</th><th class="n">Local equiv. premium</th><th class="n">Contract premium</th><th class="n">Premium gap</th>`;
+function localTds(r) {
+  const s = svOf(r), u = s.premium_unit ? ` <span class="note">${esc(s.premium_unit)}</span>` : "";
+  if (!s.date) return '<td class="na" colspan="5">No Savings vs local row for this day</td>';
+  return `${td(s.local, f2)}${td(s.local_excl, f2)}` + (isN(s.eq_premium) ? `<td class="n" title="${esc(premTip(s))}"><b>${f2(s.eq_premium)}</b>${u}</td>` : '<td class="n na">N/A</td>') +
+    (isN(s.contract_premium) ? `<td class="n">${f2(s.contract_premium)}${u}</td>` : '<td class="n note">—</td>') + td(s.premium_gap, f2, 1);
+}
+const localTot = e => `${td(e.local, f2)}${td(e.local_excl, f2)}${td(e.eq, f2)}${td(e.prem, f2)}${td(e.gap, f2, 1)}`;
 const STALE_IDS = new Set(M.savings.filter(r => r.local_stale).map(r => r.contract_id).concat(M.open.filter(r => r.local_stale).map(r => r.contract_id)));
 // Order filter: newest or oldest first by date; empty = each table's own default (by value).
 const ORD = () => $("fOrder").value;
@@ -697,6 +713,10 @@ const CPC = [{h: "Contract", v: c => c.contract, html: c => `<b>${esc(c.contract
   {h: "② Net USD", n: 1, v: c => c.y.wmt ? c.y.wusd : null, col: 1, tot: rs => sum(rs, c => c.y.wmt ? c.y.wusd : null)},
   {h: "② − ① USD/MT", n: 1, v: c => c.y.amt && c.y.wmt ? c.y.wusd / c.y.wmt - c.y.usd / c.y.amt : null, f: f2, col: 1},
   {h: "Both agree?", v: agreeOf, html: c => !agreeOf(c) ? "" : agreeOf(c) === "Yes" ? '<span class="tag good">Same direction</span>' : '<span class="tag pot" title="The result depends on the estimated consumption days — check them">Differs — check dates</span>'},
+  {h: "Avg local equiv. premium", n: 1, v: c => c.y.eq.eq, html: c => isN(c.y.eq.eq) ? `<b>${f2(c.y.eq.eq)}</b> <span class="note">${esc(c.y.eq.unit)}</span>` : "—"},
+  {h: "Contract premium", n: 1, v: c => c.y.eq.prem, f: f2},
+  {h: "Avg premium gap", n: 1, v: c => c.y.eq.gap, f: f2, col: 1},
+  {h: "Avg local price incl.", n: 1, v: c => c.y.eq.local, f: f2},
   {h: "① Difference", n: 1, v: c => isN(c.y.avg) && isN(c.fix.value) ? c.y.avg - c.fix.value : null, f: f2, col: 1},
   {h: "② Difference", n: 1, v: c => isN(c.y.win) && isN(c.fix.value) ? c.y.win - c.fix.value : null, f: f2, col: 1},
   {h: "① USD/MT", n: 1, v: c => c.y.amt ? c.y.usd / c.y.amt : null, f: f2, col: 1},
@@ -717,12 +737,12 @@ function cbotDaysU(c, rows) {
   rows = dayOrder(rows);
   const mt = sum(rows, r => r.mt), w = rows.filter(r => isN(r.cbot)), wm = sum(w, r => r.mt), i = rows.filter(r => isN(r.ind_diff)), im = sum(i, r => r.mt);
   const avg = wm ? sum(w, r => r.cbot * r.mt) / wm : null, lat = rows.find(r => isN(r.latest_cbot)) || {};
-  return `<thead><tr><th>Consumption date</th><th class="n">Consumed MT</th><th class="n">CBOT fixed</th><th class="n">CBOT that day</th><th>Price date</th><th class="n">Avg CBOT storage → last consumption</th><th class="n">Latest CBOT</th><th class="n">Indicative difference</th><th class="n">Indicative USD/MT</th><th class="n">Indicative USD</th><th class="n">FX</th><th class="n">Indicative EGP</th><th>Result</th></tr></thead><tbody>` +
-    rows.map(r => `<tr><td>${esc(r.date)}</td>${td(r.mt)}<td class="n"><span class="tag pot">Not fixed yet</span></td>${td(r.cbot, f2)}<td>${esc(r.cbot_date || "—")}</td>${td(r.win_cbot, f2)}<td class="n">${f2(r.latest_cbot)} <span class="note">${esc(r.latest_cbot_date)}</span></td>` +
+  return `<thead><tr><th>Consumption date</th><th class="n">Consumed MT</th><th class="n">CBOT fixed</th><th class="n">CBOT that day</th><th>Price date</th><th class="n">Avg CBOT storage → last consumption</th>${LOCAL_TH}<th class="n">Latest CBOT</th><th class="n">Indicative difference</th><th class="n">Indicative USD/MT</th><th class="n">Indicative USD</th><th class="n">FX</th><th class="n">Indicative EGP</th><th>Result</th></tr></thead><tbody>` +
+    rows.map(r => `<tr><td>${esc(r.date)}</td>${td(r.mt)}<td class="n"><span class="tag pot">Not fixed yet</span></td>${td(r.cbot, f2)}<td>${esc(r.cbot_date || "—")}</td>${td(r.win_cbot, f2)}${localTds(r)}<td class="n">${f2(r.latest_cbot)} <span class="note">${esc(r.latest_cbot_date)}</span></td>` +
       `${td(r.ind_diff, f2, 1)}${td(r.ind_usd_mt, f2, 1)}${td(r.ind_usd, f0, 1)}${td(r.fx, x => fx(x, 4))}${td(r.ind_egp, f0, 1)}<td><span class="tag pot">${esc(r.result)}</span></td></tr>`).join("") +
-    `<tr class="tot"><td>Total / average · ${rows.length} days</td>${td(mt)}<td class="n note">premium ${f2(c.premium)} ${esc((rows[0] || {}).unit || "")} over ${esc((rows[0] || {}).futures || "—")}</td>${td(avg, f2)}<td class="note">tonne-weighted</td>${td((rows.find(r => isN(r.win_cbot)) || {}).win_cbot, f2)}${td(lat.latest_cbot, f2)}` +
+    `<tr class="tot"><td>Total / average · ${rows.length} days</td>${td(mt)}<td class="n note">premium ${f2(c.premium)} ${esc((rows[0] || {}).unit || "")} over ${esc((rows[0] || {}).futures || "—")}</td>${td(avg, f2)}<td class="note">tonne-weighted</td>${td((rows.find(r => isN(r.win_cbot)) || {}).win_cbot, f2)}${localTot(eqAvg(rows))}${td(lat.latest_cbot, f2)}` +
     `${td(im ? sum(i, r => r.ind_diff * r.mt) / im : null, f2, 1)}${td(im ? sum(i, r => r.ind_usd) / im : null, f2, 1)}${td(sum(i, r => r.ind_usd), f0, 1)}<td></td>${td(sum(i, r => r.ind_egp), f0, 1)}<td class="note">Indicative — not in the CBOT totals</td></tr></tbody>` +
-    `<tfoot><tr><td colspan="13" class="note">Not priced yet: the result is fixed only when the contract is priced. Indicative = (CBOT that day − latest stored CBOT) × factor × MT, i.e. as if it were fixed at today's CBOT.</td></tr></tfoot>`;
+    `<tfoot><tr><td colspan="18" class="note">Not priced yet: the result is fixed only when the contract is priced. Indicative = (CBOT that day − latest stored CBOT) × factor × MT, i.e. as if it were fixed at today's CBOT.</td></tr></tfoot>`;
 }
 // Each consumption date of one contract: the tonnes, the CBOT that day vs the fixing, and what it was worth.
 function cbotDays(c, rows) {
@@ -732,17 +752,17 @@ function cbotDays(c, rows) {
   const n = M.options.neutral_cbot, d = isN(avg) ? avg - c.fix.value : null, wr = rows.find(r => isN(r.win_cbot)) || {};
   const tag = (u, res) => `<span class="tag ${u > 0 ? "good" : u < 0 ? "bad" : ""}">${esc(res)}</span>`;
   return `<thead><tr><th>Consumption date</th><th class="n">Consumed MT</th><th class="n">CBOT fixed</th><th class="n">① CBOT that day</th><th class="n">② Avg CBOT storage → last consumption</th>` +
-    `<th class="n">① Saving USD</th><th class="n">② Saving USD</th><th>① Result</th><th class="n">① Difference</th><th class="n">② Difference</th><th class="n">① USD/MT</th><th class="n">② USD/MT</th>` +
+    `<th class="n">① Saving USD</th><th class="n">② Saving USD</th><th>① Result</th>${LOCAL_TH}<th class="n">① Difference</th><th class="n">② Difference</th><th class="n">① USD/MT</th><th class="n">② USD/MT</th>` +
     `<th>① Price date</th><th class="n">FX</th><th class="n">① Saving EGP</th><th class="n">② Saving EGP</th></tr></thead><tbody>` +
     rows.map(r => `<tr><td>${esc(r.date)}</td>${td(r.mt)}${td(r.fix, f2)}${td(r.cbot, f2)}${td(r.win_cbot, f2)}` +
-      (r.assessable ? `${td(r.usd, f0, 1)}${td(r.win_usd, f0, 1)}<td>${tag(r.usd, r.result)}</td>${td(r.diff, f2, 1)}${td(r.win_diff, f2, 1)}${td(r.usd_mt, f2, 1)}${td(r.win_usd_mt, f2, 1)}`
-                    : `<td class="na">—</td>${td(r.win_usd, f0, 1)}<td class="na">Not compared: ${esc(r.benchmark)}</td><td class="na">—</td>${td(r.win_diff, f2, 1)}<td class="na">—</td>${td(r.win_usd_mt, f2, 1)}`) +
+      (r.assessable ? `${td(r.usd, f0, 1)}${td(r.win_usd, f0, 1)}<td>${tag(r.usd, r.result)}</td>${localTds(r)}${td(r.diff, f2, 1)}${td(r.win_diff, f2, 1)}${td(r.usd_mt, f2, 1)}${td(r.win_usd_mt, f2, 1)}`
+                    : `<td class="na">—</td>${td(r.win_usd, f0, 1)}<td class="na">Not compared: ${esc(r.benchmark)}</td>${localTds(r)}<td class="na">—</td>${td(r.win_diff, f2, 1)}<td class="na">—</td>${td(r.win_usd_mt, f2, 1)}`) +
       `<td>${esc(r.cbot_date || "—")}</td>${td(r.fx, x => fx(x, 4))}${td(r.egp, f0, 1)}${td(r.win_egp, f0, 1)}</tr>`).join("") +
     `<tr class="tot"><td>Total / average · ${rows.length} days</td>${td(mt)}${td(c.fix.value, f2)}${td(avg, f2)}${td(wr.win_cbot, f2)}` +
-    `${td(usd, f0, 1)}${td(sum(rows, r => r.win_usd), f0, 1)}<td>${!amt ? "Not assessable" : d >= n ? "Advantage" : d <= -n ? "Missed opportunity" : "Neutral"}</td>` +
+    `${td(usd, f0, 1)}${td(sum(rows, r => r.win_usd), f0, 1)}<td>${!amt ? "Not assessable" : d >= n ? "Advantage" : d <= -n ? "Missed opportunity" : "Neutral"}</td>${localTot(eqAvg(rows))}` +
     `${td(d, f2, 1)}${td(wr.win_diff, f2, 1)}${td(amt ? usd / amt : null, f2, 1)}${td(wr.win_usd_mt, f2, 1)}<td class="note">① tonne-weighted</td>` +
     `${td(amt ? sum(a, r => r.fx * r.mt) / amt : null, x => fx(x, 4))}${td(egp, f0, 1)}${td(sum(rows, r => r.win_egp), f0, 1)}</tr></tbody>` +
-    `<tfoot><tr><td colspan="16" class="note">① = the CBOT stored for each consumption day (consumption days are FIFO estimates). ② = the average of the ${wr.win_days || 0} CBOT prices stored from ${esc(wr.win_start || "—")}${wr.win_from_storage ? " (storage date)" : " (first consumption day — no storage date recorded)"} to ${esc(wr.win_end || "—")} (last consumption day), applied to every consumed tonne — it does not depend on the estimated consumption days.</td></tr></tfoot>`;
+    `<tfoot><tr><td colspan="21" class="note">Local price, equivalent premium and gap come from Savings vs local for the same day: equivalent premium = (local price excl. transport − discharge − clearance) ÷ that day's FX ÷ factor − that day's CBOT; gap = equivalent − contract premium (positive = the local market was dearer than our premium). Totals are tonne-weighted averages. ① = the CBOT stored for each consumption day (consumption days are FIFO estimates). ② = the average of the ${wr.win_days || 0} CBOT prices stored from ${esc(wr.win_start || "—")}${wr.win_from_storage ? " (storage date)" : " (first consumption day — no storage date recorded)"} to ${esc(wr.win_end || "—")} (last consumption day), applied to every consumed tonne — it does not depend on the estimated consumption days.</td></tr></tfoot>`;
 }
 const FACT = {CORN: 0.3937, SOYBEAN: 0.36745, WHEAT: 0.36745, SBM: 1.1023};
 const OCB = [
@@ -807,6 +827,8 @@ function renderCbot(v) {
       unfixed: true, wm, ind: sum(u, r => r.ind_usd), res: "Not fixed yet — indicative"}}); }));
   const lastCb = {}; v.cb.concat(v.cu).forEach(r => { if (!lastCb[r.contract_id] || r.date > lastCb[r.contract_id]) lastCb[r.contract_id] = r.date; });
   rows = S.sort.cp ? sortBy(rows, "cp", CPC) : (byOrder(rows, c => lastCb[c.id]) || rows.sort((a, b) => (a.y.amt ? a.y.usd : 1e18) - (b.y.amt ? b.y.usd : 1e18)));
+  const cbAll = groupBy(v.cb.concat(v.cu), r => r.contract_id);
+  rows.forEach(c => { c.y.eq = eqAvg(cbAll[c.id] || []); });
   const K = kpis(v), fixedRows = rows.filter(c => !c.y.unfixed && c.y.amt && c.y.wmt), dis = fixedRows.filter(c => agreeOf(c) === "No");
   const B = '<span class="tag ben">Benchmark</span>', dmt = K.cbot_win_mt && K.cbot_assessed_mt ? K.cbot_win_net_usd / K.cbot_win_mt - K.cbot_net_usd / K.cbot_assessed_mt : null;
   $("cbK").innerHTML = [
