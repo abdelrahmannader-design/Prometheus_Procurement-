@@ -12,6 +12,9 @@ Five questions, each answered only from records that can be traced:
 4. The CBOT stored for each consumption day (the app's daily CBOT
    series, whatever month it was on that day — the contract's futures
    month is the month its premium is quoted over, not the benchmark).
+   Alongside it, a second benchmark that does not hang on estimated
+   consumption days: the average CBOT stored from the contract's storage
+   date to its last consumption day, applied to the same tonnes.
 5. Rankings and data quality, with every exclusion listed and a set of
    validation checks that decide whether the report is management-ready.
 
@@ -488,6 +491,47 @@ def build(inp, **overrides):
                                  quality=f"{r['method']} · {status} · {basis}",
                                  **equivalent_premium(c, l_price, _d(r["date"]), day_cbot, day_fx)))
 
+    # ── second benchmark: average CBOT from storage date to last consumption ──
+    cons_days = defaultdict(list)
+    for r in allocations:
+        if r["type"] == "Import":
+            cons_days[r["contract_id"]].append(_d(r["date"]))
+
+    def window_avg(c):
+        """Average stored CBOT from the storage date (else the first consumption
+        day) to the last consumption day; one-day spikes left out."""
+        days = cons_days.get(c["id"]) or []
+        if not days:
+            return {}
+        storage = _d(c.get("storage_start"))
+        end = max(days)
+        start = min(storage or min(days), end)
+        hist, spk = series.get(c["base"]), spikes.get(c["base"], set())
+        out = {"start": start.isoformat(), "end": end.isoformat(), "from_storage": storage is not None,
+               "avg": None, "n": 0}
+        if hist is None or not len(hist):
+            return out
+        lo, hi = bisect.bisect_left(hist.dates, start), bisect.bisect_right(hist.dates, end)
+        pts = [v for d, v in zip(hist.dates[lo:hi], hist.values[lo:hi]) if d not in spk]
+        if not pts:
+            price, pdate = day_cbot(c["base"], start)
+            pts = [price] if price is not None else []
+        if pts:
+            out.update(avg=sum(pts) / len(pts), n=len(pts))
+        return out
+
+    windows = {}
+
+    def win_fields(c, mt, fix, factor, fx):
+        w = windows.setdefault(c["id"], window_avg(c))
+        avg = w.get("avg")
+        diff = (avg - fix) if None not in (avg, fix) else None
+        usd = diff * factor * mt if diff is not None else None
+        return {"win_cbot": avg, "win_start": w.get("start", ""), "win_end": w.get("end", ""),
+                "win_days": w.get("n", 0), "win_from_storage": w.get("from_storage", False),
+                "win_diff": diff, "win_usd_mt": diff * factor if diff is not None else None,
+                "win_usd": usd, "win_egp": usd * fx if (usd is not None and fx) else None}
+
     # ── CBOT on each consumption day vs the contract's fixing ────────────
     cbot_rows, cbot_unfixed = [], []
     for r in allocations:
@@ -515,7 +559,9 @@ def build(inp, **overrides):
                 "ind_diff": ind, "ind_usd_mt": ind * f["factor"] if ind is not None else None,
                 "ind_usd": ind * f["factor"] * r["mt"] if ind is not None else None,
                 "ind_egp": ind * f["factor"] * r["mt"] * fx if (ind is not None and fx) else None,
-                "result": "Not fixed yet — indicative" if ind is not None else "Not fixed yet — no stored CBOT"})
+                "result": "Not fixed yet — indicative" if ind is not None else "Not fixed yet — no stored CBOT",
+                **{k: v for k, v in win_fields(c, r["mt"], latest, f["factor"], fx).items()
+                   if k in ("win_cbot", "win_start", "win_end", "win_days", "win_from_storage")}})
             continue
         day = _d(r["date"])
         hist, spk = series.get(c["base"]), spikes.get(c["base"], set())
@@ -553,6 +599,7 @@ def build(inp, **overrides):
             "proxy_diff": diff, "result": result, "benchmark": status, "assessable": ok,
             "series_month": series_month,
             "spike_skipped": bool(pdate and day != pdate and any(day >= s > pdate for s in spk)),
+            **win_fields(c, r["mt"], f["value"], f["factor"], fx),
         })
         if not ok:
             exclude("CBOT comparison not assessable", status, date=r["date"], contract=c["contract"],
@@ -642,11 +689,22 @@ def build(inp, **overrides):
                      "usd": adv if amt else None,
                      "egp": _s([x for x in cr if x["assessable"]], lambda r: r["egp"]) if amt else None,
                      "advantage_usd": _s([x for x in cr if x["assessable"] and x["usd"] > 0], lambda r: r["usd"]),
-                     "missed_usd": _s([x for x in cr if x["assessable"] and x["usd"] < 0], lambda r: r["usd"])},
+                     "missed_usd": _s([x for x in cr if x["assessable"] and x["usd"] < 0], lambda r: r["usd"]),
+                     "win_avg": next((x["win_cbot"] for x in cr if x.get("win_cbot") is not None), None),
+                     "win_start": (cr[0].get("win_start") if cr else ""), "win_end": (cr[0].get("win_end") if cr else ""),
+                     "win_days": (cr[0].get("win_days") if cr else 0),
+                     "win_from_storage": bool(cr and cr[0].get("win_from_storage")),
+                     "win_mt": _s([x for x in cr if x.get("win_usd") is not None], lambda r: r["mt"]),
+                     "win_usd": _s([x for x in cr if x.get("win_usd") is not None], lambda r: r["win_usd"])
+                     if any(x.get("win_usd") is not None for x in cr) else None,
+                     "win_egp": _s([x for x in cr if x.get("win_egp") is not None], lambda r: r["win_egp"])
+                     if any(x.get("win_egp") is not None for x in cr) else None},
         })
         cb = c["cbot"]
         cb["diff"] = (cb["avg_cbot"] - c["fix"]["value"]) if cb["avg_cbot"] is not None else None
         cb["usd_mt"] = (cb["diff"] * c["fix"]["factor"]) if cb["diff"] is not None else None
+        cb["win_diff"] = (cb["win_avg"] - c["fix"]["value"]) if None not in (cb["win_avg"], c["fix"]["value"]) else None
+        cb["win_usd_mt"] = (cb["win_diff"] * c["fix"]["factor"]) if cb["win_diff"] is not None else None
         cb["assessment"] = (
             "Not fixed" if c["fix"]["eligible"] and not c["fix"]["fixed"] else
             "Not eligible" if not c["fix"]["eligible"] else
@@ -707,6 +765,11 @@ def build(inp, **overrides):
         "cbot_net_egp": _s(assessed, lambda r: r["egp"]),
         "cbot_assessed_mt": _s(assessed, lambda r: r["mt"]),
         "cbot_fixed_consumed_mt": _s(cbot_rows, lambda r: r["mt"]),
+        "cbot_win_advantage_usd": _s([r for r in cbot_rows if (r.get("win_usd") or 0) > 0], lambda r: r["win_usd"]),
+        "cbot_win_missed_usd": _s([r for r in cbot_rows if (r.get("win_usd") or 0) < 0], lambda r: r["win_usd"]),
+        "cbot_win_net_usd": _s([r for r in cbot_rows if r.get("win_usd") is not None], lambda r: r["win_usd"]),
+        "cbot_win_net_egp": _s([r for r in cbot_rows if r.get("win_egp") is not None], lambda r: r["win_egp"]),
+        "cbot_win_mt": _s([r for r in cbot_rows if r.get("win_usd") is not None], lambda r: r["mt"]),
         "contracts": len(master),
     }
     k["cbot_coverage"] = (k["cbot_assessed_mt"] / k["cbot_fixed_consumed_mt"]) if k["cbot_fixed_consumed_mt"] else None
@@ -740,6 +803,7 @@ def build(inp, **overrides):
             "open_fixed_egp": _s([r for r in orr if r["class"] == "Fixed price"], lambda r: r["potential"]),
             "open_indicative_egp": _s([r for r in orr if r in ind_open], lambda r: r["potential"]),
             "cbot_net_usd": _s(ar, lambda r: r["usd"]), "cbot_assessed_mt": _s(ar, lambda r: r["mt"]),
+            "cbot_win_net_usd": _s([r for r in cbot_rows if r["base"] == base and r.get("win_usd") is not None], lambda r: r["win_usd"]),
         })
 
     quality = {

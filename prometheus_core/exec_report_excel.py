@@ -452,9 +452,12 @@ def _cbot(b, m):
              "Futures Month", "CBOT on Consumption Date", "Market Price Date", "Benchmark Status",
              "CBOT Difference", "Difference USD/MT", "Total Advantage / Missed USD", "Contract FX EGP/USD",
              "Total Advantage / Missed EGP", "Result", "CBOT x MT", "Base", "Series Month That Day", "Month",
-             "Contract FX Basis"]
+             "Contract FX Basis", "Storage Avg Window Start", "Storage Avg Window End", "CBOT Price Days in Window",
+             "Avg CBOT Storage Date to Last Consumption", "Difference (Storage Avg)", "Advantage / Missed USD (Storage Avg)",
+             "Advantage / Missed EGP (Storage Avg)"]
     last = b.table(ws, "CbotVsConsumption", heads, len(rows),
-                   [22, 9, 16, 11, 12, 9, 9, 9, 10, 9, 10, 11, 9, 11, 12, 22, 10, 10, 13, 10, 14, 16, 12, 8, 20, 9, 22])
+                   [22, 9, 16, 11, 12, 9, 9, 9, 10, 9, 10, 11, 9, 11, 12, 22, 10, 10, 13, 10, 14, 16, 12, 8, 20, 9, 22,
+                    12, 12, 9, 14, 12, 14, 14])
     fxb = {c["id"]: c.get("fx_basis") or "" for c in m["contracts"]}
     for i, x in enumerate(rows):
         r = FIRST + i
@@ -473,6 +476,13 @@ def _cbot(b, m):
         b.f(ws, r, 23, f'=IF(Q{r}="","",N{r}*F{r})', (x["cbot"] * x["mt"]) if x["assessable"] else None, M0)
         b.put(ws, r, 24, x["base"])
         b.put(ws, r, 27, fxb.get(x["contract_id"], ""))
+        # Second benchmark: average stored CBOT from the storage date to the last consumption day.
+        b.put(ws, r, 28, x.get("win_start") or ""); b.put(ws, r, 29, x.get("win_end") or "")
+        b.put(ws, r, 30, x.get("win_days") or 0)
+        b.put(ws, r, 31, blank(x.get("win_cbot")), M2)
+        b.f(ws, r, 32, f'=IF(ISNUMBER(AE{r}),AE{r}-K{r},"")', blank(x.get("win_diff")), M2)
+        b.f(ws, r, 33, f'=IF(ISNUMBER(AF{r}),AF{r}*J{r}*F{r},"")', blank(x.get("win_usd")), M0)
+        b.f(ws, r, 34, f'=IF(AND(ISNUMBER(AG{r}),ISNUMBER(T{r})),AG{r}*T{r},"")', blank(x.get("win_egp")), M0)
         b.put(ws, r, 25, x.get("series_month") or "")
         b.put(ws, r, 26, x["date"][:7])
     b.signs(ws, f"Q{FIRST}:U{last}")
@@ -492,9 +502,10 @@ def _cbot_performance(b, m, last):
     heads = ["Contract ID", "Contract", "Supplier", "Commodity", "MT Consumed", "MT Assessed", "Coverage %",
              "CIF $/MT", "Premium", "Price Unit", "CBOT Fixed", "Fixing Type", "Avg CBOT During Consumption",
              "Difference", "Advantage USD", "Missed Opportunity USD", "Net Result USD", "Net Result EGP",
-             "Assessment", "Base"]
+             "Assessment", "Base", "Avg CBOT Storage Date to Last Consumption", "Difference (Storage Avg)",
+             "Net Result USD (Storage Avg)", "Net Result EGP (Storage Avg)", "Both Benchmarks Agree"]
     end = b.table(ws, "ContractCbot", heads, len(rows),
-                  [9, 22, 16, 11, 10, 10, 9, 9, 9, 10, 10, 11, 12, 10, 12, 13, 12, 13, 18, 8])
+                  [9, 22, 16, 11, 10, 10, 9, 9, 9, 10, 10, 11, 12, 10, 12, 13, 12, 13, 18, 8, 14, 12, 14, 14, 12])
     C = lambda letter: col(6, letter, last["cb"])
     for i, c in enumerate(rows):
         r = FIRST + i
@@ -515,7 +526,16 @@ def _cbot_performance(b, m, last):
         b.f(ws, r, 19, f'=IF(F{r}=0,"Not assessable",IF(N{r}>={n},"Advantage",IF(N{r}<=-{n},"Missed opportunity","Neutral")))',
             cb["assessment"])
         b.put(ws, r, 20, c["base"])
+        b.put(ws, r, 21, blank(cb.get("win_avg")), M2)
+        b.f(ws, r, 22, f'=IF(ISNUMBER(U{r}),U{r}-K{r},"")', blank(cb.get("win_diff")), M2)
+        b.f(ws, r, 23, f'=IF(ISNUMBER(U{r}),SUMIFS({C("AG")},{C("B")},A{r}),"")', blank(cb.get("win_usd")), M0, bold=True)
+        b.f(ws, r, 24, f'=IF(ISNUMBER(U{r}),SUMIFS({C("AH")},{C("B")},A{r}),"")', blank(cb.get("win_egp")), M0)
+        agree = (None if cb.get("win_usd") is None or cb.get("usd") is None else
+                 "Yes" if (cb["usd"] > 0) == (cb["win_usd"] > 0) else "No — check consumption dates")
+        b.f(ws, r, 25, f'=IF(OR(Q{r}="",W{r}=""),"",IF(SIGN(Q{r})=SIGN(W{r}),"Yes","No — check consumption dates"))',
+            agree if agree else "")
     b.signs(ws, f"N{FIRST}:R{end}")
+    b.signs(ws, f"V{FIRST}:X{end}")
     m["_cp_rows"] = rows
     return end
 

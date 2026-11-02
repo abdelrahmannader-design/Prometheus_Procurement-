@@ -300,3 +300,29 @@ class BreakEvenTests(unittest.TestCase):
     def test_an_open_contract_without_dates_reads_its_futures_month_against_today(self):
         cm = mr.resolve_contract_month("DEC", "CORN", "2026-11-02")
         self.assertEqual(cm["code"], "DEC-26")
+
+
+class StorageWindowBenchmarkTests(unittest.TestCase):
+    def test_second_benchmark_averages_cbot_from_storage_date_to_last_consumption(self):
+        inp = inputs()
+        m = mr.build(inp)
+        rows = [r for r in m["cbot"] if r.get("win_cbot") is not None]
+        self.assertTrue(rows)
+        for cid in {r["contract_id"] for r in rows}:
+            rs = [r for r in rows if r["contract_id"] == cid]
+            c = next(x for x in inp["contracts"] if x["id"] == cid)
+            start = dt.date.fromisoformat(str(c.get("storage_start") or min(r["date"] for r in rs))[:10])
+            end = max(dt.date.fromisoformat(r["date"]) for r in rs)
+            pts = [p for d, p in inp["cbot"][rs[0]["base"]] if start <= d <= end]
+            if pts:
+                self.assertAlmostEqual(rs[0]["win_cbot"], sum(pts) / len(pts), places=6)
+            self.assertEqual(len({r["win_cbot"] for r in rs}), 1)
+            for r in rs:
+                self.assertAlmostEqual(r["win_usd"], (r["win_cbot"] - r["fix"]) * r["factor"] * r["mt"], places=6)
+                self.assertEqual(r["win_start"], start.isoformat())
+        self.assertAlmostEqual(m["kpis"]["cbot_win_net_usd"], sum(r["win_usd"] for r in rows), places=6)
+
+    def test_the_consumption_day_benchmark_is_unchanged(self):
+        m = mr.build(inputs())
+        self.assertEqual(mr.MATCHED, "Consumption-day CBOT")
+        self.assertAlmostEqual(m["kpis"]["cbot_net_usd"], sum(r["usd"] for r in m["cbot"] if r["assessable"]))
