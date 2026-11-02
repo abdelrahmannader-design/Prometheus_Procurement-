@@ -331,8 +331,9 @@ function view() {
   const f = F(), ids = new Set(C.filter(c => contractOk(c, f) && (f.age !== "stale-c" || STALE_IDS.has(c.id))).map(c => c.id));
   const sav = M.savings.filter(r => ids.has(r.contract_id) && inDates(r.date, f) && dqOk(r, f) && ageOk(r, f));
   const cb = M.cbot.filter(r => ids.has(r.contract_id) && inDates(r.date, f));
+  const cu = (M.cbot_unfixed || []).filter(r => ids.has(r.contract_id) && inDates(r.date, f));
   const op = M.open.filter(r => ids.has(r.contract_id) && ageOk(r, f));
-  return {f, ids, sav, cb, op, contracts: C.filter(c => ids.has(c.id)), filtered: Object.entries(f).some(([k, x]) => k !== "order" && x)};
+  return {f, ids, sav, cb, cu, op, contracts: C.filter(c => ids.has(c.id)), filtered: Object.entries(f).some(([k, x]) => k !== "order" && x)};
 }
 // Transport scenarios: each side uses its own recorded transport; a row without the
 // input a scenario needs is left out of that scenario's totals (never counted as zero).
@@ -682,15 +683,30 @@ function detail(c, v) {
 const fxCell = c => isN(c.fx) ? `${fx(c.fx, 4)} <span class="tag ${c.fx_basis === "Form 4" ? "good" : (c.fx_basis || "").startsWith("Latest") ? "pot" : ""}" title="${esc(c.fx_basis)}${c.form4_date ? " · " + esc(c.form4_date) : ""}">${c.fx_basis === "Form 4" ? "Form 4" : esc(c.fx_basis || "—")}</span>` : NA_;
 const CPC = [{h: "Contract", v: c => c.contract, html: c => `<b>${esc(c.contract)}</b> <span class="note">${esc(c.id)} ▸</span>`}, {h: "Supplier", v: c => c.supplier}, {h: "Commodity", v: c => c.commodity},
   {h: "Fixing type", v: c => c.fix.type === "Implied" ? "Implied CBOT Fixing" : c.fix.type === "Recorded" ? "Recorded fixing (lots)" : c.fix.type},
-  {h: "Futures month", v: c => futCode(c)}, {h: "Pricing date", v: c => pdate(c) || "Not recorded"},
-  {h: "CIF $/MT", n: 1, v: c => c.cif_usd_mt, f: f2}, {h: "Premium", n: 1, v: c => c.premium, f: f2}, {h: "CBOT fixed", n: 1, v: c => c.fix.value, f: f2},
-  {h: "MT consumed", n: 1, v: c => c.y.mt, tot: rs => sum(rs, c => c.y.mt)}, {h: "MT with CBOT that day", n: 1, v: c => c.y.amt, tot: rs => sum(rs, c => c.y.amt)},
-  {h: "Wtd avg CBOT in consumption", n: 1, v: c => c.y.avg, f: f2}, {h: "Difference", n: 1, v: c => isN(c.y.avg) ? c.y.avg - c.fix.value : null, f: f2, col: 1},
+  {h: "Futures month", v: c => futCode(c)}, {h: "Pricing date", v: c => pdate(c) || (c.y && c.y.unfixed ? "Not priced yet" : "Not recorded")},
+  {h: "CIF $/MT", n: 1, v: c => c.cif_usd_mt, f: f2}, {h: "Premium", n: 1, v: c => c.premium, f: f2}, {h: "CBOT fixed", n: 1, v: c => c.fix.value, html: c => c.y.unfixed ? '<span class="tag pot">Not fixed yet</span>' : f2(c.fix.value)},
+  {h: "MT consumed", n: 1, v: c => c.y.mt, tot: rs => sum(rs, c => c.y.mt)}, {h: "MT with CBOT that day", n: 1, v: c => c.y.unfixed ? c.y.wm : c.y.amt, tot: rs => sum(rs, c => c.y.unfixed ? c.y.wm : c.y.amt)},
+  {h: "Wtd avg CBOT in consumption", n: 1, v: c => c.y.avg, f: f2}, {h: "Difference", n: 1, v: c => isN(c.y.avg) && isN(c.fix.value) ? c.y.avg - c.fix.value : null, f: f2, col: 1},
   {h: "Avg USD/MT", n: 1, v: c => c.y.amt ? c.y.usd / c.y.amt : null, f: f2, col: 1},
   {h: "Advantage USD", n: 1, v: c => c.y.adv, col: 1, tot: rs => sum(rs, c => c.y.adv)}, {h: "Missed USD", n: 1, v: c => c.y.miss, col: 1, tot: rs => sum(rs, c => c.y.miss)},
   {h: "Net USD", n: 1, v: c => c.y.amt ? c.y.usd : null, col: 1, tot: rs => sum(rs, c => c.y.amt ? c.y.usd : null)},
   {h: "FX (Form 4 / basis)", n: 1, v: c => c.fx, html: fxCell},
-  {h: "Net EGP", n: 1, v: c => c.y.amt ? c.y.egp : null, col: 1, tot: rs => sum(rs, c => c.y.amt ? c.y.egp : null)}, {h: "Assessment", v: c => c.y.res}];
+  {h: "Net EGP", n: 1, v: c => c.y.amt ? c.y.egp : null, col: 1, tot: rs => sum(rs, c => c.y.amt ? c.y.egp : null)},
+  {h: "Indicative USD if fixed at latest CBOT (not fixed yet)", n: 1, v: c => c.y.unfixed ? c.y.ind : null, col: 1, html: c => c.y.unfixed && isN(c.y.ind) ? `<span class="${sg(c.y.ind)}" title="Not in the CBOT totals">${f0(c.y.ind)}</span> <span class="tag pot">indicative</span>` : ""},
+  {h: "Assessment", v: c => c.y.res}];
+// Consumption days of a contract that is not priced yet: the CBOT that day, and
+// an indicative difference against the latest stored CBOT (as if fixed today).
+function cbotDaysU(c, rows) {
+  rows = dayOrder(rows);
+  const mt = sum(rows, r => r.mt), w = rows.filter(r => isN(r.cbot)), wm = sum(w, r => r.mt), i = rows.filter(r => isN(r.ind_diff)), im = sum(i, r => r.mt);
+  const avg = wm ? sum(w, r => r.cbot * r.mt) / wm : null, lat = rows.find(r => isN(r.latest_cbot)) || {};
+  return `<thead><tr><th>Consumption date</th><th class="n">Consumed MT</th><th class="n">CBOT fixed</th><th class="n">CBOT that day</th><th>Price date</th><th class="n">Latest CBOT</th><th class="n">Indicative difference</th><th class="n">Indicative USD/MT</th><th class="n">Indicative USD</th><th class="n">FX</th><th class="n">Indicative EGP</th><th>Result</th></tr></thead><tbody>` +
+    rows.map(r => `<tr><td>${esc(r.date)}</td>${td(r.mt)}<td class="n"><span class="tag pot">Not fixed yet</span></td>${td(r.cbot, f2)}<td>${esc(r.cbot_date || "—")}</td><td class="n">${f2(r.latest_cbot)} <span class="note">${esc(r.latest_cbot_date)}</span></td>` +
+      `${td(r.ind_diff, f2, 1)}${td(r.ind_usd_mt, f2, 1)}${td(r.ind_usd, f0, 1)}${td(r.fx, x => fx(x, 4))}${td(r.ind_egp, f0, 1)}<td><span class="tag pot">${esc(r.result)}</span></td></tr>`).join("") +
+    `<tr class="tot"><td>Total / average · ${rows.length} days</td>${td(mt)}<td class="n note">premium ${f2(c.premium)} ${esc((rows[0] || {}).unit || "")} over ${esc((rows[0] || {}).futures || "—")}</td>${td(avg, f2)}<td class="note">tonne-weighted</td>${td(lat.latest_cbot, f2)}` +
+    `${td(im ? sum(i, r => r.ind_diff * r.mt) / im : null, f2, 1)}${td(im ? sum(i, r => r.ind_usd) / im : null, f2, 1)}${td(sum(i, r => r.ind_usd), f0, 1)}<td></td>${td(sum(i, r => r.ind_egp), f0, 1)}<td class="note">Indicative — not in the CBOT totals</td></tr></tbody>` +
+    `<tfoot><tr><td colspan="12" class="note">Not priced yet: the result is fixed only when the contract is priced. Indicative = (CBOT that day − latest stored CBOT) × factor × MT, i.e. as if it were fixed at today's CBOT.</td></tr></tfoot>`;
+}
 // Each consumption date of one contract: the tonnes, the CBOT that day vs the fixing, and what it was worth.
 function cbotDays(c, rows) {
   rows = dayOrder(rows);
@@ -728,15 +744,19 @@ function renderCbot(v) {
   v.cb.forEach(r => { const s = by[r.contract_id] = by[r.contract_id] || {mt: 0, amt: 0, usd: 0, egp: 0, w: 0, adv: 0, miss: 0};
     s.mt += r.mt; if (r.assessable) { s.amt += r.mt; s.usd += r.usd; s.egp += r.egp || 0; s.w += r.cbot * r.mt; if (r.usd > 0) s.adv += r.usd; else s.miss += r.usd; } });
   let rows = v.contracts.filter(c => by[c.id]).map(c => { const s = by[c.id], avg = s.amt ? s.w / s.amt : null, d = isN(avg) ? avg - c.fix.value : null;
-    return Object.assign(c, {y: Object.assign(s, {avg, res: !s.amt ? "Not assessable" : d >= n ? "Advantage" : d <= -n ? "Missed opportunity" : "Neutral"})}); });
-  const lastCb = {}; v.cb.forEach(r => { if (!lastCb[r.contract_id] || r.date > lastCb[r.contract_id]) lastCb[r.contract_id] = r.date; });
+    return Object.assign(c, {y: Object.assign(s, {avg, unfixed: false, res: !s.amt ? "Not assessable" : d >= n ? "Advantage" : d <= -n ? "Missed opportunity" : "Neutral"})}); });
+  const byU = groupBy(v.cu, r => r.contract_id);
+  rows = rows.concat(v.contracts.filter(c => byU[c.id] && !by[c.id]).map(c => { const u = byU[c.id], w = u.filter(r => isN(r.cbot)), wm = sum(w, r => r.mt);
+    return Object.assign(c, {y: {mt: sum(u, r => r.mt), amt: 0, usd: 0, egp: 0, adv: 0, miss: 0, w: 0, avg: wm ? sum(w, r => r.cbot * r.mt) / wm : null,
+      unfixed: true, wm, ind: sum(u, r => r.ind_usd), res: "Not fixed yet — indicative"}}); }));
+  const lastCb = {}; v.cb.concat(v.cu).forEach(r => { if (!lastCb[r.contract_id] || r.date > lastCb[r.contract_id]) lastCb[r.contract_id] = r.date; });
   rows = S.sort.cp ? sortBy(rows, "cp", CPC) : (byOrder(rows, c => lastCb[c.id]) || rows.sort((a, b) => (a.y.amt ? a.y.usd : 1e18) - (b.y.amt ? b.y.usd : 1e18)));
   S.cpOpen = S.cpOpen || new Set();
   $("tCP").innerHTML = thead("cp", CPC) + "<tbody>" + rows.map(c => `<tr class="row" data-cp="${esc(c.id)}">` + CPC.map(col => cell(col, c)).join("") + "</tr>" +
-    (S.cpOpen.has(c.id) ? `<tr class="det"><td colspan="${CPC.length}"><div class="detwrap" style="overflow-x:auto"><table>${cbotDays(c, v.cb.filter(r => r.contract_id === c.id))}</table>` +
+    (S.cpOpen.has(c.id) ? `<tr class="det"><td colspan="${CPC.length}"><div class="detwrap" style="overflow-x:auto"><table>${c.y.unfixed ? cbotDaysU(c, v.cu.filter(r => r.contract_id === c.id)) : cbotDays(c, v.cb.filter(r => r.contract_id === c.id))}</table>` +
       `<p class="note" style="margin:6px 0 0"><button class="btn" data-goto="${esc(c.id)}">Open the full contract analysis</button></p></div></td></tr>` : "")).join("") +
     totRow(CPC, rows, `Total · ${rows.length} contracts`) + "</tbody>";
-  const choices = rows.slice().sort((a, b) => b.y.amt - a.y.amt);
+  const choices = rows.filter(c => !c.y.unfixed).sort((a, b) => b.y.amt - a.y.amt);
   if (!choices.find(c => c.id === S.cb)) S.cb = choices.length ? choices[0].id : "";
   $("cbSel").innerHTML = choices.map(c => `<option value="${esc(c.id)}" ${c.id === S.cb ? "selected" : ""}>${esc(c.contract)} · ${esc(c.commodity)} · ${f0(c.y.amt)} of ${f0(c.y.mt)} MT with a stored CBOT</option>`).join("");
   const c = CI[S.cb];

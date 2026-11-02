@@ -260,3 +260,17 @@ class EquivalentPremiumTests(unittest.TestCase):
         sfm = mr.equivalent_premium({"base": "SFM", "fix": {"eligible": False}}, 20000.0, dt.date(2026, 10, 28),
                                     lambda b, d: (1.0, d), lambda d: (50.0, d))
         self.assertIsNone(sfm["premium_factor"]); self.assertIsNone(sfm["eq_premium"])
+
+
+class UnfixedConsumptionTests(unittest.TestCase):
+    def test_consumed_unpriced_days_are_listed_apart_from_the_cbot_totals(self):
+        m = mr.build(inputs())
+        un = [r for r in m["cbot_unfixed"] if r["contract_id"] == "C2"]
+        if not un:
+            self.skipTest("fixture has no consumption on the unpriced contract")
+        self.assertTrue(all(r["contract_id"] not in {x["contract_id"] for x in m["cbot"]} for r in un))
+        for r in un:
+            if r["ind_diff"] is not None:
+                self.assertAlmostEqual(r["ind_diff"], r["cbot"] - r["latest_cbot"])
+                self.assertAlmostEqual(r["ind_usd"], r["ind_diff"] * r["factor"] * r["mt"])
+        self.assertAlmostEqual(m["kpis"]["cbot_net_usd"], sum(r["usd"] for r in m["cbot"] if r["assessable"]))

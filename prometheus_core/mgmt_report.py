@@ -485,7 +485,7 @@ def build(inp, **overrides):
                                  **equivalent_premium(c, l_price, _d(r["date"]), day_cbot, day_fx)))
 
     # ── CBOT on each consumption day vs the contract's fixing ────────────
-    cbot_rows = []
+    cbot_rows, cbot_unfixed = [], []
     for r in allocations:
         if r["type"] != "Import":
             continue
@@ -494,6 +494,24 @@ def build(inp, **overrides):
         if not f["eligible"]:
             continue
         if not f["fixed"]:
+            # Consumed but not priced yet: the day's CBOT is recorded, and the
+            # difference is indicative only — against the latest stored CBOT, as
+            # if the contract were fixed today. Kept apart from the CBOT totals.
+            price, pdate = day_cbot(c["base"], _d(r["date"]))
+            cur = c.get("current") or {}
+            latest, latest_d = _n(cur.get("cbot")), cur.get("cbot_date") or ""
+            fx = _n(cur.get("fx")) or _n(c.get("fx"))
+            ind = (price - latest) if None not in (price, latest) else None
+            cbot_unfixed.append({
+                "date": r["date"], "contract_id": c["id"], "contract": c["contract"], "base": c["base"],
+                "mt": r["mt"], "premium": _n(c.get("premium")), "unit": f["unit"], "factor": f["factor"],
+                "futures": (c.get("contract_month") or {}).get("code", c.get("futures_month") or ""),
+                "cbot": price, "cbot_date": pdate.isoformat() if pdate else "",
+                "latest_cbot": latest, "latest_cbot_date": latest_d, "fx": fx,
+                "ind_diff": ind, "ind_usd_mt": ind * f["factor"] if ind is not None else None,
+                "ind_usd": ind * f["factor"] * r["mt"] if ind is not None else None,
+                "ind_egp": ind * f["factor"] * r["mt"] * fx if (ind is not None and fx) else None,
+                "result": "Not fixed yet — indicative" if ind is not None else "Not fixed yet — no stored CBOT"})
             continue
         day = _d(r["date"])
         hist, spk = series.get(c["base"]), spikes.get(c["base"], set())
@@ -764,7 +782,7 @@ def build(inp, **overrides):
         "generated": inp.get("generated", ""), "app": inp.get("app", ""),
         "version": MGMT_REPORT_VERSION, "walk_mode": inp.get("walk_mode", ""), "rates": inp.get("rates") or {},
         "options": opts, "contracts": [_public(c) for c in master], "allocations": allocations,
-        "savings": savings_rows, "cbot": cbot_rows, "open": open_rows, "excluded": excluded,
+        "savings": savings_rows, "cbot": cbot_rows, "cbot_unfixed": cbot_unfixed, "open": open_rows, "excluded": excluded,
         "local_obs": inp.get("local_obs") or [], "commodities": commodities, "kpis": k,
         "quality": quality, "audit": audit, "look_alikes": inp.get("look_alikes") or [],
         "sources": inp.get("sources") or {},
