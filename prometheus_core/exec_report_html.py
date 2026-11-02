@@ -228,6 +228,7 @@ tr.rd>td{background:var(--bad-bg)}tr.rx>td{color:var(--ink2)}
   <label class="note">Contract <select class="ctl" id="cbSel"></select></label>
   <div id="cbChart"></div><div id="cbBars"></div><div id="cbSum" class="note"></div><div class="tw" style="margin-top:10px"><table id="cbDays"></table></div>
  </div>
+ <div class="card"><h2>Open contracts — premium over CBOT, not yet compared</h2><p class="sub">Open CBOT contracts (including ones not yet received or with no storage start) have no consumption days to compare yet. Their premium and futures month are shown with the latest stored CBOT and the CIF it gives: (CBOT + premium) × factor — final for fixed contracts, indicative for unpriced ones. Click a row for the full valuation.</p><div class="tw"><table id="tCbOpen"></table></div></div>
  <div class="card"><h2>Contract by contract — fixed CBOT vs CBOT on each consumption day</h2><p class="sub">One row per fixed contract: tonne-weighted average CBOT on its consumption days against its fixing. Click a contract to break it down by consumption date and quantity. Saving per day = (CBOT that day − CBOT fixed) × factor × MT; positive = we fixed below the market on the day the tonnes were used (advantage), negative = missed opportunity. A benchmark, never added to the savings vs local.</p><div class="tw"><table id="tCP"></table></div></div>
 </section>
 
@@ -702,6 +703,26 @@ function cbotDays(c, rows) {
                     : `<td colspan="5" class="na">Not compared: ${esc(r.benchmark)}</td><td>—</td>`) + "</tr>").join("") +
     `<tr class="tot"><td>Total / average · ${rows.length} days</td>${td(mt)}${td(c.fix.value, f2)}${td(avg, f2)}<td class="note">tonne-weighted</td>${td(d, f2, 1)}${td(amt ? usd / amt : null, f2, 1)}${td(usd, f0, 1)}${td(amt ? sum(a, r => r.fx * r.mt) / amt : null, x => fx(x, 4))}${td(egp, f0, 1)}<td>${!amt ? "Not assessable" : d >= n ? "Advantage" : d <= -n ? "Missed opportunity" : "Neutral"}</td></tr></tbody>`;
 }
+const FACT = {CORN: 0.3937, SOYBEAN: 0.36745, WHEAT: 0.36745, SBM: 1.1023};
+const OCB = [
+  {h: "Contract / Supplier", v: r => r.contract, html: r => `<b>${esc(r.contract)}</b><br><span class="note">${esc(r.supplier)} · ${esc(r.contract_id)}</span>`},
+  {h: "Commodity / Origin", v: r => r.commodity, html: r => `${esc(r.commodity)}<br><span class="note">${esc(r.origin || "—")}</span>`},
+  {h: "Qty MT", n: 1, v: r => r.qty_mt, tot: rs => sum(rs, r => r.qty_mt)},
+  {h: "Not yet consumed MT", n: 1, v: r => r.unconsumed_mt, tot: rs => sum(rs, r => r.unconsumed_mt)},
+  {h: "Storage start", v: r => r.storage_start, html: storageCell},
+  {h: "Premium", n: 1, v: r => r.premium, html: r => premCell(r.premium, r.unit, r.pricing_class)},
+  {h: "Futures month", v: r => r.futures || "—"},
+  {h: "Fixed / Latest CBOT", n: 1, v: r => isN(r.fixed_cbot) ? r.fixed_cbot : r.latest_cbot, html: cbotCellO},
+  {h: "CIF $/MT", n: 1, v: r => r.cif, html: cifCellO},
+  {h: "FX", n: 1, v: r => r.fx, html: fxCellO},
+  {h: "Pricing status", v: r => r.pricing_class, html: r => pTag(r.pricing_class)},
+  {h: "Valuation", v: r => r.class, html: valTag}];
+function renderCbotOpen(v) {
+  let rows = v.op.filter(r => FACT[r.base] && !["Flat-priced", "Not CBOT-based"].includes(r.pricing_class) && r.unconsumed_mt > 0);
+  rows = S.sort.ocb ? sortBy(rows, "ocb", OCB) : (byOrder(rows, r => r.storage_start || (CI[r.contract_id] || {}).delivery_date) || rows.slice().sort((a, b) => b.unconsumed_mt - a.unconsumed_mt));
+  $("tCbOpen").innerHTML = rows.length ? thead("ocb", OCB) + "<tbody>" + rows.map(r => `<tr class="row" data-goto="${esc(r.contract_id)}">` + OCB.map(col => cell(col, r)).join("") + "</tr>").join("") +
+    totRow(OCB, rows, `Total · ${rows.length} contracts`) + "</tbody>" : '<tbody><tr><td class="note">No open CBOT contract with tonnes still to consume in this selection.</td></tr></tbody>';
+}
 function renderCbot(v) {
   const n = M.options.neutral_cbot, by = {};
   v.cb.forEach(r => { const s = by[r.contract_id] = by[r.contract_id] || {mt: 0, amt: 0, usd: 0, egp: 0, w: 0, adv: 0, miss: 0};
@@ -719,7 +740,8 @@ function renderCbot(v) {
   if (!choices.find(c => c.id === S.cb)) S.cb = choices.length ? choices[0].id : "";
   $("cbSel").innerHTML = choices.map(c => `<option value="${esc(c.id)}" ${c.id === S.cb ? "selected" : ""}>${esc(c.contract)} · ${esc(c.commodity)} · ${f0(c.y.amt)} of ${f0(c.y.mt)} MT with a stored CBOT</option>`).join("");
   const c = CI[S.cb];
-  if (!c) { $("cbChart").innerHTML = '<p class="note">No fixed contract with consumption in this selection.</p>'; $("cbBars").innerHTML = ""; $("cbSum").innerHTML = ""; $("cbDays").innerHTML = ""; return; }
+  renderCbotOpen(v);
+  if (!c) { $("cbChart").innerHTML = `<p class="note">No fixed contract with consumption in this selection.${v.op.some(r => FACT[r.base] && r.unconsumed_mt > 0) ? " Open contracts not yet consumed are listed in the next section." : ""}</p>`; $("cbBars").innerHTML = ""; $("cbSum").innerHTML = ""; $("cbDays").innerHTML = ""; return; }
   const cr = v.cb.filter(r => r.contract_id === c.id), s = by[c.id];
   $("cbChart").innerHTML = cbotChart(c, cr);
   $("cbBars").innerHTML = dailyBars(cr);
