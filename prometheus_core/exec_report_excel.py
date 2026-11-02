@@ -298,10 +298,12 @@ def _savings(b, m):
              "Local Price Age Status", "Storage Start Date", "Local Excl x MT", "MT With Excl",
              "CBOT That Day", "CBOT Price Date", "FX That Day EGP/USD", "FX Date", "Port Costs (Discharge + Clearance) EGP/MT",
              "CBOT Factor", "Local Equivalent Premium (CIF basis)", "Local Equivalent Premium (port costs not removed)",
-             "Contract Premium", "Premium Gap (Local Equivalent − Contract)", "Premium Unit"]
+             "Contract Premium", "Premium Gap (Local Equivalent − Contract)", "Premium Unit",
+             "Contract FX EGP/USD", "Contract FX Basis", "Form 4 Date"]
     last = b.table(ws, "SavingsVsLocal", heads, len(rows),
                    [22, 9, 16, 11, 12, 9, 12, 12, 12, 8, 16, 11, 13, 13, 13, 40, 11, 14, 8, 9,
-                    11, 12, 10, 12, 11, 13, 34, 12, 13, 9, 10, 11, 10, 11, 13, 8, 14, 14, 10, 14, 10])
+                    11, 12, 10, 12, 11, 13, 34, 12, 13, 9, 10, 11, 10, 11, 13, 8, 14, 14, 10, 14, 10, 11, 22, 11])
+    cmap = {c["id"]: c for c in m["contracts"]}
     for i, s in enumerate(rows):
         r = FIRST + i
         for j, v in enumerate([s["contract"], s["contract_id"], s["supplier"], s["commodity"], s["date"],
@@ -347,6 +349,9 @@ def _savings(b, m):
         b.put(ws, r, 39, s["contract_premium"] if s.get("contract_premium") is not None else ("Flat price" if has else ""), M2)
         b.f(ws, r, 40, f'=IF(AND(ISNUMBER(AK{r}),ISNUMBER(AM{r})),AK{r}-AM{r},{NA})', nv(s.get("premium_gap")), M2)
         b.put(ws, r, 41, s.get("premium_unit") or "")
+        cc = cmap.get(s["contract_id"], {})
+        b.put(ws, r, 42, nv(cc.get("fx")), "0.0000"); b.put(ws, r, 43, cc.get("fx_basis") or "")
+        b.put(ws, r, 44, cc.get("form4_date") or ("Not recorded" if cc.get("fx_basis") == "Form 4" else ""))
     b.signs(ws, f"L{FIRST}:M{last}")
     b.signs(ws, f"Y{FIRST}:Z{last}")
     b.signs(ws, f"AN{FIRST}:AN{last}")
@@ -445,10 +450,12 @@ def _cbot(b, m):
     heads = ["Contract Number", "Contract ID", "Supplier", "Commodity", "Consumption Date", "Consumed MT",
              "CIF USD/MT", "Contract Premium", "Price Unit", "Conversion Factor", "CBOT Fixed", "Fixing Type",
              "Futures Month", "CBOT on Consumption Date", "Market Price Date", "Benchmark Status",
-             "CBOT Difference", "Difference USD/MT", "Total Advantage / Missed USD", "FX",
-             "Total Advantage / Missed EGP", "Result", "CBOT x MT", "Base", "Series Month That Day", "Month"]
+             "CBOT Difference", "Difference USD/MT", "Total Advantage / Missed USD", "Contract FX EGP/USD",
+             "Total Advantage / Missed EGP", "Result", "CBOT x MT", "Base", "Series Month That Day", "Month",
+             "Contract FX Basis"]
     last = b.table(ws, "CbotVsConsumption", heads, len(rows),
-                   [22, 9, 16, 11, 12, 9, 9, 9, 10, 9, 10, 11, 9, 11, 12, 22, 10, 10, 13, 8, 14, 16, 12, 8, 20, 9])
+                   [22, 9, 16, 11, 12, 9, 9, 9, 10, 9, 10, 11, 9, 11, 12, 22, 10, 10, 13, 10, 14, 16, 12, 8, 20, 9, 22])
+    fxb = {c["id"]: c.get("fx_basis") or "" for c in m["contracts"]}
     for i, x in enumerate(rows):
         r = FIRST + i
         for j, v in enumerate([x["contract"], x["contract_id"], x["supplier"], x["commodity"], x["date"],
@@ -465,6 +472,7 @@ def _cbot(b, m):
             x["result"])
         b.f(ws, r, 23, f'=IF(Q{r}="","",N{r}*F{r})', (x["cbot"] * x["mt"]) if x["assessable"] else None, M0)
         b.put(ws, r, 24, x["base"])
+        b.put(ws, r, 27, fxb.get(x["contract_id"], ""))
         b.put(ws, r, 25, x.get("series_month") or "")
         b.put(ws, r, 26, x["date"][:7])
     b.signs(ws, f"Q{FIRST}:U{last}")

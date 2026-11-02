@@ -139,6 +139,7 @@ tr.rd>td{background:var(--bad-bg)}tr.rx>td{color:var(--ink2)}
 #tO td{white-space:nowrap}
 .detwrap{position:sticky;left:0;width:calc(100vw - 110px);max-width:1370px;white-space:normal}
 @media(max-width:640px){.detwrap{width:calc(100vw - 64px)}}
+#cbSel{max-width:100%}label.note:has(#cbSel){display:block;max-width:100%}
 .wf{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:8px}
 @media print{
  body{background:#fff}nav,.filters,.btn,.noprint{display:none!important}
@@ -224,9 +225,9 @@ tr.rd>td{background:var(--bad-bg)}tr.rx>td{color:var(--ink2)}
  <div class="card"><h2>CBOT fixed vs consumption</h2>
   <p class="sub">Our fixed CBOT (reference line) against the stored CBOT on each day the contract was consumed. Green = market above our fixing (advantage), red = below (missed opportunity). Each point is the CBOT stored for that consumption day; hover for the difference, tonnes and USD impact.</p>
   <label class="note">Contract <select class="ctl" id="cbSel"></select></label>
-  <div id="cbChart"></div><div id="cbBars"></div><div id="cbSum" class="note"></div>
+  <div id="cbChart"></div><div id="cbBars"></div><div id="cbSum" class="note"></div><div class="tw" style="margin-top:10px"><table id="cbDays"></table></div>
  </div>
- <div class="card tech"><h2>Contract CBOT performance</h2><p class="sub">One row per fixed contract with consumption; result = sum of the consumption days' differences.</p><div class="tw"><table id="tCP"></table></div></div>
+ <div class="card"><h2>Contract by contract — fixed CBOT vs CBOT on each consumption day</h2><p class="sub">One row per fixed contract: tonne-weighted average CBOT on its consumption days against its fixing. Click a contract to break it down by consumption date and quantity. Saving per day = (CBOT that day − CBOT fixed) × factor × MT; positive = we fixed below the market on the day the tonnes were used (advantage), negative = missed opportunity. A benchmark, never added to the savings vs local.</p><div class="tw"><table id="tCP"></table></div></div>
 </section>
 
 <section class="panel" id="p-open">
@@ -666,12 +667,30 @@ function detail(c, v) {
 }
 
 // ── CBOT tab ─────────────────────────────────────────────────────────
-const CPC = [{h: "Contract", v: c => c.contract}, {h: "Supplier", v: c => c.supplier}, {h: "MT consumed", n: 1, v: c => c.y.mt},
-  {h: "MT assessed", n: 1, v: c => c.y.amt}, {h: "Coverage %", n: 1, v: c => c.y.mt ? c.y.amt / c.y.mt * 100 : null, f: x => fx(x, 0)},
+const fxCell = c => isN(c.fx) ? `${fx(c.fx, 4)} <span class="tag ${c.fx_basis === "Form 4" ? "good" : (c.fx_basis || "").startsWith("Latest") ? "pot" : ""}" title="${esc(c.fx_basis)}${c.form4_date ? " · " + esc(c.form4_date) : ""}">${c.fx_basis === "Form 4" ? "Form 4" : esc(c.fx_basis || "—")}</span>` : NA_;
+const CPC = [{h: "Contract", v: c => c.contract, html: c => `<b>${esc(c.contract)}</b> <span class="note">${esc(c.id)} ▸</span>`}, {h: "Supplier", v: c => c.supplier}, {h: "Commodity", v: c => c.commodity},
+  {h: "Fixing type", v: c => c.fix.type === "Implied" ? "Implied CBOT Fixing" : c.fix.type === "Recorded" ? "Recorded fixing (lots)" : c.fix.type},
+  {h: "Futures month", v: c => futCode(c)}, {h: "Pricing date", v: c => pdate(c) || "Not recorded"},
   {h: "CIF $/MT", n: 1, v: c => c.cif_usd_mt, f: f2}, {h: "Premium", n: 1, v: c => c.premium, f: f2}, {h: "CBOT fixed", n: 1, v: c => c.fix.value, f: f2},
-  {h: "Avg CBOT in consumption", n: 1, v: c => c.y.avg, f: f2}, {h: "Difference", n: 1, v: c => isN(c.y.avg) ? c.y.avg - c.fix.value : null, f: f2, col: 1},
-  {h: "Advantage USD", n: 1, v: c => c.y.adv, col: 1}, {h: "Missed USD", n: 1, v: c => c.y.miss, col: 1},
-  {h: "Net USD", n: 1, v: c => c.y.amt ? c.y.usd : null, col: 1}, {h: "Net EGP", n: 1, v: c => c.y.amt ? c.y.egp : null, col: 1}, {h: "Assessment", v: c => c.y.res}];
+  {h: "MT consumed", n: 1, v: c => c.y.mt, tot: rs => sum(rs, c => c.y.mt)}, {h: "MT with CBOT that day", n: 1, v: c => c.y.amt, tot: rs => sum(rs, c => c.y.amt)},
+  {h: "Wtd avg CBOT in consumption", n: 1, v: c => c.y.avg, f: f2}, {h: "Difference", n: 1, v: c => isN(c.y.avg) ? c.y.avg - c.fix.value : null, f: f2, col: 1},
+  {h: "Avg USD/MT", n: 1, v: c => c.y.amt ? c.y.usd / c.y.amt : null, f: f2, col: 1},
+  {h: "Advantage USD", n: 1, v: c => c.y.adv, col: 1, tot: rs => sum(rs, c => c.y.adv)}, {h: "Missed USD", n: 1, v: c => c.y.miss, col: 1, tot: rs => sum(rs, c => c.y.miss)},
+  {h: "Net USD", n: 1, v: c => c.y.amt ? c.y.usd : null, col: 1, tot: rs => sum(rs, c => c.y.amt ? c.y.usd : null)},
+  {h: "FX (Form 4 / basis)", n: 1, v: c => c.fx, html: fxCell},
+  {h: "Net EGP", n: 1, v: c => c.y.amt ? c.y.egp : null, col: 1, tot: rs => sum(rs, c => c.y.amt ? c.y.egp : null)}, {h: "Assessment", v: c => c.y.res}];
+// Each consumption date of one contract: the tonnes, the CBOT that day vs the fixing, and what it was worth.
+function cbotDays(c, rows) {
+  rows = rows.slice().sort((a, b) => a.date < b.date ? -1 : 1);
+  const a = rows.filter(r => r.assessable), mt = sum(rows, r => r.mt), amt = sum(a, r => r.mt);
+  const avg = amt ? sum(a, r => r.cbot * r.mt) / amt : null, usd = sum(a, r => r.usd), egp = sum(a, r => r.egp);
+  const n = M.options.neutral_cbot, d = isN(avg) ? avg - c.fix.value : null;
+  return `<thead><tr><th>Consumption date</th><th class="n">Consumed MT</th><th class="n">CBOT fixed</th><th class="n">CBOT that day</th><th>Price date</th><th class="n">Difference</th><th class="n">USD/MT</th><th class="n">Saving USD</th><th class="n">FX</th><th class="n">Saving EGP</th><th>Result</th></tr></thead><tbody>` +
+    rows.map(r => `<tr><td>${esc(r.date)}</td>${td(r.mt)}${td(r.fix, f2)}${td(r.cbot, f2)}<td>${esc(r.cbot_date || "—")}</td>` +
+      (r.assessable ? `${td(r.diff, f2, 1)}${td(r.usd_mt, f2, 1)}${td(r.usd, f0, 1)}${td(r.fx, x => fx(x, 4))}${td(r.egp, f0, 1)}<td><span class="tag ${r.usd > 0 ? "good" : r.usd < 0 ? "bad" : ""}">${esc(r.result)}</span></td>`
+                    : `<td colspan="5" class="na">Not compared: ${esc(r.benchmark)}</td><td>—</td>`) + "</tr>").join("") +
+    `<tr class="tot"><td>Total / average · ${rows.length} days</td>${td(mt)}${td(c.fix.value, f2)}${td(avg, f2)}<td class="note">tonne-weighted</td>${td(d, f2, 1)}${td(amt ? usd / amt : null, f2, 1)}${td(usd, f0, 1)}${td(amt ? sum(a, r => r.fx * r.mt) / amt : null, x => fx(x, 4))}${td(egp, f0, 1)}<td>${!amt ? "Not assessable" : d >= n ? "Advantage" : d <= -n ? "Missed opportunity" : "Neutral"}</td></tr></tbody>`;
+}
 function renderCbot(v) {
   const n = M.options.neutral_cbot, by = {};
   v.cb.forEach(r => { const s = by[r.contract_id] = by[r.contract_id] || {mt: 0, amt: 0, usd: 0, egp: 0, w: 0, adv: 0, miss: 0};
@@ -679,18 +698,21 @@ function renderCbot(v) {
   let rows = v.contracts.filter(c => by[c.id]).map(c => { const s = by[c.id], avg = s.amt ? s.w / s.amt : null, d = isN(avg) ? avg - c.fix.value : null;
     return Object.assign(c, {y: Object.assign(s, {avg, res: !s.amt ? "Not assessable" : d >= n ? "Advantage" : d <= -n ? "Missed opportunity" : "Neutral"})}); });
   rows = S.sort.cp ? sortBy(rows, "cp", CPC) : rows.sort((a, b) => (a.y.amt ? a.y.usd : 1e18) - (b.y.amt ? b.y.usd : 1e18));
-  $("tCP").innerHTML = thead("cp", CPC) + "<tbody>" + rows.map(c => `<tr class="row" data-goto="${esc(c.id)}">` + CPC.map(col => { const val = col.v(c);
-    return col.n ? `<td class="n ${col.col ? sg(val) : ""}">${(col.f || f0)(val)}</td>` : `<td>${esc(val)}</td>`; }).join("") + "</tr>").join("") +
-    `<tr class="tot"><td colspan="2">Total · ${rows.length}</td>${td(sum(rows, c => c.y.mt))}${td(sum(rows, c => c.y.amt))}<td colspan="6"></td>${td(sum(rows, c => c.y.adv), f0, 1)}${td(sum(rows, c => c.y.miss), f0, 1)}${td(sum(rows, c => c.y.usd), f0, 1)}${td(sum(rows, c => c.y.egp), f0, 1)}<td></td></tr></tbody>`;
+  S.cpOpen = S.cpOpen || new Set();
+  $("tCP").innerHTML = thead("cp", CPC) + "<tbody>" + rows.map(c => `<tr class="row" data-cp="${esc(c.id)}">` + CPC.map(col => cell(col, c)).join("") + "</tr>" +
+    (S.cpOpen.has(c.id) ? `<tr class="det"><td colspan="${CPC.length}"><div class="detwrap" style="overflow-x:auto"><table>${cbotDays(c, v.cb.filter(r => r.contract_id === c.id))}</table>` +
+      `<p class="note" style="margin:6px 0 0"><button class="btn" data-goto="${esc(c.id)}">Open the full contract analysis</button></p></div></td></tr>` : "")).join("") +
+    totRow(CPC, rows, `Total · ${rows.length} contracts`) + "</tbody>";
   const choices = rows.slice().sort((a, b) => b.y.amt - a.y.amt);
   if (!choices.find(c => c.id === S.cb)) S.cb = choices.length ? choices[0].id : "";
   $("cbSel").innerHTML = choices.map(c => `<option value="${esc(c.id)}" ${c.id === S.cb ? "selected" : ""}>${esc(c.contract)} · ${esc(c.commodity)} · ${f0(c.y.amt)} of ${f0(c.y.mt)} MT with a stored CBOT</option>`).join("");
   const c = CI[S.cb];
-  if (!c) { $("cbChart").innerHTML = '<p class="note">No fixed contract with consumption in this selection.</p>'; $("cbBars").innerHTML = ""; $("cbSum").innerHTML = ""; return; }
+  if (!c) { $("cbChart").innerHTML = '<p class="note">No fixed contract with consumption in this selection.</p>'; $("cbBars").innerHTML = ""; $("cbSum").innerHTML = ""; $("cbDays").innerHTML = ""; return; }
   const cr = v.cb.filter(r => r.contract_id === c.id), s = by[c.id];
   $("cbChart").innerHTML = cbotChart(c, cr);
   $("cbBars").innerHTML = dailyBars(cr);
-  $("cbSum").innerHTML = `${esc(c.fix.status)} · fixed ${f2(c.fix.value)} ${esc(c.fix.unit)} · futures ${esc(c.contract_month ? c.contract_month.code : "—")} · CBOT on ${f0(s.amt)} of ${f0(s.mt)} MT consumed · advantage ${money("USD", s.adv)} · missed ${money("USD", s.miss)} · net <b class="${sg(s.usd)}">${money("USD", s.usd)}</b>`;
+  $("cbSum").innerHTML = `${esc(c.fix.status)} · fixed ${f2(c.fix.value)} ${esc(c.fix.unit)} · futures ${esc(c.contract_month ? c.contract_month.code : "—")} · CBOT on ${f0(s.amt)} of ${f0(s.mt)} MT consumed · advantage ${money("USD", s.adv)} · missed ${money("USD", s.miss)} · net <b class="${sg(s.usd)}">${money("USD", s.usd)}</b> · FX ${fxCell(c)}`;
+  $("cbDays").innerHTML = cbotDays(c, cr);
 }
 
 // ── open tab ─────────────────────────────────────────────────────────
@@ -889,7 +911,7 @@ function exportXlsx() {
 function svcols() {
   const L_ = scs(), P_ = PS();
   return [{h: "Contract", v: c => c.contract}, {h: "Supplier", v: c => c.supplier}, {h: "Commodity", v: c => c.commodity}, COL.storage,
-    COL.premium, COL.futures, COL.fixing, COL.cif, COL.pstatus,
+    COL.premium, COL.futures, COL.fixing, COL.cif, {h: "FX (Form 4 / basis)", n: 1, v: c => c.fx, html: fxCell}, COL.pstatus,
     {h: "Compared MT", n: 1, v: c => c.z.incl.mt, tot: rs => sum(rs, c => c.z.incl.mt)},
     ...L_.flatMap(sc => [{h: `Landed ${sc.h} EGP/MT`, n: 1, na: 1, v: c => c.z[sc.k].cost, f: f2},
       {h: `Wtd avg local ${sc.h} EGP/MT`, n: 1, na: 1, v: c => c.z[sc.k].local, f: f2},
@@ -954,9 +976,9 @@ function renderSavings(v) {
   rows.forEach(c => {
     h += `<tr class="row" data-sv="${esc(c.id)}" id="sv-${esc(c.id)}">` + cols.map(col => cell(col, c)).join("") + "</tr>";
     // The daily consumption table keeps its original layout (including transport, age in days).
-    if (S.svOpen && S.svOpen.has(c.id)) h += `<tr class="det"><td colspan="${cols.length}"><div class="detwrap" style="overflow-x:auto"><table><thead><tr><th>Date</th><th class="n">MT</th><th class="n">Landed EGP/MT</th><th class="n">Local EGP/MT</th><th>Local quote of</th><th class="n">Age (days)</th><th class="n">Saving EGP/MT</th><th class="n">Saving EGP</th><th class="n">CBOT that day</th><th class="n">FX that day</th><th class="n">Local equiv. premium</th><th class="n">Contract premium</th><th class="n">Premium gap</th><th>Local record</th><th>Data quality</th></tr></thead><tbody>` +
-      c.z.rows.map(r => `<tr><td>${esc(r.date)}</td>${td(r.mt)}${td(r.cost, f2)}${td(r.local, f2)}<td>${esc(r.local_date)} <span class="note">${esc(r.local_key)}</span></td>${td(r.local_age)}${td(r.saving_mt, f2, 1)}${td(r.saving, f0, 1)}${premCells(r)}<td>${esc(r.local_source)}</td><td class="note">${esc(r.quality)}</td></tr>`).join("") +
-      `<tr class="tot"><td>Total</td>${td(c.z.incl.mt)}${td(c.z.incl.cost, f2)}${td(c.z.incl.local, f2)}<td></td><td></td>${td(c.z.incl.per, f2, 1)}${td(c.z.incl.sav, f0, 1)}${premAvg(c.z.rows)}<td></td><td></td></tr></tbody></table></div></td></tr>`;
+    if (S.svOpen && S.svOpen.has(c.id)) h += `<tr class="det"><td colspan="${cols.length}"><div class="detwrap" style="overflow-x:auto"><table><thead><tr><th>Date</th><th class="n">MT</th><th class="n">Landed EGP/MT</th><th class="n">Contract FX</th><th class="n">Local EGP/MT</th><th>Local quote of</th><th class="n">Age (days)</th><th class="n">Saving EGP/MT</th><th class="n">Saving EGP</th><th class="n">CBOT that day</th><th class="n">FX that day</th><th class="n">Local equiv. premium</th><th class="n">Contract premium</th><th class="n">Premium gap</th><th>Local record</th><th>Data quality</th></tr></thead><tbody>` +
+      c.z.rows.map(r => `<tr><td>${esc(r.date)}</td>${td(r.mt)}${td(r.cost, f2)}<td class="n">${fxCell(c)}</td>${td(r.local, f2)}<td>${esc(r.local_date)} <span class="note">${esc(r.local_key)}</span></td>${td(r.local_age)}${td(r.saving_mt, f2, 1)}${td(r.saving, f0, 1)}${premCells(r)}<td>${esc(r.local_source)}</td><td class="note">${esc(r.quality)}</td></tr>`).join("") +
+      `<tr class="tot"><td>Total</td>${td(c.z.incl.mt)}${td(c.z.incl.cost, f2)}<td></td>${td(c.z.incl.local, f2)}<td></td><td></td>${td(c.z.incl.per, f2, 1)}${td(c.z.incl.sav, f0, 1)}${premAvg(c.z.rows)}<td></td><td></td></tr></tbody></table></div></td></tr>`;
   });
   h += totRow(cols, rows, `Total · ${rows.length} contracts`) + "</tbody>";
   $("svT").innerHTML = h;
@@ -1109,6 +1131,8 @@ document.addEventListener("click", e => {
   const th = e.target.closest("th[data-sort]");
   if (th) { const k = th.dataset.sort, i = +th.dataset.i, cur = S.sort[k]; S.sort[k] = {i, dir: cur && cur.i === i ? -cur.dir : -1}; render(); return; }
   const g = e.target.closest("[data-goto]"); if (g) { openContract(g.getAttribute("data-goto")); return; }
+  const cpr = e.target.closest("tr.row[data-cp]");
+  if (cpr) { S.cpOpen = S.cpOpen || new Set(); const id = cpr.dataset.cp; S.cpOpen.has(id) ? S.cpOpen.delete(id) : S.cpOpen.add(id); renderCbot(view()); return; }
   const svr = e.target.closest("tr.row[data-sv]");
   if (svr) { S.svOpen = S.svOpen || new Set(); const id = svr.dataset.sv; S.svOpen.has(id) ? S.svOpen.delete(id) : S.svOpen.add(id); renderSavings(view()); return; }
   const row = e.target.closest("tr.row[data-id]");
