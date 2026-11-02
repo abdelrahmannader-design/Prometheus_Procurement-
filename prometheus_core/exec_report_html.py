@@ -224,6 +224,7 @@ tr.rd>td{background:var(--bad-bg)}tr.rx>td{color:var(--ink2)}
 </section>
 
 <section class="panel" id="p-cbot">
+ <div class="kpis" id="cbK"></div>
  <div class="card"><h2>CBOT fixed vs consumption</h2>
   <p class="sub">Our fixed CBOT (reference line) against the stored CBOT on each day the contract was consumed. Green = market above our fixing (advantage), red = below (missed opportunity). Each point is the CBOT stored for that consumption day; hover for the difference, tonnes and USD impact.</p>
   <label class="note">Contract <select class="ctl" id="cbSel"></select></label>
@@ -686,23 +687,28 @@ function detail(c, v) {
 
 // ── CBOT tab ─────────────────────────────────────────────────────────
 const fxCell = c => isN(c.fx) ? `${fx(c.fx, 4)} <span class="tag ${c.fx_basis === "Form 4" ? "good" : (c.fx_basis || "").startsWith("Latest") ? "pot" : ""}" title="${esc(c.fx_basis)}${c.form4_date ? " · " + esc(c.form4_date) : ""}">${c.fx_basis === "Form 4" ? "Form 4" : esc(c.fx_basis || "—")}</span>` : NA_;
-const CPC = [{h: "Contract", v: c => c.contract, html: c => `<b>${esc(c.contract)}</b> <span class="note">${esc(c.id)} ▸</span>`}, {h: "Supplier", v: c => c.supplier}, {h: "Commodity", v: c => c.commodity},
+const agreeOf = c => c.y.unfixed || !c.y.amt || !c.y.wmt ? "" : Math.sign(c.y.usd) === Math.sign(c.y.wusd) ? "Yes" : "No";
+const CPC = [{h: "Contract", v: c => c.contract, html: c => `<b>${esc(c.contract)}</b> <span class="note">${esc(c.id)} ▸</span><br><span class="note">${esc(c.supplier)} · ${esc(c.commodity)}</span>`},
+  {h: "CBOT fixed", n: 1, v: c => c.fix.value, html: c => c.y.unfixed ? '<span class="tag pot">Not fixed yet</span>' : f2(c.fix.value)},
+  {h: "MT consumed", n: 1, v: c => c.y.mt, tot: rs => sum(rs, c => c.y.mt)},
+  {h: "① Avg CBOT on consumption days", n: 1, v: c => c.y.avg, f: f2},
+  {h: "② Avg CBOT storage date → last consumption", n: 1, v: c => c.y.win, html: c => isN(c.y.win) ? `${f2(c.y.win)}<br><span class="note">${esc(c.y.wstart)} → ${esc(c.y.wend)}${c.y.wfs ? "" : " · no storage date"}</span>` : "—"},
+  {h: "① Net USD", n: 1, v: c => c.y.amt ? c.y.usd : null, col: 1, tot: rs => sum(rs, c => c.y.amt ? c.y.usd : null)},
+  {h: "② Net USD", n: 1, v: c => c.y.wmt ? c.y.wusd : null, col: 1, tot: rs => sum(rs, c => c.y.wmt ? c.y.wusd : null)},
+  {h: "② − ① USD/MT", n: 1, v: c => c.y.amt && c.y.wmt ? c.y.wusd / c.y.wmt - c.y.usd / c.y.amt : null, f: f2, col: 1},
+  {h: "Both agree?", v: agreeOf, html: c => !agreeOf(c) ? "" : agreeOf(c) === "Yes" ? '<span class="tag good">Same direction</span>' : '<span class="tag pot" title="The result depends on the estimated consumption days — check them">Differs — check dates</span>'},
+  {h: "① Difference", n: 1, v: c => isN(c.y.avg) && isN(c.fix.value) ? c.y.avg - c.fix.value : null, f: f2, col: 1},
+  {h: "② Difference", n: 1, v: c => isN(c.y.win) && isN(c.fix.value) ? c.y.win - c.fix.value : null, f: f2, col: 1},
+  {h: "① USD/MT", n: 1, v: c => c.y.amt ? c.y.usd / c.y.amt : null, f: f2, col: 1},
+  {h: "② USD/MT", n: 1, v: c => c.y.wmt ? c.y.wusd / c.y.wmt : null, f: f2, col: 1},
+  {h: "① Net EGP", n: 1, v: c => c.y.amt ? c.y.egp : null, col: 1, tot: rs => sum(rs, c => c.y.amt ? c.y.egp : null)},
+  {h: "② Net EGP", n: 1, v: c => c.y.wmt ? c.y.wegp : null, col: 1, tot: rs => sum(rs, c => c.y.wmt ? c.y.wegp : null)},
+  {h: "① Advantage USD", n: 1, v: c => c.y.adv, col: 1, tot: rs => sum(rs, c => c.y.adv)}, {h: "① Missed USD", n: 1, v: c => c.y.miss, col: 1, tot: rs => sum(rs, c => c.y.miss)},
   {h: "Fixing type", v: c => c.fix.type === "Implied" ? "Implied CBOT Fixing" : c.fix.type === "Recorded" ? "Recorded fixing (lots)" : c.fix.type},
   {h: "Futures month", v: c => futCode(c)}, {h: "Pricing date", v: c => pdate(c) || (c.y && c.y.unfixed ? "Not priced yet" : "Not recorded")},
-  {h: "CIF $/MT", n: 1, v: c => c.cif_usd_mt, f: f2}, {h: "Premium", n: 1, v: c => c.premium, f: f2}, {h: "CBOT fixed", n: 1, v: c => c.fix.value, html: c => c.y.unfixed ? '<span class="tag pot">Not fixed yet</span>' : f2(c.fix.value)},
-  {h: "MT consumed", n: 1, v: c => c.y.mt, tot: rs => sum(rs, c => c.y.mt)}, {h: "MT with CBOT that day", n: 1, v: c => c.y.unfixed ? c.y.wm : c.y.amt, tot: rs => sum(rs, c => c.y.unfixed ? c.y.wm : c.y.amt)},
-  {h: "Avg CBOT on consumption days", n: 1, v: c => c.y.avg, f: f2}, {h: "Difference", n: 1, v: c => isN(c.y.avg) && isN(c.fix.value) ? c.y.avg - c.fix.value : null, f: f2, col: 1},
-  {h: "Avg USD/MT", n: 1, v: c => c.y.amt ? c.y.usd / c.y.amt : null, f: f2, col: 1},
-  {h: "Advantage USD", n: 1, v: c => c.y.adv, col: 1, tot: rs => sum(rs, c => c.y.adv)}, {h: "Missed USD", n: 1, v: c => c.y.miss, col: 1, tot: rs => sum(rs, c => c.y.miss)},
-  {h: "Net USD", n: 1, v: c => c.y.amt ? c.y.usd : null, col: 1, tot: rs => sum(rs, c => c.y.amt ? c.y.usd : null)},
+  {h: "CIF $/MT", n: 1, v: c => c.cif_usd_mt, f: f2}, {h: "Premium", n: 1, v: c => c.premium, f: f2},
+  {h: "MT with CBOT that day", n: 1, v: c => c.y.unfixed ? c.y.wm : c.y.amt, tot: rs => sum(rs, c => c.y.unfixed ? c.y.wm : c.y.amt)},
   {h: "FX (Form 4 / basis)", n: 1, v: c => c.fx, html: fxCell},
-  {h: "Net EGP", n: 1, v: c => c.y.amt ? c.y.egp : null, col: 1, tot: rs => sum(rs, c => c.y.amt ? c.y.egp : null)},
-  {h: "Avg CBOT storage → last consumption", n: 1, v: c => c.y.win, html: c => isN(c.y.win) ? `${f2(c.y.win)}<br><span class="note">${esc(c.y.wstart)} → ${esc(c.y.wend)}${c.y.wfs ? "" : " · no storage date"}</span>` : "—"},
-  {h: "Difference (storage avg)", n: 1, v: c => isN(c.y.win) && isN(c.fix.value) ? c.y.win - c.fix.value : null, f: f2, col: 1},
-  {h: "Net USD (storage avg)", n: 1, v: c => c.y.wmt ? c.y.wusd : null, col: 1, tot: rs => sum(rs, c => c.y.wmt ? c.y.wusd : null)},
-  {h: "Net EGP (storage avg)", n: 1, v: c => c.y.wmt ? c.y.wegp : null, col: 1, tot: rs => sum(rs, c => c.y.wmt ? c.y.wegp : null)},
-  {h: "Both benchmarks agree?", v: c => c.y.unfixed || !c.y.amt || !c.y.wmt ? "" : Math.sign(c.y.usd) === Math.sign(c.y.wusd) ? "Yes" : "No",
-    html: c => c.y.unfixed || !c.y.amt || !c.y.wmt ? "" : Math.sign(c.y.usd) === Math.sign(c.y.wusd) ? '<span class="tag good">Same direction</span>' : '<span class="tag pot" title="The result depends on the estimated consumption days — check them">Differs — check dates</span>'},
   {h: "Indicative USD if fixed at latest CBOT (not fixed yet)", n: 1, v: c => c.y.unfixed ? c.y.ind : null, col: 1, html: c => c.y.unfixed && isN(c.y.ind) ? `<span class="${sg(c.y.ind)}" title="Not in the CBOT totals">${f0(c.y.ind)}</span> <span class="tag pot">indicative</span>` : ""},
   {h: "Assessment", v: c => c.y.res}];
 // Consumption days of a contract that is not priced yet: the CBOT that day, and
@@ -724,14 +730,19 @@ function cbotDays(c, rows) {
   const a = rows.filter(r => r.assessable), mt = sum(rows, r => r.mt), amt = sum(a, r => r.mt);
   const avg = amt ? sum(a, r => r.cbot * r.mt) / amt : null, usd = sum(a, r => r.usd), egp = sum(a, r => r.egp);
   const n = M.options.neutral_cbot, d = isN(avg) ? avg - c.fix.value : null, wr = rows.find(r => isN(r.win_cbot)) || {};
-  return `<thead><tr><th>Consumption date</th><th class="n">Consumed MT</th><th class="n">CBOT fixed</th><th class="n">CBOT that day</th><th>Price date</th><th class="n">Difference</th><th class="n">USD/MT</th><th class="n">Saving USD</th><th class="n">FX</th><th class="n">Saving EGP</th><th>Result</th><th class="n">Avg CBOT storage → last consumption</th><th class="n">Difference (storage avg)</th><th class="n">Saving USD (storage avg)</th><th class="n">Saving EGP (storage avg)</th></tr></thead><tbody>` +
-    rows.map(r => `<tr><td>${esc(r.date)}</td>${td(r.mt)}${td(r.fix, f2)}${td(r.cbot, f2)}<td>${esc(r.cbot_date || "—")}</td>` +
-      (r.assessable ? `${td(r.diff, f2, 1)}${td(r.usd_mt, f2, 1)}${td(r.usd, f0, 1)}${td(r.fx, x => fx(x, 4))}${td(r.egp, f0, 1)}<td><span class="tag ${r.usd > 0 ? "good" : r.usd < 0 ? "bad" : ""}">${esc(r.result)}</span></td>`
-                    : `<td colspan="5" class="na">Not compared: ${esc(r.benchmark)}</td><td>—</td>`) +
-      `${td(r.win_cbot, f2)}${td(r.win_diff, f2, 1)}${td(r.win_usd, f0, 1)}${td(r.win_egp, f0, 1)}</tr>`).join("") +
-    `<tr class="tot"><td>Total / average · ${rows.length} days</td>${td(mt)}${td(c.fix.value, f2)}${td(avg, f2)}<td class="note">tonne-weighted</td>${td(d, f2, 1)}${td(amt ? usd / amt : null, f2, 1)}${td(usd, f0, 1)}${td(amt ? sum(a, r => r.fx * r.mt) / amt : null, x => fx(x, 4))}${td(egp, f0, 1)}<td>${!amt ? "Not assessable" : d >= n ? "Advantage" : d <= -n ? "Missed opportunity" : "Neutral"}</td>` +
-    `${td(wr.win_cbot, f2)}${td(wr.win_diff, f2, 1)}${td(sum(rows, r => r.win_usd), f0, 1)}${td(sum(rows, r => r.win_egp), f0, 1)}</tr></tbody>` +
-    (isN(wr.win_cbot) ? `<tfoot><tr><td colspan="16" class="note">Storage average = mean of the ${wr.win_days} CBOT prices stored from ${esc(wr.win_start)}${wr.win_from_storage ? " (storage date)" : " (first consumption day — no storage date recorded)"} to ${esc(wr.win_end)} (last consumption day), applied to every consumed tonne; it does not depend on the estimated consumption days.</td></tr></tfoot>` : "");
+  const tag = (u, res) => `<span class="tag ${u > 0 ? "good" : u < 0 ? "bad" : ""}">${esc(res)}</span>`;
+  return `<thead><tr><th>Consumption date</th><th class="n">Consumed MT</th><th class="n">CBOT fixed</th><th class="n">① CBOT that day</th><th class="n">② Avg CBOT storage → last consumption</th>` +
+    `<th class="n">① Saving USD</th><th class="n">② Saving USD</th><th>① Result</th><th class="n">① Difference</th><th class="n">② Difference</th><th class="n">① USD/MT</th><th class="n">② USD/MT</th>` +
+    `<th>① Price date</th><th class="n">FX</th><th class="n">① Saving EGP</th><th class="n">② Saving EGP</th></tr></thead><tbody>` +
+    rows.map(r => `<tr><td>${esc(r.date)}</td>${td(r.mt)}${td(r.fix, f2)}${td(r.cbot, f2)}${td(r.win_cbot, f2)}` +
+      (r.assessable ? `${td(r.usd, f0, 1)}${td(r.win_usd, f0, 1)}<td>${tag(r.usd, r.result)}</td>${td(r.diff, f2, 1)}${td(r.win_diff, f2, 1)}${td(r.usd_mt, f2, 1)}${td(r.win_usd_mt, f2, 1)}`
+                    : `<td class="na">—</td>${td(r.win_usd, f0, 1)}<td class="na">Not compared: ${esc(r.benchmark)}</td><td class="na">—</td>${td(r.win_diff, f2, 1)}<td class="na">—</td>${td(r.win_usd_mt, f2, 1)}`) +
+      `<td>${esc(r.cbot_date || "—")}</td>${td(r.fx, x => fx(x, 4))}${td(r.egp, f0, 1)}${td(r.win_egp, f0, 1)}</tr>`).join("") +
+    `<tr class="tot"><td>Total / average · ${rows.length} days</td>${td(mt)}${td(c.fix.value, f2)}${td(avg, f2)}${td(wr.win_cbot, f2)}` +
+    `${td(usd, f0, 1)}${td(sum(rows, r => r.win_usd), f0, 1)}<td>${!amt ? "Not assessable" : d >= n ? "Advantage" : d <= -n ? "Missed opportunity" : "Neutral"}</td>` +
+    `${td(d, f2, 1)}${td(wr.win_diff, f2, 1)}${td(amt ? usd / amt : null, f2, 1)}${td(wr.win_usd_mt, f2, 1)}<td class="note">① tonne-weighted</td>` +
+    `${td(amt ? sum(a, r => r.fx * r.mt) / amt : null, x => fx(x, 4))}${td(egp, f0, 1)}${td(sum(rows, r => r.win_egp), f0, 1)}</tr></tbody>` +
+    `<tfoot><tr><td colspan="16" class="note">① = the CBOT stored for each consumption day (consumption days are FIFO estimates). ② = the average of the ${wr.win_days || 0} CBOT prices stored from ${esc(wr.win_start || "—")}${wr.win_from_storage ? " (storage date)" : " (first consumption day — no storage date recorded)"} to ${esc(wr.win_end || "—")} (last consumption day), applied to every consumed tonne — it does not depend on the estimated consumption days.</td></tr></tfoot>`;
 }
 const FACT = {CORN: 0.3937, SOYBEAN: 0.36745, WHEAT: 0.36745, SBM: 1.1023};
 const OCB = [
@@ -796,6 +807,12 @@ function renderCbot(v) {
       unfixed: true, wm, ind: sum(u, r => r.ind_usd), res: "Not fixed yet — indicative"}}); }));
   const lastCb = {}; v.cb.concat(v.cu).forEach(r => { if (!lastCb[r.contract_id] || r.date > lastCb[r.contract_id]) lastCb[r.contract_id] = r.date; });
   rows = S.sort.cp ? sortBy(rows, "cp", CPC) : (byOrder(rows, c => lastCb[c.id]) || rows.sort((a, b) => (a.y.amt ? a.y.usd : 1e18) - (b.y.amt ? b.y.usd : 1e18)));
+  const K = kpis(v), fixedRows = rows.filter(c => !c.y.unfixed && c.y.amt && c.y.wmt), dis = fixedRows.filter(c => agreeOf(c) === "No");
+  const B = '<span class="tag ben">Benchmark</span>', dmt = K.cbot_win_mt && K.cbot_assessed_mt ? K.cbot_win_net_usd / K.cbot_win_mt - K.cbot_net_usd / K.cbot_assessed_mt : null;
+  $("cbK").innerHTML = [
+    kcard("① Net vs CBOT on consumption days", K.cbot_net_usd, money("USD", K.cbot_net_usd), B, `${f0(K.cbot_assessed_mt)} MT · ${isN(K.cbot_net_usd) && K.cbot_assessed_mt ? f2(K.cbot_net_usd / K.cbot_assessed_mt) : "—"} USD/MT · ${money("EGP", K.cbot_net_egp)} · uses the estimated consumption days`),
+    kcard("② Net vs average CBOT, storage date → last consumption", K.cbot_win_net_usd, money("USD", K.cbot_win_net_usd), B, `${f0(K.cbot_win_mt)} MT · ${K.cbot_win_mt ? f2(K.cbot_win_net_usd / K.cbot_win_mt) : "—"} USD/MT · ${money("EGP", K.cbot_win_net_egp)} · does not depend on consumption days`),
+    kcard("Difference ② − ①", K.cbot_win_net_usd - K.cbot_net_usd, money("USD", K.cbot_win_net_usd - K.cbot_net_usd), '<span class="tag">Check</span>', `${isN(dmt) ? f2(dmt) : "—"} USD/MT on the same tonnes · ${fixedRows.length - dis.length} of ${fixedRows.length} contracts point the same way${dis.length ? ` · differ: ${dis.map(c => esc(c.contract)).join(", ")}` : ""}`)].join("");
   S.cpOpen = S.cpOpen || new Set();
   $("tCP").innerHTML = thead("cp", CPC) + "<tbody>" + rows.map(c => `<tr class="row" data-cp="${esc(c.id)}">` + CPC.map(col => cell(col, c)).join("") + "</tr>" +
     (S.cpOpen.has(c.id) ? `<tr class="det"><td colspan="${CPC.length}"><div class="detwrap" style="overflow-x:auto"><table>${c.y.unfixed ? cbotDaysU(c, v.cu.filter(r => r.contract_id === c.id)) : cbotDays(c, v.cb.filter(r => r.contract_id === c.id))}</table>` +
