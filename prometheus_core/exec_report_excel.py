@@ -17,7 +17,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.table import Table, TableStyleInfo
 
-from .mgmt_report import MATCHED
+from .mgmt_report import FACTORS, MATCHED
 from .xlsx_cache import store_formula_results
 
 SHEETS = ("Management Summary", "Contract Master", "Local Market Price History",
@@ -591,11 +591,13 @@ def _open(b, m):
              "Savings Excl. Transport EGP/MT", "Savings Incl. Transport EGP/MT",
              "Total Potential Excl. Transport EGP", "Total Potential Incl. Transport EGP",
              "Pricing Status", "Valuation Class", "Open Contract", "Delivery Confirmed", "Base", "Issues",
-             "Totals Bucket"]
+             "Totals Bucket", "CBOT Factor", "CBOT Used For Valuation", "CBOT Basis",
+             "Break-even CBOT Excl. Transport", "Break-even CBOT Incl. Transport", "Headroom Excl. Transport",
+             "Headroom Incl. Transport", "Local Equivalent Premium (CIF basis)"]
     last = b.table(ws, "OpenVsLocal", heads, len(rows),
                    [20, 9, 16, 11, 11, 9, 10, 10, 10, 10, 10, 11, 12, 22, 9, 10, 9, 10, 10, 11, 44,
                     10, 34, 9, 30, 11, 14, 10, 10, 11, 12, 12, 12, 10, 12, 11, 9, 30, 12, 12, 14, 14,
-                    12, 30, 8, 9, 8, 30, 22])
+                    12, 30, 8, 9, 8, 30, 22, 8, 11, 16, 13, 13, 13, 13, 14])
     na = "N/A — Missing Source Data"
     v = lambda x: na if x is None else x
     for i, o in enumerate(rows):
@@ -644,7 +646,20 @@ def _open(b, m):
         b.put(ws, r, 46, "Yes" if o["received"] else "No")
         b.put(ws, r, 47, o["base"]); b.put(ws, r, 48, "; ".join(list(o["issues"]) + list(o.get("notes") or [])))
         b.put(ws, r, 49, open_bucket(o))
+        # Break-even CBOT = (local − discharge − clearance [− inland freight]) ÷ FX ÷ factor − premium;
+        # headroom = break-even − the CBOT the contract is valued at.
+        fac = FACTORS.get(o["base"]) if not flat else None
+        b.put(ws, r, 50, fac if fac else "", "0.0000")
+        b.put(ws, r, 51, blank(o.get("ref_cbot")) if fac else "", M2); b.put(ws, r, 52, o.get("ref_cbot_basis", "") if fac else "")
+        b.f(ws, r, 53, f'=IF(AND(ISNUMBER(AG{r}),ISNUMBER(X{r}),ISNUMBER(AX{r}),ISNUMBER(O{r})),(AG{r}-N(AB{r})-N(AC{r}))/X{r}/AX{r}-O{r},{NA})',
+            v(o.get("be_cbot_excl")), M2)
+        b.f(ws, r, 54, f'=IF(AND(ISNUMBER(AI{r}),ISNUMBER(AD{r}),ISNUMBER(X{r}),ISNUMBER(AX{r}),ISNUMBER(O{r})),(AI{r}-N(AB{r})-N(AC{r})-AD{r})/X{r}/AX{r}-O{r},{NA})',
+            v(o.get("be_cbot_incl")), M2)
+        b.f(ws, r, 55, f'=IF(AND(ISNUMBER(BA{r}),ISNUMBER(AY{r})),BA{r}-AY{r},{NA})', v(o.get("headroom_excl")), M2, bold=True)
+        b.f(ws, r, 56, f'=IF(AND(ISNUMBER(BB{r}),ISNUMBER(AY{r})),BB{r}-AY{r},{NA})', v(o.get("headroom_incl")), M2, bold=True)
+        b.f(ws, r, 57, f'=IF(ISNUMBER(BC{r}),BC{r}+O{r},{NA})', v(o.get("local_eq_premium")), M2)
     b.signs(ws, f"AM{FIRST}:AP{last}")
+    b.signs(ws, f"BC{FIRST}:BD{last}")
     orange = PatternFill("solid", fgColor="FFE3B3")
     ws.conditional_formatting.add(f"AG{FIRST}:AL{last}", FormulaRule(formula=[f"$AK{FIRST}>5"], fill=orange))
     ws.conditional_formatting.add(f"AR{FIRST}:AR{last}", FormulaRule(formula=[f'$AW{FIRST}<>"Confirmed"'],

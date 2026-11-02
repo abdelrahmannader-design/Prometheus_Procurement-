@@ -274,3 +274,29 @@ class UnfixedConsumptionTests(unittest.TestCase):
                 self.assertAlmostEqual(r["ind_diff"], r["cbot"] - r["latest_cbot"])
                 self.assertAlmostEqual(r["ind_usd"], r["ind_diff"] * r["factor"] * r["mt"])
         self.assertAlmostEqual(m["kpis"]["cbot_net_usd"], sum(r["usd"] for r in m["cbot"] if r["assessable"]))
+
+
+class BreakEvenTests(unittest.TestCase):
+    def test_break_even_cbot_and_headroom_for_an_unpriced_contract(self):
+        c = {"base": "CORN", "pricing_class": "Unpriced"}
+        f = {"fixed": False, "value": None}
+        out = mr.break_even(c, 197.0, f, 449.5, 56.0, 235.0, 200.0, 485.0, 15200.0, 15597.0)
+        be_x = (15200 - 435) / 56 / 0.3937 - 197
+        be_i = (15597 - 435 - 485) / 56 / 0.3937 - 197
+        self.assertAlmostEqual(out["be_cbot_excl"], be_x)
+        self.assertAlmostEqual(out["be_cbot_incl"], be_i)
+        self.assertAlmostEqual(out["headroom_excl"], be_x - 449.5)
+        self.assertAlmostEqual(out["local_eq_premium"], (15200 - 435) / 56 / 0.3937 - 449.5)
+        self.assertAlmostEqual(out["premium_gap_now"], out["headroom_excl"])
+        self.assertEqual(out["ref_cbot_basis"], "latest stored CBOT")
+
+    def test_fixed_contracts_measure_headroom_from_their_fixing_and_flat_ones_get_none(self):
+        out = mr.break_even({"base": "CORN", "pricing_class": "Fixed"}, 190.0, {"fixed": True, "value": 430.0},
+                            449.5, 56.0, 235.0, 200.0, 485.0, 15200.0, 15597.0)
+        self.assertEqual(out["ref_cbot"], 430.0)
+        flat = mr.break_even({"base": "SBM", "pricing_class": "Flat-priced"}, 0.0, {"fixed": False}, 330.0, 56.0, 0, 0, 370.0, 27000.0, 27370.0)
+        self.assertIsNone(flat["be_cbot_excl"])
+
+    def test_an_open_contract_without_dates_reads_its_futures_month_against_today(self):
+        cm = mr.resolve_contract_month("DEC", "CORN", "2026-11-02")
+        self.assertEqual(cm["code"], "DEC-26")

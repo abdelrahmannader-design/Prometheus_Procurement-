@@ -215,6 +215,7 @@ tr.rd>td{background:var(--bad-bg)}tr.rx>td{color:var(--ink2)}
  <div class="card"><h2>Savings vs local — contract by contract</h2>
   <p class="sub">Daily saving = (local price − our landed cost) × tonnes consumed that day, including transport (local quote + local transport vs landed cost with inland freight) and excluding it (local quote vs landed cost without inland freight). Quotes more than 5 days old are shown <span class="stale">STALE</span>. Click a contract to see its days, the local quote used and its date.</p>
   <div class="tw"><table id="svT"></table></div></div>
+ <div class="card"><h2>Not yet consumed — position against local today</h2><p class="sub">Open contracts with tonnes still to consume (including ones not received yet or without a delivery date): what they cost at the CBOT they are valued at (their fixing, else today's CBOT + premium) against the latest local price. <b>Break-even CBOT</b> = the CBOT at which the import would cost the same as local; <b>headroom</b> = how far the CBOT can still rise before local is cheaper — a guide for when to fix. Indicative until priced; not part of the historical savings.</p><div class="tw"><table id="svOpenT"></table></div></div>
 </section>
 
 <section class="panel" id="p-contracts">
@@ -228,7 +229,7 @@ tr.rd>td{background:var(--bad-bg)}tr.rx>td{color:var(--ink2)}
   <label class="note">Contract <select class="ctl" id="cbSel"></select></label>
   <div id="cbChart"></div><div id="cbBars"></div><div id="cbSum" class="note"></div><div class="tw" style="margin-top:10px"><table id="cbDays"></table></div>
  </div>
- <div class="card"><h2>Open contracts — premium over CBOT, not yet compared</h2><p class="sub">Open CBOT contracts (including ones not yet received or with no storage start) have no consumption days to compare yet. Their premium and futures month are shown with the latest stored CBOT and the CIF it gives: (CBOT + premium) × factor — final for fixed contracts, indicative for unpriced ones. Click a row for the full valuation.</p><div class="tw"><table id="tCbOpen"></table></div></div>
+ <div class="card"><h2>Open contracts — premium over CBOT, not yet compared</h2><p class="sub">Open CBOT contracts (including ones not yet received or with no delivery or storage date) have no consumption days to compare yet. Each is shown at the latest stored CBOT with the CIF it gives — (CBOT + premium) × factor, final for fixed contracts, indicative for unpriced ones — against today's local price, with the <b>break-even CBOT</b> (where the import would cost the same as local) and the <b>headroom</b> (how far the CBOT can rise before local is cheaper). Click a row for the full valuation.</p><div class="tw"><table id="tCbOpen"></table></div></div>
  <div class="card"><h2>Contract by contract — fixed CBOT vs CBOT on each consumption day</h2><p class="sub">One row per fixed contract: tonne-weighted average CBOT on its consumption days against its fixing. Click a contract to break it down by consumption date and quantity. Saving per day = (CBOT that day − CBOT fixed) × factor × MT; positive = we fixed below the market on the day the tonnes were used (advantage), negative = missed opportunity. A benchmark, never added to the savings vs local.</p><div class="tw"><table id="tCP"></table></div></div>
 </section>
 
@@ -733,11 +734,38 @@ const OCB = [
   {h: "FX", n: 1, v: r => r.fx, html: fxCellO},
   {h: "Pricing status", v: r => r.pricing_class, html: r => pTag(r.pricing_class)},
   {h: "Valuation", v: r => r.class, html: valTag}];
+// Position against local now: cost at the CBOT the contract is valued at, break-even CBOT and headroom.
+function headCell(r, sc) {
+  if (flatC(r.pricing_class)) return '<span class="note">flat price</span>';
+  const h = r["headroom_" + sc.k]; if (!isN(h)) return NA_;
+  return `<span class="${sg(h)}"><b>${h >= 0 ? "+" : ""}${f2(h)}</b></span> <span class="note">${esc(r.unit)}</span><br><span class="note">${h >= 0 ? "CBOT can rise this much" : "local already cheaper"} · vs ${esc(r.ref_cbot_basis)} ${f2(r.ref_cbot)}</span>`;
+}
+function posCols() {
+  const L_ = scs();
+  return [
+    ...L_.flatMap(sc => [{h: `Imported cost now ${sc.h}`, n: 1, na: 1, v: sc.ocost, f: f2}, {h: `Local ${sc.h}`, n: 1, na: 1, v: sc.olocal, f: f2},
+      {h: `Saving/MT now ${sc.h}`, n: 1, na: 1, v: sc.oper, f: f2, col: 1}]),
+    {h: "Local date / age", v: r => r.local_age, html: r => (r.local_date ? esc(r.local_date) + "<br>" : "") + ageBadge(r.local_age)},
+    ...L_.map(sc => ({h: `Break-even CBOT ${sc.h}`, n: 1, v: r => r["be_cbot_" + sc.k],
+      html: r => flatC(r.pricing_class) ? '<span class="note">flat price</span>' : isN(r["be_cbot_" + sc.k]) ? `<b>${f2(r["be_cbot_" + sc.k])}</b> <span class="note">${esc(r.unit)}</span>` : NA_})),
+    ...L_.map(sc => ({h: `Headroom ${sc.h}`, n: 1, v: r => r["headroom_" + sc.k], html: r => headCell(r, sc)})),
+    {h: "Local equiv. premium", n: 1, v: r => r.local_eq_premium,
+      html: r => flatC(r.pricing_class) ? '<span class="note">flat price</span>' : isN(r.local_eq_premium) ? `${f2(r.local_eq_premium)} <span class="note">vs contract ${f2(r.premium)}</span>` : NA_}];
+}
+function renderSvOpen(v) {
+  const L_ = scs(), cols = OCB.slice(0, 5).concat([{h: "Pricing status", v: r => r.pricing_class, html: r => pTag(r.pricing_class)}], OCB.slice(5, 10), posCols(),
+    L_.map(sc => ({h: `Total potential ${sc.h}`, n: 1, na: 1, v: sc.pot, col: 1, tot: rs => sum(rs, sc.pot)})), [{h: "Valuation", v: r => obucket(r) + r.class, html: valTag}]);
+  let rows = v.op.filter(r => r.unconsumed_mt > 0);
+  rows = S.sort.svo ? sortBy(rows, "svo", cols) : (byOrder(rows, r => r.storage_start || (CI[r.contract_id] || {}).delivery_date) || rows.slice().sort((a, b) => b.unconsumed_mt - a.unconsumed_mt));
+  $("svOpenT").innerHTML = rows.length ? thead("svo", cols) + "<tbody>" + rows.map(r => `<tr class="row ${orow(r)}" data-goto="${esc(r.contract_id)}">` + cols.map(col => cell(col, r)).join("") + "</tr>").join("") +
+    totRow(cols, rows, `Total · ${rows.length} contracts`) + "</tbody>" : '<tbody><tr><td class="note">No open contract with tonnes still to consume in this selection.</td></tr></tbody>';
+}
 function renderCbotOpen(v) {
   let rows = v.op.filter(r => FACT[r.base] && !["Flat-priced", "Not CBOT-based"].includes(r.pricing_class) && r.unconsumed_mt > 0);
-  rows = S.sort.ocb ? sortBy(rows, "ocb", OCB) : (byOrder(rows, r => r.storage_start || (CI[r.contract_id] || {}).delivery_date) || rows.slice().sort((a, b) => b.unconsumed_mt - a.unconsumed_mt));
-  $("tCbOpen").innerHTML = rows.length ? thead("ocb", OCB) + "<tbody>" + rows.map(r => `<tr class="row" data-goto="${esc(r.contract_id)}">` + OCB.map(col => cell(col, r)).join("") + "</tr>").join("") +
-    totRow(OCB, rows, `Total · ${rows.length} contracts`) + "</tbody>" : '<tbody><tr><td class="note">No open CBOT contract with tonnes still to consume in this selection.</td></tr></tbody>';
+  const cols = OCB.concat(posCols());
+  rows = S.sort.ocb ? sortBy(rows, "ocb", cols) : (byOrder(rows, r => r.storage_start || (CI[r.contract_id] || {}).delivery_date) || rows.slice().sort((a, b) => b.unconsumed_mt - a.unconsumed_mt));
+  $("tCbOpen").innerHTML = rows.length ? thead("ocb", cols) + "<tbody>" + rows.map(r => `<tr class="row ${orow(r)}" data-goto="${esc(r.contract_id)}">` + cols.map(col => cell(col, r)).join("") + "</tr>").join("") +
+    totRow(cols, rows, `Total · ${rows.length} contracts`) + "</tbody>" : '<tbody><tr><td class="note">No open CBOT contract with tonnes still to consume in this selection.</td></tr></tbody>';
 }
 function renderCbot(v) {
   const n = M.options.neutral_cbot, by = {};
@@ -1140,7 +1168,7 @@ function renderTrends(v) {
 // ── wiring ───────────────────────────────────────────────────────────
 function render() {
   const v = view(), K = kpis(v);
-  renderOverview(v, K); renderSavings(v); renderContracts(v); renderCbot(v); renderOpen(v); renderTrends(v);
+  renderOverview(v, K); renderSavings(v); renderSvOpen(v); renderContracts(v); renderCbot(v); renderOpen(v); renderTrends(v);
 }
 function showTab(p) { S.tab = p; document.querySelectorAll(".tab").forEach(t => t.classList.toggle("on", t.dataset.p === p));
   document.querySelectorAll(".panel").forEach(x => x.classList.toggle("on", x.id === "p-" + p)); }

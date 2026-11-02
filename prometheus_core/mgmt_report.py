@@ -367,8 +367,12 @@ def build(inp, **overrides):
 
     for c in contracts.values():
         c["fix"] = fixing(c)
+        # An open contract with no pricing or delivery date yet reads its
+        # futures month against today (DEC in November = this year's DEC).
         c["contract_month"] = resolve_contract_month(
-            c.get("futures_month"), c["base"], c.get("pricing_date") or c.get("delivery_date"))
+            c.get("futures_month"), c["base"],
+            c.get("pricing_date") or c.get("delivery_date") or c.get("storage_start")
+            or (as_of.isoformat() if c.get("is_open") else None))
         flag = market_check(c["fix"], series.get(c["base"]), c.get("delivery_date"), opts)
         if flag:
             c["fix"].update(fixed=False, indicative=c["fix"]["value"], value=None,
@@ -971,7 +975,39 @@ def open_valuation(c, remaining, latest_fx, latest_cbot, as_of, opts):
         "potential_excl": sx * remaining if sx is not None else None,
         "potential": si * remaining if si is not None else None,
         "class": cls, "issues": issues, "delivery_status": c["delivery_status"],
+        **break_even(c, premium, f, cbot_v, fx, disc, clr, freight, l_price, l_incl),
     }
+
+
+def break_even(c, premium, f, latest_cbot, fx, disc, clr, freight, l_excl, l_incl):
+    """Where the CBOT would have to be for the import to cost the same as local.
+
+    break-even CBOT = (local − discharge − clearance [− inland freight when
+    including transport]) ÷ FX ÷ factor − premium. Headroom = break-even − the
+    CBOT the contract is valued at (its fixing, else the latest stored CBOT):
+    how far the CBOT can still rise before buying locally is cheaper. The local
+    equivalent premium is the premium the local price amounts to over that CBOT.
+    """
+    factor = FACTORS.get(c["base"])
+    ref = f.get("value") if f.get("fixed") else latest_cbot
+    out = {"be_cbot_excl": None, "be_cbot_incl": None, "headroom_excl": None, "headroom_incl": None,
+           "ref_cbot": ref, "ref_cbot_basis": "fixed CBOT" if f.get("fixed") else "latest stored CBOT",
+           "local_eq_premium": None, "premium_gap_now": None}
+    if not factor or premium is None or not fx or c.get("pricing_class") in ("Flat-priced", "Not CBOT-based"):
+        return out
+    port = (disc or 0.0) + (clr or 0.0)
+    if l_excl is not None:
+        out["be_cbot_excl"] = (l_excl - port) / fx / factor - premium
+    if l_incl is not None and freight is not None:
+        out["be_cbot_incl"] = (l_incl - port - freight) / fx / factor - premium
+    if ref is not None:
+        for k in ("excl", "incl"):
+            if out[f"be_cbot_{k}"] is not None:
+                out[f"headroom_{k}"] = out[f"be_cbot_{k}"] - ref
+        if out["be_cbot_excl"] is not None:
+            out["local_eq_premium"] = (l_excl - port) / fx / factor - ref
+            out["premium_gap_now"] = out["local_eq_premium"] - premium
+    return out
 
 
 def assessment(c):
