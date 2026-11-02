@@ -188,6 +188,7 @@ tr.rd>td{background:var(--bad-bg)}tr.rx>td{color:var(--ink2)}
  <label>CBOT fixing<select id="fFix"><option value="">All</option><option value="Recorded">Fixed — recorded lots</option><option value="Implied">Fixed — implied</option><option value="Not fixed">Not fixed (unpriced)</option><option value="other">Flat / not eligible</option></select></label>
  <label>Data quality<select id="fDQ"><option value="">All supported rows</option><option value="final">Final CIF only</option><option value="prov">Provisional CIF only</option><option value="same">Same-day local quote</option><option value="carry">Last local price in force</option></select></label>
  <label>Local quote age<select id="fAge"><option value="">Any age</option><option value="stale-c">Contracts using quotes &gt; 5 days old</option><option value="stale-d">Only days on quotes &gt; 5 days old</option><option value="fresh">Only quotes 0–5 days old</option></select></label>
+ <label>Order<select id="fOrder"><option value="">By value (default)</option><option value="new">Newest first</option><option value="old">Oldest first</option></select></label>
  <button class="btn" id="bReset">Reset</button>
 </div>
 <main>
@@ -292,7 +293,7 @@ opts("fSupplier", [...new Set(C.map(c => c.supplier || "—"))].sort(), "All sup
 $("dlC").innerHTML = C.map(c => `<option value="${esc(c.contract)}">${esc(c.id)}</option>`).join("");
 function F() {
   return {base: $("fBase").value, origin: $("fOrigin").value, supplier: $("fSupplier").value, q: $("fQ").value.trim().toLowerCase(),
-          from: $("fFrom").value, to: $("fTo").value, open: $("fOpen").value, fix: $("fFix").value, dq: $("fDQ").value, age: $("fAge").value};
+          from: $("fFrom").value, to: $("fTo").value, open: $("fOpen").value, fix: $("fFix").value, dq: $("fDQ").value, age: $("fAge").value, order: $("fOrder").value};
 }
 function contractOk(c, f) {
   if (f.base && c.base !== f.base) return false;
@@ -317,12 +318,20 @@ function dqOk(r, f) {
 const CD = () => M.options.carry_days;
 const ageOk = (r, f) => f.age === "stale-d" ? !!r.local_stale : f.age === "fresh" ? !r.local_stale && isN(r.local_age) : true;
 const STALE_IDS = new Set(M.savings.filter(r => r.local_stale).map(r => r.contract_id).concat(M.open.filter(r => r.local_stale).map(r => r.contract_id)));
+// Order filter: newest or oldest first by date; empty = each table's own default (by value).
+const ORD = () => $("fOrder").value;
+function byOrder(rows, key) {
+  const o = ORD(); if (!o) return null; const d = o === "new" ? -1 : 1;
+  return rows.slice().sort((a, b) => { const x = key(a) || "", y = key(b) || "";
+    if (!x && !y) return 0; if (!x) return 1; if (!y) return -1; return (x < y ? -1 : x > y ? 1 : 0) * d; });
+}
+const dayOrder = rows => rows.slice().sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0) * (ORD() === "new" ? -1 : 1));
 function view() {
   const f = F(), ids = new Set(C.filter(c => contractOk(c, f) && (f.age !== "stale-c" || STALE_IDS.has(c.id))).map(c => c.id));
   const sav = M.savings.filter(r => ids.has(r.contract_id) && inDates(r.date, f) && dqOk(r, f) && ageOk(r, f));
   const cb = M.cbot.filter(r => ids.has(r.contract_id) && inDates(r.date, f));
   const op = M.open.filter(r => ids.has(r.contract_id) && ageOk(r, f));
-  return {f, ids, sav, cb, op, contracts: C.filter(c => ids.has(c.id)), filtered: Object.values(f).some(Boolean)};
+  return {f, ids, sav, cb, op, contracts: C.filter(c => ids.has(c.id)), filtered: Object.entries(f).some(([k, x]) => k !== "order" && x)};
 }
 // Transport scenarios: each side uses its own recorded transport; a row without the
 // input a scenario needs is left out of that scenario's totals (never counted as zero).
@@ -624,7 +633,9 @@ function thead(key, cols) {
 function renderContracts(v) {
   const cols = ccols(), P_ = PS();
   let rows = contractRows(v);
-  if (!S.sort.c) rows.sort((a, b) => (isN(b.x[P_.k].sav) ? b.x[P_.k].sav : -1e18) - (isN(a.x[P_.k].sav) ? a.x[P_.k].sav : -1e18)); else rows = sortBy(rows, "c", cols);
+  if (S.sort.c) rows = sortBy(rows, "c", cols);
+  else rows = byOrder(rows, c => c.x.rows.length ? c.x.rows.reduce((m, r) => r.date > m ? r.date : m, "") : (c.last_date || c.first_date))
+    || rows.sort((a, b) => (isN(b.x[P_.k].sav) ? b.x[P_.k].sav : -1e18) - (isN(a.x[P_.k].sav) ? a.x[P_.k].sav : -1e18));
   let s = thead("c", cols) + "<tbody>";
   rows.forEach(c => {
     s += `<tr class="row" data-id="${esc(c.id)}" id="r-${esc(c.id)}">` + cols.map(col => cell(col, c)).join("") + "</tr>";
@@ -681,7 +692,7 @@ const CPC = [{h: "Contract", v: c => c.contract, html: c => `<b>${esc(c.contract
   {h: "Net EGP", n: 1, v: c => c.y.amt ? c.y.egp : null, col: 1, tot: rs => sum(rs, c => c.y.amt ? c.y.egp : null)}, {h: "Assessment", v: c => c.y.res}];
 // Each consumption date of one contract: the tonnes, the CBOT that day vs the fixing, and what it was worth.
 function cbotDays(c, rows) {
-  rows = rows.slice().sort((a, b) => a.date < b.date ? -1 : 1);
+  rows = dayOrder(rows);
   const a = rows.filter(r => r.assessable), mt = sum(rows, r => r.mt), amt = sum(a, r => r.mt);
   const avg = amt ? sum(a, r => r.cbot * r.mt) / amt : null, usd = sum(a, r => r.usd), egp = sum(a, r => r.egp);
   const n = M.options.neutral_cbot, d = isN(avg) ? avg - c.fix.value : null;
@@ -697,7 +708,8 @@ function renderCbot(v) {
     s.mt += r.mt; if (r.assessable) { s.amt += r.mt; s.usd += r.usd; s.egp += r.egp || 0; s.w += r.cbot * r.mt; if (r.usd > 0) s.adv += r.usd; else s.miss += r.usd; } });
   let rows = v.contracts.filter(c => by[c.id]).map(c => { const s = by[c.id], avg = s.amt ? s.w / s.amt : null, d = isN(avg) ? avg - c.fix.value : null;
     return Object.assign(c, {y: Object.assign(s, {avg, res: !s.amt ? "Not assessable" : d >= n ? "Advantage" : d <= -n ? "Missed opportunity" : "Neutral"})}); });
-  rows = S.sort.cp ? sortBy(rows, "cp", CPC) : rows.sort((a, b) => (a.y.amt ? a.y.usd : 1e18) - (b.y.amt ? b.y.usd : 1e18));
+  const lastCb = {}; v.cb.forEach(r => { if (!lastCb[r.contract_id] || r.date > lastCb[r.contract_id]) lastCb[r.contract_id] = r.date; });
+  rows = S.sort.cp ? sortBy(rows, "cp", CPC) : (byOrder(rows, c => lastCb[c.id]) || rows.sort((a, b) => (a.y.amt ? a.y.usd : 1e18) - (b.y.amt ? b.y.usd : 1e18)));
   S.cpOpen = S.cpOpen || new Set();
   $("tCP").innerHTML = thead("cp", CPC) + "<tbody>" + rows.map(c => `<tr class="row" data-cp="${esc(c.id)}">` + CPC.map(col => cell(col, c)).join("") + "</tr>" +
     (S.cpOpen.has(c.id) ? `<tr class="det"><td colspan="${CPC.length}"><div class="detwrap" style="overflow-x:auto"><table>${cbotDays(c, v.cb.filter(r => r.contract_id === c.id))}</table>` +
@@ -773,7 +785,8 @@ function renderOpen(v) {
   const K = kpis(v), cols = ocols(), L_ = scs(), P_ = PS();
   const fb = $("oBucket").value, fr = $("oRes").value, rem = $("oRem").value;
   let rows = v.op.filter(r => (!fb || obucket(r) === fb) && (!fr || oresult(r) === fr) && (!rem || r.unconsumed_mt > 0));
-  rows = S.sort.o ? sortBy(rows, "o", cols) : rows.slice().sort((a, b) => (isN(P_.pot(b)) ? P_.pot(b) : -1e18) - (isN(P_.pot(a)) ? P_.pot(a) : -1e18));
+  rows = S.sort.o ? sortBy(rows, "o", cols) : (byOrder(rows, r => r.storage_start || (CI[r.contract_id] || {}).delivery_date)
+    || rows.slice().sort((a, b) => (isN(P_.pot(b)) ? P_.pot(b) : -1e18) - (isN(P_.pot(a)) ? P_.pot(a) : -1e18)));
   const latest = v.op.map(r => r.local_date).filter(Boolean).sort().pop() || "—";
   const ranked = v.op.filter(r => isN(P_.oper(r)) && r.unconsumed_mt > 0).sort((a, b) => P_.oper(b) - P_.oper(a));
   const provFx = v.op.filter(r => (r.fx_basis || "").startsWith("Latest")).length, stale = v.op.filter(r => r.local_stale).length;
@@ -971,13 +984,13 @@ function renderSavings(v) {
     `<tr class="tot"><td>Total</td>${td(rows.length)}${td(sum(v.sav, r => r.mt))}${L_.map(sc => { const a = aggS(v.sav, sc); return td(a.cost, f2) + td(a.local, f2) + td(a.per, f0, 1) + td(a.sav, f0, 1); }).join("")}</tr></tbody>`;
   const ranked = rows.slice().sort((a, b) => (isN(pv(b)) ? pv(b) : -1e18) - (isN(pv(a)) ? pv(a) : -1e18));
   $("svChart").innerHTML = hbar(ranked.map(c => scItem(c.contract, c.z.rows, {id: c.id})), {aria: "Savings by contract", left: 170});
-  rows = S.sort.sv ? sortBy(rows, "sv", cols) : ranked;
+  rows = S.sort.sv ? sortBy(rows, "sv", cols) : (byOrder(rows, c => c.z.last) || ranked);
   let h = thead("sv", cols) + "<tbody>";
   rows.forEach(c => {
     h += `<tr class="row" data-sv="${esc(c.id)}" id="sv-${esc(c.id)}">` + cols.map(col => cell(col, c)).join("") + "</tr>";
     // The daily consumption table keeps its original layout (including transport, age in days).
     if (S.svOpen && S.svOpen.has(c.id)) h += `<tr class="det"><td colspan="${cols.length}"><div class="detwrap" style="overflow-x:auto"><table><thead><tr><th>Date</th><th class="n">MT</th><th class="n">Landed EGP/MT</th><th class="n">Contract FX</th><th class="n">Local EGP/MT</th><th>Local quote of</th><th class="n">Age (days)</th><th class="n">Saving EGP/MT</th><th class="n">Saving EGP</th><th class="n">CBOT that day</th><th class="n">FX that day</th><th class="n">Local equiv. premium</th><th class="n">Contract premium</th><th class="n">Premium gap</th><th>Local record</th><th>Data quality</th></tr></thead><tbody>` +
-      c.z.rows.map(r => `<tr><td>${esc(r.date)}</td>${td(r.mt)}${td(r.cost, f2)}<td class="n">${fxCell(c)}</td>${td(r.local, f2)}<td>${esc(r.local_date)} <span class="note">${esc(r.local_key)}</span></td>${td(r.local_age)}${td(r.saving_mt, f2, 1)}${td(r.saving, f0, 1)}${premCells(r)}<td>${esc(r.local_source)}</td><td class="note">${esc(r.quality)}</td></tr>`).join("") +
+      dayOrder(c.z.rows).map(r => `<tr><td>${esc(r.date)}</td>${td(r.mt)}${td(r.cost, f2)}<td class="n">${fxCell(c)}</td>${td(r.local, f2)}<td>${esc(r.local_date)} <span class="note">${esc(r.local_key)}</span></td>${td(r.local_age)}${td(r.saving_mt, f2, 1)}${td(r.saving, f0, 1)}${premCells(r)}<td>${esc(r.local_source)}</td><td class="note">${esc(r.quality)}</td></tr>`).join("") +
       `<tr class="tot"><td>Total</td>${td(c.z.incl.mt)}${td(c.z.incl.cost, f2)}<td></td>${td(c.z.incl.local, f2)}<td></td><td></td>${td(c.z.incl.per, f2, 1)}${td(c.z.incl.sav, f0, 1)}${premAvg(c.z.rows)}<td></td><td></td></tr></tbody></table></div></td></tr>`;
   });
   h += totRow(cols, rows, `Total · ${rows.length} contracts`) + "</tbody>";
@@ -1103,6 +1116,7 @@ $("badges").innerHTML = `<button class="badge ${M.management_ready ? "ok" : "no"
 $("bReady").addEventListener("click", () => { if (!document.body.classList.contains("mgmt")) showTab("quality"); });
 document.querySelectorAll(".tab").forEach(t => t.addEventListener("click", () => showTab(t.dataset.p)));
 ["fBase", "fOrigin", "fSupplier", "fFrom", "fTo", "fOpen", "fFix", "fDQ", "fAge"].forEach(id => $(id).addEventListener("change", render));
+$("fOrder").addEventListener("change", () => { S.sort = {}; render(); });
 ["oBucket", "oRes", "oRem"].forEach(id => $(id).addEventListener("change", () => renderOpen(view())));
 const TXN = {side: "Side-by-side: including transport = inland transport on both sides; excluding = without it. Ocean freight stays in CIF.",
   incl: "Including transportation: landed cost with inland freight vs local quote + local transport.", excl: "Excluding transportation: landed cost without inland freight vs the local quote itself."};
@@ -1113,7 +1127,7 @@ $("fQ").addEventListener("input", render);
 $("fPreset").addEventListener("change", e => { const v = e.target.value, end = M.as_of; let start = "";
   if (v === "ytd") start = end.slice(0, 4) + "-01-01"; else if (v) { const d = new Date(end); d.setDate(d.getDate() - +v); start = d.toISOString().slice(0, 10); }
   $("fFrom").value = start; $("fTo").value = v ? end : ""; render(); });
-$("bReset").addEventListener("click", () => { ["fBase", "fOrigin", "fSupplier", "fQ", "fFrom", "fTo", "fPreset", "fOpen", "fFix", "fDQ", "fAge", "oBucket", "oRes", "oRem"].forEach(id => $(id).value = ""); render(); });
+$("bReset").addEventListener("click", () => { ["fBase", "fOrigin", "fSupplier", "fQ", "fFrom", "fTo", "fPreset", "fOpen", "fFix", "fDQ", "fAge", "fOrder", "oBucket", "oRes", "oRem"].forEach(id => $(id).value = ""); render(); });
 $("cbSel").addEventListener("change", e => { S.cb = e.target.value; renderCbot(view()); });
 $("trLocBase").addEventListener("change", () => renderTrends(view()));
 $("trCbBase").addEventListener("change", () => renderTrends(view()));
