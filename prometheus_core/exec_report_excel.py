@@ -325,10 +325,14 @@ def _savings(b, m):
              "CBOT That Day", "CBOT Price Date", "FX That Day EGP/USD", "FX Date", "Port Costs (Discharge + Clearance) EGP/MT",
              "CBOT Factor", "Local Equivalent Premium (CIF basis)", "Local Equivalent Premium (port costs not removed)",
              "Contract Premium", "Premium Gap (Local Equivalent − Contract)", "Premium Unit",
-             "Contract FX EGP/USD", "Contract FX Basis", "Form 4 Date"]
+             "Contract FX EGP/USD", "Contract FX Basis", "Form 4 Date",
+             "CIF USD/MT Used", "FX Used EGP/USD", "CIF x FX EGP/MT", "Discharge EGP/MT", "Clearance EGP/MT",
+             "Landed Excl. Transport From Parts EGP/MT", "Discharge Source", "Clearance Source", "Inland Freight Basis",
+             "CBOT Fixed", "Local Equivalent CBOT", "Local Equivalent CBOT − CBOT Fixed"]
     last = b.table(ws, "SavingsVsLocal", heads, len(rows),
                    [22, 9, 16, 11, 12, 9, 12, 12, 12, 8, 16, 11, 13, 13, 13, 40, 11, 14, 8, 9,
-                    11, 12, 10, 12, 11, 13, 34, 12, 13, 9, 10, 11, 10, 11, 13, 8, 14, 14, 10, 14, 10, 11, 22, 11])
+                    11, 12, 10, 12, 11, 13, 34, 12, 13, 9, 10, 11, 10, 11, 13, 8, 14, 14, 10, 14, 10, 11, 22, 11,
+                    10, 10, 12, 10, 10, 13, 24, 24, 44, 10, 12, 13])
     cmap = {c["id"]: c for c in m["contracts"]}
     for i, s in enumerate(rows):
         r = FIRST + i
@@ -383,9 +387,25 @@ def _savings(b, m):
         cc = cmap.get(s["contract_id"], {})
         b.put(ws, r, 42, nv(cc.get("fx")), "0.0000"); b.put(ws, r, 43, cc.get("fx_basis") or "")
         b.put(ws, r, 44, cc.get("form4_date") or ("Not recorded" if cc.get("fx_basis") == "Form 4" else ""))
+        # How the landed cost is built: CIF × FX + discharge + clearance (= column V), + inland freight (= G).
+        b.put(ws, r, 45, nv(s.get("cif_used")), M2); b.put(ws, r, 46, nv(s.get("fx_used")), "0.0000")
+        b.f(ws, r, 47, f'=IF(AND(ISNUMBER(AS{r}),ISNUMBER(AT{r})),AS{r}*AT{r},{NA})', nv(s.get("cif_egp")), M2)
+        b.put(ws, r, 48, s.get("discharge") or 0.0, M2, color=AMBER if s.get("disc_missing") else None)
+        b.put(ws, r, 49, s.get("clearance") or 0.0, M2, color=AMBER if s.get("clr_missing") else None)
+        parts = (s["cif_egp"] + (s.get("discharge") or 0.0) + (s.get("clearance") or 0.0)) if s.get("cif_egp") is not None else None
+        b.f(ws, r, 50, f'=IF(ISNUMBER(AU{r}),AU{r}+AV{r}+AW{r},{NA})', nv(parts), M2)
+        b.put(ws, r, 51, s.get("disc_basis") or "", color=AMBER if s.get("disc_missing") else None)
+        b.put(ws, r, 52, s.get("clr_basis") or "", color=AMBER if s.get("clr_missing") else None)
+        b.put(ws, r, 53, s.get("freight_basis") or "", color=AMBER if s.get("freight") is None else None)
+        # Local-equivalent CBOT = (local excl. − port costs) ÷ FX that day ÷ factor − contract premium.
+        b.put(ws, r, 54, s["fixed_cbot"] if s.get("fixed_cbot") is not None else ("Not fixed" if s.get("contract_premium") is not None else ""), M2)
+        b.f(ws, r, 55, f'=IF(AND(ISNUMBER(X{r}),ISNUMBER(AG{r}),ISNUMBER(AJ{r}),ISNUMBER(AM{r})),(X{r}-N(AI{r}))/AG{r}/AJ{r}-AM{r},{NA})',
+            nv(s.get("eq_cbot")), M2, bold=True)
+        b.f(ws, r, 56, f'=IF(AND(ISNUMBER(BC{r}),ISNUMBER(BB{r})),BC{r}-BB{r},{NA})', nv(s.get("eq_cbot_diff")), M2)
     b.signs(ws, f"L{FIRST}:M{last}")
     b.signs(ws, f"Y{FIRST}:Z{last}")
     b.signs(ws, f"AN{FIRST}:AN{last}")
+    b.signs(ws, f"BD{FIRST}:BD{last}")
     orange = PatternFill("solid", fgColor="FFE3B3")
     ws.conditional_formatting.add(f"H{FIRST}:J{last}", FormulaRule(formula=[f"$J{FIRST}>5"], fill=orange))
     ws.conditional_formatting.add(f"AA{FIRST}:AA{last}", FormulaRule(formula=[f"$J{FIRST}>5"], fill=orange))
@@ -487,13 +507,13 @@ def _cbot(b, m, last):
              "Avg CBOT Storage Date to Last Consumption", "Difference (Storage Avg)", "Advantage / Missed USD (Storage Avg)",
              "Advantage / Missed EGP (Storage Avg)", "Local Price Incl. Transport (Savings vs Local)",
              "Local Price Excl. Transport (Savings vs Local)", "Local Equivalent Premium (CIF basis)",
-             "Premium Gap (Local Equivalent − Contract)"]
+             "Premium Gap (Local Equivalent − Contract)", "Local Equivalent CBOT", "Local Equivalent CBOT − CBOT Fixed"]
     sv_last = last["sv"]
     SV = lambda c_: col(4, c_, sv_last)
     svi = {(s_["contract_id"], s_["date"]): s_ for s_ in m["savings"]}
     last = b.table(ws, "CbotVsConsumption", heads, len(rows),
                    [22, 9, 16, 11, 12, 9, 9, 9, 10, 9, 10, 11, 9, 11, 12, 22, 10, 10, 13, 10, 14, 16, 12, 8, 20, 9, 22,
-                    12, 12, 9, 14, 12, 14, 14, 13, 13, 14, 14])
+                    12, 12, 9, 14, 12, 14, 14, 13, 13, 14, 14, 13, 13])
     fxb = {c["id"]: c.get("fx_basis") or "" for c in m["contracts"]}
     for i, x in enumerate(rows):
         r = FIRST + i
@@ -527,6 +547,10 @@ def _cbot(b, m, last):
                 sv_.get(key) if sv_.get(key) is not None else na_, M2)
         b.f(ws, r, 38, f'=IF(AND(ISNUMBER(AK{r}),ISNUMBER(H{r})),AK{r}-H{r},{NA})',
             (sv_["eq_premium"] - x["premium"]) if (sv_.get("eq_premium") is not None and x.get("premium") is not None) else na_, M2)
+        b.f(ws, r, 39, f'=IFERROR(AVERAGEIFS({SV("BC")},{SV("B")},B{r},{SV("E")},E{r}),{NA})',
+            sv_["eq_cbot"] if sv_.get("eq_cbot") is not None else na_, M2)
+        b.f(ws, r, 40, f'=IF(AND(ISNUMBER(AM{r}),ISNUMBER(K{r})),AM{r}-K{r},{NA})',
+            (sv_["eq_cbot"] - x["fix"]) if (sv_.get("eq_cbot") is not None and isinstance(x.get("fix"), (int, float))) else na_, M2)
         b.put(ws, r, 25, x.get("series_month") or "")
         b.put(ws, r, 26, x["date"][:7])
     b.signs(ws, f"Q{FIRST}:U{last}")

@@ -379,3 +379,28 @@ class CostBuildUpTests(unittest.TestCase):
         self.assertEqual(o["clr_basis"], "Contract entry")
         self.assertIn("add the freight manually", o["freight_basis"])
         self.assertIsNone(o["cost_incl"])
+
+    def test_each_savings_row_carries_its_cost_parts(self):
+        m = mr.build(inputs())
+        for r in m["savings"]:
+            self.assertAlmostEqual(r["cif_egp"] + r["discharge"] + r["clearance"], r["cost_excl"], places=6)
+            if r["cost"] is not None:
+                self.assertAlmostEqual(r["cost_excl"] + r["freight"], r["cost"], places=6)
+
+
+class LocalEquivalentCbotTests(unittest.TestCase):
+    def test_local_equivalent_cbot_is_local_as_cif_minus_contract_premium(self):
+        c = {"base": "CORN", "premium": 150.0, "discharge_egp_mt": 300.0, "clearance_egp_mt": 200.0,
+             "fix": {"eligible": True, "fixed": True, "value": 420.0}}
+        out = mr.equivalent_premium(c, 15000.0, dt.date(2026, 10, 28), lambda b, d: (400.0, d), lambda d: (50.0, d))
+        self.assertAlmostEqual(out["eq_cbot"], (15000 - 500) / 50 / 0.3937 - 150)
+        self.assertAlmostEqual(out["eq_cbot"] - out["day_cbot"], out["premium_gap"])  # the same gap, read on the CBOT side
+        self.assertAlmostEqual(out["eq_cbot_diff"], out["eq_cbot"] - 420.0)
+
+    def test_needs_a_contract_premium_and_reports_no_difference_until_fixed(self):
+        c = {"base": "CORN", "premium": 150.0, "fix": {"eligible": True, "fixed": False, "value": None}}
+        out = mr.equivalent_premium(c, 15000.0, dt.date(2026, 10, 28), lambda b, d: (None, None), lambda d: (50.0, d))
+        self.assertIsNotNone(out["eq_cbot"])  # does not need that day's CBOT
+        self.assertIsNone(out["eq_cbot_diff"])
+        flat = {"base": "SBM", "premium": 0.0, "fix": {"eligible": False}}
+        self.assertIsNone(mr.equivalent_premium(flat, 25000.0, dt.date(2026, 10, 28), lambda b, d: (300.0, d), lambda d: (50.0, d))["eq_cbot"])

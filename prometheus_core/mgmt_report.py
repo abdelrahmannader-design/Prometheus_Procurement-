@@ -493,6 +493,7 @@ def build(inp, **overrides):
                                  cif_basis=basis, saving_mt=(price - cost) if cost is not None else None,
                                  saving=(price - cost) * r["mt"] if cost is not None else None,
                                  freight_basis=c.get("freight_basis") or "",
+                                 **cost_parts(c),
                                  freight=freight, cost_excl=cost_excl, local_excl=l_price,
                                  local_transport=l_trans,
                                  local_transport_default=bool(o.get("transport_default_used")),
@@ -892,6 +893,25 @@ def build(inp, **overrides):
     return model
 
 
+def cost_parts(c):
+    """The parts of a contract's landed cost without inland freight: CIF × FX + discharge + clearance.
+
+    Open contracts are valued at their current cost (latest CBOT / FX until fixed), so their
+    parts come from that same valuation.
+    """
+    cur = c.get("current") or {}
+    if c.get("is_open") and cur.get("cost_excl") is not None:
+        cif, fx, disc, clr = cur.get("cif"), cur.get("fx"), cur.get("disc"), cur.get("clr")
+    else:
+        cif, fx = _n(c.get("cif_usd_mt")), _n(c.get("fx"))
+        disc, clr = _n(c.get("discharge_egp_mt")) or 0.0, _n(c.get("clearance_egp_mt")) or 0.0
+    return {"cif_used": cif, "fx_used": fx, "cif_egp": (cif * fx) if None not in (cif, fx) else None,
+            "discharge": disc, "clearance": clr,
+            "disc_basis": c.get("disc_basis") or ("Not recorded — 0 used" if c.get("disc_missing") else "Contract entry"),
+            "clr_basis": c.get("clr_basis") or ("Not recorded — 0 used" if c.get("clr_missing") else "Contract entry"),
+            "disc_missing": bool(c.get("disc_missing")), "clr_missing": bool(c.get("clr_missing"))}
+
+
 def equivalent_premium(c, local_excl, day, day_cbot, day_fx):
     """The premium a local purchase that day is equivalent to, over that day's CBOT.
 
@@ -905,7 +925,8 @@ def equivalent_premium(c, local_excl, day, day_cbot, day_fx):
     factor, unit = FACTORS.get(base), UNITS.get(base, "")
     out = {"day_cbot": None, "day_cbot_date": "", "day_fx": None, "day_fx_date": "", "port_costs": None,
            "premium_factor": factor, "premium_unit": unit, "eq_premium": None, "eq_premium_gross": None,
-           "contract_premium": None, "premium_gap": None}
+           "contract_premium": None, "premium_gap": None,
+           "fixed_cbot": None, "eq_cbot": None, "eq_cbot_diff": None}
     if factor is None:
         return out
     cb, cbd = day_cbot(base, day)
@@ -915,6 +936,14 @@ def equivalent_premium(c, local_excl, day, day_cbot, day_fx):
                day_fx_date=fxd.isoformat() if fxd else "", port_costs=port)
     if c["fix"].get("eligible") and _n(c.get("premium")) is not None:
         out["contract_premium"] = _n(c.get("premium"))
+    if c["fix"].get("eligible") and c["fix"].get("fixed") and _n(c["fix"].get("value")) is not None:
+        out["fixed_cbot"] = _n(c["fix"].get("value"))
+    # Local-equivalent CBOT: the CBOT at which this contract, at its own premium, would have
+    # cost the same as the local price that day (CIF basis, that day's FX).
+    if None not in (fx, local_excl, out["contract_premium"]) and fx:
+        out["eq_cbot"] = (local_excl - port) / fx / factor - out["contract_premium"]
+        if out["fixed_cbot"] is not None:
+            out["eq_cbot_diff"] = out["eq_cbot"] - out["fixed_cbot"]
     if None in (cb, fx, local_excl) or not fx:
         return out
     out["eq_premium"] = (local_excl - port) / fx / factor - cb
