@@ -395,7 +395,9 @@ def build(inp, **overrides):
     # daily FX. Its consumed tonnes and its open tonnes use the same cost.
     for c in contracts.values():
         c["current"] = current_cost(c, latest_fx, latest_cbot)
-        if c.get("is_open") and c["current"]["cost_incl"] is not None:
+        if c.get("is_open") and c["current"]["cost_excl"] is not None:
+            # Both the landed cost without inland freight and with it (None when no route freight).
+            c["landed_excl_egp_mt"] = c["current"]["cost_excl"]
             c["landed_egp_mt"] = c["current"]["cost_incl"]
             c["fx"], c["fx_basis"] = c["current"]["fx"], c["current"]["fx_basis"]
 
@@ -448,14 +450,23 @@ def build(inp, **overrides):
         if r["type"] != "Import":
             continue
         c = contracts[r["contract_id"]]
-        cost = _n(c.get("landed_egp_mt"))
+        # Landed cost without inland freight is the base for both scenarios; the
+        # including-transport cost adds the contract's route-specific freight, and
+        # is not available when no route freight is known (never an average).
+        freight = _n(c.get("freight_egp_mt"))
+        if "landed_excl_egp_mt" in c:
+            cost_excl = _n(c.get("landed_excl_egp_mt"))
+            cost = (cost_excl + freight) if None not in (cost_excl, freight) else None
+        else:
+            cost = _n(c.get("landed_egp_mt"))
+            cost_excl = (cost - freight) if None not in (cost, freight) else None
         loc = r["local"]
         price, obs_date = _n(loc.get("price")), _d(loc.get("date"))
         age = (_d(r["date"]) - obs_date).days if obs_date else None
         status, why = _local_status(age, opts)
         base_row = {k: r[k] for k in ("date", "contract_id", "contract", "supplier", "commodity",
                                       "base", "origin", "mt", "method")}
-        if cost is None:
+        if cost is None and cost_excl is None:
             exclude("No landed cost", "The contract has no CIF, so it has no landed cost to compare.",
                     date=r["date"], contract=c["contract"], contract_id=c["id"], commodity=c["base"],
                     mt=r["mt"], source=c.get("source_id", ""))
@@ -470,8 +481,6 @@ def build(inp, **overrides):
         # Both transport scenarios, each side with its own inland transport:
         # imports lose only their inland freight (ocean freight stays inside
         # CIF); the local price loses the transport recorded on its quote.
-        freight = _n(c.get("freight_egp_mt"))
-        cost_excl = (cost - freight) if freight is not None else None
         l_trans = _n(o.get("transport"))
         l_price = _n(o.get("price"))
         if l_price is None and l_trans is not None:
@@ -481,8 +490,9 @@ def build(inp, **overrides):
                                  local_age=age, local_key=loc.get("key", ""),
                                  local_source=o.get("source_id", ""), local_status=status,
                                  local_stale=age > opts["carry_days"],
-                                 cif_basis=basis, saving_mt=price - cost,
-                                 saving=(price - cost) * r["mt"],
+                                 cif_basis=basis, saving_mt=(price - cost) if cost is not None else None,
+                                 saving=(price - cost) * r["mt"] if cost is not None else None,
+                                 freight_basis=c.get("freight_basis") or "",
                                  freight=freight, cost_excl=cost_excl, local_excl=l_price,
                                  local_transport=l_trans,
                                  local_transport_default=bool(o.get("transport_default_used")),
@@ -490,6 +500,20 @@ def build(inp, **overrides):
                                  storage_start=c.get("storage_start") or "",
                                  quality=f"{r['method']} · {status} · {basis}",
                                  **equivalent_premium(c, l_price, _d(r["date"]), day_cbot, day_fx)))
+
+    # Consumed tonnes whose contract has no route freight: valued without transport only.
+    nofr = defaultdict(float)
+    for r_ in savings_rows:
+        if r_["saving"] is None and r_["saving_excl"] is not None:
+            nofr[r_["contract_id"]] += r_["mt"]
+    for cid_, mt_ in nofr.items():
+        c_ = contracts[cid_]
+        exclude("Inland freight not recorded",
+                (c_.get("freight_note") or "No route-specific inland freight for this contract.")
+                + " Its consumed tonnes are compared with local excluding transport only; the including-transport "
+                  "comparison is left out until the freight is entered — no average is used.",
+                contract=c_["contract"], contract_id=cid_, commodity=c_["base"], mt=mt_,
+                source=f"loading place '{c_.get('loading_place') or '—'}' → '{c_.get('destination') or '—'}'")
 
     # ── second benchmark: average CBOT from storage date to last consumption ──
     cons_days = defaultdict(list)
@@ -652,9 +676,10 @@ def build(inp, **overrides):
             flags.append("Clearance not recorded on the contract")
         avail = _n(stock.get(c["id"])) or 0.0
         sr = sav_by.get(c["id"], [])
-        smt = _s(sr, lambda r: r["mt"])
-        sv = _s(sr, lambda r: r["saving"])
-        lc = _s(sr, lambda r: r["local"] * r["mt"])
+        sri = [r for r in sr if r["saving"] is not None]
+        smt = _s(sri, lambda r: r["mt"])
+        sv = _s(sri, lambda r: r["saving"])
+        lc = _s(sri, lambda r: r["local"] * r["mt"])
         srx = [r for r in sr if r["saving_excl"] is not None]
         smx = _s(srx, lambda r: r["mt"])
         svx = _s(srx, lambda r: r["saving_excl"])
@@ -671,7 +696,7 @@ def build(inp, **overrides):
             "flags": flags,
             "unreconciled_mt": round(delivered - consumed - avail, 6) if delivered else round(-consumed - avail, 6),
             "first_date": rows[0]["date"] if rows else "", "last_date": rows[-1]["date"] if rows else "",
-            "hist": {"priced_mt": smt, "saving": sv if sr else None,
+            "hist": {"priced_mt": smt, "saving": sv if sri else None,
                      "saving_mt": (sv / smt) if smt else None,
                      "local_wavg": (lc / smt) if smt else None,
                      "saving_pct": (sv / lc * 100) if lc else None,
@@ -679,8 +704,9 @@ def build(inp, **overrides):
                      "priced_mt_excl": smx, "saving_excl": svx if srx else None,
                      "saving_excl_mt": (svx / smx) if smx else None,
                      "local_excl_wavg": (lcx / smx) if smx else None,
-                     "cost_excl": _n(c.get("landed_egp_mt")) - _n(c.get("freight_egp_mt"))
-                     if None not in (_n(c.get("landed_egp_mt")), _n(c.get("freight_egp_mt"))) else None,
+                     "cost_excl": (_n(c.get("landed_excl_egp_mt")) if "landed_excl_egp_mt" in c else
+                                   (_n(c.get("landed_egp_mt")) - _n(c.get("freight_egp_mt"))
+                                    if None not in (_n(c.get("landed_egp_mt")), _n(c.get("freight_egp_mt"))) else None)),
                      "max_local_age": max(ages) if ages else None,
                      "stale_mt": _s([r for r in sr if r["local_stale"]], lambda r: r["mt"])},
             "cbot": {"consumed_mt": _s(cr, lambda r: r["mt"]), "assessed_mt": amt,
@@ -731,7 +757,7 @@ def build(inp, **overrides):
 
     # ── roll-ups, KPIs, data quality, validation ─────────────────────────
     hist_total = _s(savings_rows, lambda r: r["saving"])
-    hist_mt = _s(savings_rows, lambda r: r["mt"])
+    hist_mt = _s([r for r in savings_rows if r["saving"] is not None], lambda r: r["mt"])
     assessed = [r for r in cbot_rows if r["assessable"]]
     fixed_open = [r for r in open_rows if r["class"] == "Fixed price"]
     # Everything else that can be valued is indicative or provisional: unpriced
@@ -776,14 +802,15 @@ def build(inp, **overrides):
 
     commodities = []
     for base in sorted({c["base"] for c in master}):
-        sr = [r for r in savings_rows if r["base"] == base]
+        sr_all = [r for r in savings_rows if r["base"] == base]
+        sr = [r for r in sr_all if r["saving"] is not None]
         ar = [r for r in assessed if r["base"] == base]
         orr = [r for r in open_rows if r["base"] == base]
         alloc = [r for r in allocations if r["base"] == base]
         exc = _s([e for e in excluded if e["commodity"] == base and e["category"] in
                   ("Unsourced consumption", "Cleared by stock count")], lambda e: e["mt"])
         mt = _s(sr, lambda r: r["mt"])
-        srx = [r for r in sr if r["saving_excl"] is not None]
+        srx = [r for r in sr_all if r["saving_excl"] is not None]
         mtx = _s(srx, lambda r: r["mt"])
         commodities.append({
             "saving_excl_egp": _s(srx, lambda r: r["saving_excl"]), "priced_mt_excl": mtx,
@@ -815,6 +842,8 @@ def build(inp, **overrides):
         "missing_cbot": sum(1 for r in cbot_rows if not r["assessable"]),
         "missing_cbot_mt": _s([r for r in cbot_rows if not r["assessable"]], lambda r: r["mt"]),
         "missing_local": sum(1 for e in excluded if e["category"] == "No usable local price"),
+        "no_route_freight": len(nofr), "no_route_freight_mt": sum(nofr.values()),
+        "open_no_route_freight": sum(1 for o in open_rows if o["freight"] is None),
         "missing_local_mt": _s([e for e in excluded if e["category"] == "No usable local price"], lambda e: e["mt"]),
         "stale_local": sum(1 for r in savings_rows if r["local_stale"]),
         "stale_local_mt": _s([r for r in savings_rows if r["local_stale"]], lambda r: r["mt"]),
@@ -855,6 +884,7 @@ def build(inp, **overrides):
         "quality": quality, "audit": audit, "look_alikes": inp.get("look_alikes") or [],
         "sources": inp.get("sources") or {},
         "cbot_series": _series_window(series, spikes, master, as_of),
+        "freight_map": inp.get("freight_map") or [],
     }
     model["validation"] = validate(model)
     model["management_ready"] = all(v["passed"] for v in model["validation"])
@@ -1083,6 +1113,12 @@ def assessment(c):
         out.append(f"Against the local price on the days it was consumed, importing {word} "
                    f"EGP {abs(h['saving']):,.0f} ({h['saving_mt']:+,.0f}/MT on {h['priced_mt']:,.0f} MT, "
                    f"FIFO estimated){'' if c.get('cif_final') else ' — provisional, CIF not final'}.")
+    elif h.get("saving_excl") is not None:
+        word = "saved" if h["saving_excl"] >= 0 else "cost"
+        out.append(f"Excluding transport (no route-specific inland freight recorded, so the including-transport "
+                   f"comparison is not made), importing {word} EGP {abs(h['saving_excl']):,.0f} "
+                   f"({h['saving_excl_mt']:+,.0f}/MT on {h['priced_mt_excl']:,.0f} MT) against the local price on the "
+                   f"days it was consumed. Enter the freight on the contract to complete it.")
     elif c["consumed_mt"]:
         out.append(f"{c['consumed_mt']:,.0f} MT consumed, but no comparison could be supported.")
     else:
@@ -1145,7 +1181,7 @@ def validate(m):
     check("No unsourced rows in headline savings", not bad,
           f"{len(m['savings'])} savings rows, all on contract IDs from the database"
           if not bad else f"{len(bad)} rows without a contract")
-    s_rows = sum(r["saving"] for r in m["savings"])
+    s_rows = sum(r["saving"] for r in m["savings"] if r["saving"] is not None)
     s_con = sum((c["hist"]["saving"] or 0.0) for c in m["contracts"])
     check("Totals reconcile to contract rows",
           abs(s_rows - k["historical_saving_egp"]) < 0.5 and abs(s_con - k["historical_saving_egp"]) < 0.5,
@@ -1197,7 +1233,7 @@ def validate(m):
           f"CBOT net {k['cbot_net_usd']:,.0f} USD = daily rows = contract rows; open fixed potential "
           f"{k['open_fixed_potential_egp']:,.0f} EGP = open rows")
     limit = m["options"].get("max_carry_days")
-    both = [r for r in m["savings"] if r["saving_excl"] is not None]
+    both = [r for r in m["savings"] if r["saving_excl"] is not None and r["saving"] is not None]
     lhs = sum(r["saving"] - r["saving_excl"] for r in both)
     rhs = sum(((r["local_transport"] or 0.0) - (r["freight"] or 0.0)) * r["mt"] for r in both)
     check("Transport scenarios reconcile", abs(lhs - rhs) < 1.0,

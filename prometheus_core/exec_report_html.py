@@ -163,6 +163,7 @@ tr.rd>td{background:var(--bad-bg)}tr.rx>td{color:var(--ink2)}
  <button class="tab" data-p="contracts">Contracts</button>
  <button class="tab" data-p="cbot">CBOT fixed vs consumption</button>
  <button class="tab" data-p="open">Open contracts vs local</button>
+ <button class="tab" data-p="transport">Transport map</button>
  <button class="tab" data-p="trends">Trends &amp; breakdowns</button>
  <button class="tab tech" data-p="quality">Data quality</button>
  <span class="spacer"></span>
@@ -180,6 +181,8 @@ tr.rd>td{background:var(--bad-bg)}tr.rx>td{color:var(--ink2)}
  <label>Commodity<select id="fBase"></select></label>
  <label>Origin<select id="fOrigin"></select></label>
  <label>Supplier<select id="fSupplier"></select></label>
+ <label>Loading region<select id="fRegion"></select></label>
+ <label>Loading place<select id="fPlace"></select></label>
  <label>Contract<input id="fQ" list="dlC" placeholder="number or ID"><datalist id="dlC"></datalist></label>
  <label>From<input type="date" id="fFrom"></label>
  <label>To<input type="date" id="fTo"></label>
@@ -192,6 +195,7 @@ tr.rd>td{background:var(--bad-bg)}tr.rx>td{color:var(--ink2)}
  <button class="btn" id="bReset">Reset</button>
 </div>
 <main>
+<div class="card warnbox" id="manBanner" style="display:none;margin-top:10px"></div>
 <section class="panel on" id="p-overview">
  <div class="kpis" id="kpis"></div>
  <div class="card mgmt-only" id="mgmtNote"></div>
@@ -245,6 +249,24 @@ tr.rd>td{background:var(--bad-bg)}tr.rx>td{color:var(--ink2)}
   <div class="tw"><table id="tO"></table></div></div>
 </section>
 
+<section class="panel" id="p-transport">
+ <div class="kpis" id="tmK"></div>
+ <div class="card"><h2>Transportation costs map</h2><p class="sub">Inland freight from each loading place to the plants (النوبارية · الصف), from the freight approval in the app (EGP/MT; previous rates apply to deliveries before the effective date). Positions are approximate. Click a loading place to show only its contracts in every tab.</p>
+  <div class="ofl"><label>Commodity<select class="ctl" id="tmComm"></select></label>
+   <label>Plant<select class="ctl" id="tmDest"><option value="">Both plants</option><option>النوبارية</option><option>الصف</option></select></label>
+   <label>Rates<select class="ctl" id="tmVat"><option value="incl">incl. VAT (as used in landed cost)</option><option value="ex">excl. VAT (as in the approval)</option></select></label></div>
+  <div id="tmMap"></div></div>
+ <div class="grid2">
+  <div class="card"><h2>Freight rates</h2><p class="sub" id="tmRatesSub"></p><div class="tw"><table id="tmRates"></table></div></div>
+  <div class="card"><h2>Manual transport cost</h2><p class="sub">The report never uses an average: each contract takes its own route freight, and contracts without a route show "add manually". To test a figure, enter it here — an average for all contracts, or one per contract in the table below. Manual entries are a what-if in this page only (kept in this browser); enter the real freight on the contract in the app to make it permanent.</p>
+   <div class="ofl"><label>Manual average inland freight, EGP/MT incl. VAT<input class="ctl" type="number" step="0.01" min="0" id="manAvg" placeholder="e.g. 350"></label>
+    <label>Apply to<select class="ctl" id="manScope"><option value="missing">Only contracts without route freight</option><option value="all">All contracts (what-if)</option></select></label></div>
+   <div class="ofl"><button class="btn primary" id="manApply">Apply</button><button class="btn" id="manClear">Clear manual entries</button><button class="btn" id="manCsv">Download manual freight list (CSV)</button></div>
+   <div id="manNote" class="note"></div></div>
+ </div>
+ <div class="card"><h2>Contracts by loading place</h2><p class="sub">Every contract grouped by where the commodity is taken from, with the freight the report uses and where it comes from. <b>Route table</b> = the approval rate for its commodity, loading place and plant on its delivery date, + VAT; <b>Contract route entry</b> = freight entered on the contract with its route; <b>No route — add manually</b> = no rate can be matched, so its including-transport comparison is left out. "App value" is the freight the app had stored.</p><div class="tw"><table id="tmContracts"></table></div></div>
+</section>
+
 <section class="panel" id="p-trends">
  <div class="grid2">
   <div class="card"><h2>Savings vs local by month</h2><p class="sub">Consumed tonnes against the local price on the day · EGP · by consumption month</p><div id="trMonth"></div></div>
@@ -293,12 +315,25 @@ function opts(sel, vals, all) { $(sel).innerHTML = `<option value="">${all}</opt
 opts("fBase", [...new Set(C.map(c => c.base))].sort(), "All commodities");
 opts("fOrigin", [...new Set(C.map(c => c.origin || "—"))].sort(), "All origins");
 opts("fSupplier", [...new Set(C.map(c => c.supplier || "—"))].sort(), "All suppliers");
+// Loading places (Arabic names as recorded) with approximate positions and their region.
+const PLACE_GEO = {"الدخيلة": [31.13, 29.80, "Alexandria · الإسكندرية"], "برج العرب": [30.90, 29.58, "Alexandria · الإسكندرية"],
+  "أبو قير": [31.32, 30.07, "Alexandria · الإسكندرية"], "دمياط (ميدسوفتس + A3C)": [31.47, 31.81, "Damietta · دمياط"], "دمياط": [31.22, 31.55, "Damietta · دمياط"],
+  "مخازن السلام - مخازن النيل": [30.12, 31.36, "Cairo / Giza · القاهرة والجيزة"], "اكما (مدينة السلام)": [30.19, 31.45, "Cairo / Giza · القاهرة والجيزة"],
+  "مدينة السادس من أكتوبر": [29.96, 30.93, "Cairo / Giza · القاهرة والجيزة"], "أبو رواش": [30.05, 31.08, "Cairo / Giza · القاهرة والجيزة"],
+  "السادات": [30.37, 30.53, "Sadat · المنوفية"], "النوبارية": [30.67, 30.06, "Beheira · البحيرة"]};
+const DEST_GEO = {"النوبارية": [30.67, 30.06], "الصف": [29.57, 31.28]};
+const placeOf = c => c.loading_place_map || c.loading_place || "";
+const regionOf = p => p ? (PLACE_GEO[p] || [0, 0, "Other"])[2] : "Not recorded";
+opts("fRegion", [...new Set(C.map(c => regionOf(placeOf(c))))].sort(), "All regions");
+opts("fPlace", [...new Set(C.map(c => placeOf(c) || "Not recorded"))].sort(), "All loading places");
 $("dlC").innerHTML = C.map(c => `<option value="${esc(c.contract)}">${esc(c.id)}</option>`).join("");
 function F() {
   return {base: $("fBase").value, origin: $("fOrigin").value, supplier: $("fSupplier").value, q: $("fQ").value.trim().toLowerCase(),
-          from: $("fFrom").value, to: $("fTo").value, open: $("fOpen").value, fix: $("fFix").value, dq: $("fDQ").value, age: $("fAge").value, order: $("fOrder").value};
+          from: $("fFrom").value, to: $("fTo").value, open: $("fOpen").value, fix: $("fFix").value, dq: $("fDQ").value, age: $("fAge").value, order: $("fOrder").value, region: $("fRegion").value, place: $("fPlace").value};
 }
 function contractOk(c, f) {
+  if (f.region && regionOf(placeOf(c)) !== f.region) return false;
+  if (f.place && (placeOf(c) || "Not recorded") !== f.place) return false;
   if (f.base && c.base !== f.base) return false;
   if (f.origin && (c.origin || "—") !== f.origin) return false;
   if (f.supplier && (c.supplier || "—") !== f.supplier) return false;
@@ -372,7 +407,7 @@ function aggS(rows, sc) {
 const obucket = r => r.class === "Fixed price" ? "c" : (r.class === "Not assessable" || r.class.includes("incomplete")) ? "x" : "i";
 function kpis(v) {
   const ass = v.cb.filter(r => r.assessable), fixed = v.op.filter(r => obucket(r) === "c"), ind = v.op.filter(r => obucket(r) === "i");
-  const openC = v.contracts.filter(c => c.is_open), mt = sum(v.sav, r => r.mt), hs = sum(v.sav, r => r.saving);
+  const openC = v.contracts.filter(c => c.is_open), mt = sum(v.sav.filter(r => isN(r.saving)), r => r.mt), hs = sum(v.sav, r => r.saving);
   const X = aggS(v.sav, SCN.excl), fin = v.sav.filter(r => r.cif_basis === "Final CIF"), prov = v.sav.filter(r => r.cif_basis !== "Final CIF");
   const fixedMt = sum(v.cb, r => r.mt), aMt = sum(ass, r => r.mt);
   return {historical_saving_egp: hs, historical_mt: mt, historical_saving_egp_mt: mt ? hs / mt : null,
@@ -943,6 +978,7 @@ function renderQuality() {
     ["stale", "Days on the last local price in force", q.carried_local, `rows · ${f0(q.carried_local_mt || 0)} MT · no new quote = no change`],
     ["stale5", `Days on local quotes > ${CD()} days old (STALE)`, q.stale_local, `rows · ${f0(q.stale_local_mt || 0)} MT · still used, flagged orange`],
     ["missing-storage", "Contracts without a storage start", q.missing_storage, "shown as Not recorded · never assumed"],
+    ["Inland freight not recorded", "Contracts without route freight", q.no_route_freight || 0, `${f0(q.no_route_freight_mt || 0)} MT consumed · add the freight on the contract`],
     ["Reconciliation flag", "Reconciliation flags", q.reconciliation_flags, "kept as recorded, not deleted"],
     ["prov-fx", "Open contracts on provisional FX", q.provisional_fx_open, "latest market FX · Form 4 pending"],
     ["not-received", "Open contracts not confirmed received", q.not_received_open, "current market valuation"],
@@ -970,6 +1006,7 @@ function renderQuality() {
   $("src").innerHTML = `<p>Data as of ${esc(M.as_of)} · generated ${esc(M.generated)} · consumption: ${esc(M.walk_mode)} · rates ${esc(Object.entries(M.rates || {}).map(([k, x]) => k + " " + x).join(", "))} MT/day.</p>
    <p>CBOT: ${esc(src.cbot_source || "")}; ${esc(Object.entries(src.cbot || {}).map(([k, x]) => `${k} ${x[0]} → ${x[1]}`).join(" · "))}. Each consumption day is compared with the CBOT stored for that day (the contract's futures month is only the month its premium is quoted over); one-day spikes and prints older than ${o.cbot_max_age_days} days are not used. Advantage when CBOT − fixed ≥ ${o.neutral_cbot}, missed when ≤ −${o.neutral_cbot}, else neutral.</p>
    <p>Local: origin-matched local market quote observed on or before the day; the last quote entered stays in force until the next one (no new quote = no change), shown with its date and age. A quote more than ${CD()} days old is marked <span class="stale">Local Market Price — N Days Old — STALE</span> but still used; days with no earlier quote are excluded as missing. Latest quotes: ${esc(Object.entries(src.local_latest || {}).map(([k, x]) => k + " " + x).join(" · "))}.</p>
+   <p>Inland freight is route-specific, never an average: a contract with its route entered keeps that freight; otherwise the freight approval rate for its commodity, loading place and plant, as in force on its delivery date (previous rate before the effective date), + 14% VAT. A contract whose route cannot be matched shows "N/A — add the freight manually" and is compared excluding transport only. See the Transport map tab.</p>
    <p>Transport scenarios: including = landed cost with inland freight vs local quote + local transport; excluding = landed cost without inland freight vs the local quote itself. Each side uses its own recorded transport; ocean freight stays in CIF. Missing transport is shown as N/A — Missing Source Data, never as zero, and left out of that scenario's totals.</p>
    <p>Landed cost: CIF × FX + discharge + clearance (+ inland freight when including transport). FX: Form 4 once entered (all commodities except SBM); historical rows keep their recorded basis; open contracts without Form 4 use the latest daily market FX ("Latest Market FX — Provisional") and switch automatically once Form 4 is entered. CBOT fixed: pricing lots, else Implied CBOT Fixing = CIF ÷ factor − premium (CORN 0.3937; SOYBEAN, WHEAT 0.36745; SBM 1.1023 with premium in $/short ton), so Final CIF = (fixed CBOT + premium) × factor. Unpriced contracts are never shown as fixed: their open tonnes are valued at (latest stored CBOT + premium) × factor, labelled a proxy when that series is not the contract's own futures month. Flat-priced contracts keep their contract CIF.</p>
    <p>Storage start dates are shown as recorded (Not recorded when absent) and never taken from the delivery date. A contract with no storage start and no receipt is not treated as received: it gets a current market valuation and stays out of the FIFO stock; consumption already allocated to one is flagged for reconciliation, not deleted. Historical savings, current open potential and the CBOT benchmark are separate measures and are never added together.</p>`;
@@ -1224,10 +1261,131 @@ function renderTrends(v) {
     vals: [c.priced_mt, Math.max(c.allocated_import_mt - c.priced_mt, 0), c.allocated_local_mt, c.excluded_mt]})));
 }
 
+// ── transport map ───────────────────────────────────────────────────
+const FMAP = M.freight_map || [];
+const FCOMM = {CORN: "CORN", SBM: "SBM", SFM: "SFM", SOYBEAN: "SBS", DDGS: "DDGS"};
+const FCOMM_LABEL = {CORN: "Yellow corn", SBM: "SBM", SFM: "SFM", SBS: "Soybean seed (whole soybeans)", DDGS: "DDGS", SBHULL: "Soybean hulls", FFS: "Full-fat soy"};
+const fcommOf = c => FCOMM[c.base] || c.base;
+const vatMul = () => $("tmVat").value === "ex" ? 1 : 1.14;
+// Manual freight (what-if): an average (for contracts without route freight, or for all) and per-contract entries.
+const MAN = (() => { try { return Object.assign({avg: null, scope: "missing", per: {}}, JSON.parse(localStorage.getItem("pp_manual_freight_v1") || "{}")); } catch (e) { return {avg: null, scope: "missing", per: {}}; } })();
+const saveMan = () => { try { localStorage.setItem("pp_manual_freight_v1", JSON.stringify(MAN)); } catch (e) { /* storage unavailable */ } };
+M.savings.forEach(r => { r._f0 = {cost: r.cost, saving: r.saving, saving_mt: r.saving_mt, freight: r.freight}; });
+M.open.forEach(o => { o._f0 = {freight: o.freight, cost_incl: o.cost_incl, landed: o.landed, saving_mt: o.saving_mt, potential: o.potential, be_cbot_incl: o.be_cbot_incl, headroom_incl: o.headroom_incl}; });
+function manualFor(c) {
+  if (isN(MAN.per[c.id])) return [MAN.per[c.id], "Manual (this contract)"];
+  if (isN(MAN.avg) && (MAN.scope === "all" || !isN(c.freight_egp_mt))) return [MAN.avg, MAN.scope === "all" ? "Manual average (all contracts)" : "Manual average (no route freight)"];
+  return [null, ""];
+}
+function applyManual() {
+  let n = 0;
+  C.forEach(c => { const [f] = manualFor(c); c._man = isN(f) ? f : null; if (isN(f)) n++; });
+  M.savings.forEach(r => { const c = CI[r.contract_id] || {}; Object.assign(r, r._f0); r.man = false;
+    if (isN(c._man) && isN(r.cost_excl)) { r.freight = c._man; r.cost = r.cost_excl + c._man; r.saving_mt = r.local - r.cost; r.saving = r.saving_mt * r.mt; r.man = true; } });
+  M.open.forEach(o => { const c = CI[o.contract_id] || {}; Object.assign(o, o._f0); o.man = false;
+    if (isN(c._man) && isN(o.cost_excl)) { o.freight = c._man; o.cost_incl = o.cost_excl + c._man; o.landed = o.cost_incl; o.man = true;
+      if (isN(o.local_incl)) { o.saving_mt = o.local_incl - o.cost_incl; o.potential = o.saving_mt * o.unconsumed_mt; }
+      const fac = FACT[o.base];
+      if (fac && isN(o.premium) && o.fx && isN(o.local_incl) && !flatC(o.pricing_class)) { o.be_cbot_incl = (o.local_incl - (o.discharge || 0) - (o.clearance || 0) - c._man) / o.fx / fac - o.premium;
+        o.headroom_incl = isN(o.ref_cbot) ? o.be_cbot_incl - o.ref_cbot : null; } } });
+  $("manBanner").style.display = n ? "block" : "none";
+  $("manBanner").innerHTML = n ? `<b>Manual freight applied to ${n} contract${n > 1 ? "s" : ""} (what-if).</b> Figures including transport in every tab use your entries; the app's data is unchanged. <button class="btn" id="manBannerClear">Clear manual entries</button>` : "";
+  return n;
+}
+function geoXY(lat, lon, W, H) { return [24 + (lon - 29.15) / 2.95 * (W - 48), 20 + (31.78 - lat) / 2.45 * (H - 40)]; }
+function transportMap(comm, dest, v) {
+  const W = 980, H = 600, xy = (la, lo) => geoXY(la, lo, W, H), mul = vatMul();
+  const rates = FMAP.filter(r => r.commodity === comm && (!dest || r.destination === dest));
+  const byPlace = groupBy(v.contracts.filter(c => fcommOf(c) === comm), c => placeOf(c) || "Not recorded");
+  const vals = rates.map(r => r.rate).filter(x => x > 0), lo = Math.min(...vals), hi = Math.max(...vals);
+  const shade = x => { const t = hi > lo ? (x - lo) / (hi - lo) : 0.5; return `hsl(${210 - t * 190}, 70%, ${45 - t * 5}%)`; };
+  const coast = [[30.95, 29.15], [31.08, 29.65], [31.20, 29.92], [31.33, 30.10], [31.45, 30.35], [31.47, 30.62], [31.56, 31.00], [31.53, 31.32], [31.47, 31.62], [31.43, 31.86], [31.27, 32.10]];
+  const nileR = [[30.05, 31.23], [30.22, 31.12], [30.55, 30.85], [30.85, 30.68], [31.12, 30.52], [31.40, 30.42]];
+  const nileD = [[30.22, 31.12], [30.55, 31.18], [30.85, 31.32], [31.12, 31.58], [31.42, 31.82]];
+  const pl = pts => pts.map(([a, b]) => xy(a, b).map(n => n.toFixed(1)).join(",")).join(" ");
+  let s = `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Transportation costs map">`;
+  s += `<polygon points="${pl([[31.78, 29.15], ...coast, [31.78, 32.10]])}" fill="var(--s1)" opacity=".08"/><polyline points="${pl(coast)}" fill="none" stroke="var(--axis)" stroke-width="1.5"/>`;
+  s += `<polyline points="${pl(nileR)}" fill="none" stroke="var(--s1)" stroke-width="2" opacity=".35"/><polyline points="${pl(nileD)}" fill="none" stroke="var(--s1)" stroke-width="2" opacity=".35"/>`;
+  { const [x, y] = xy(31.68, 30.6); s += `<text x="${x}" y="${y}" style="fill:var(--muted)">Mediterranean Sea · البحر المتوسط</text>`; }
+  { const [x, y] = xy(30.05, 31.23); s += `<circle cx="${x}" cy="${y}" r="3" fill="var(--muted)"/><text x="${x + 6}" y="${y + 14}" style="fill:var(--muted)">Cairo · القاهرة</text>`; }
+  // routes
+  rates.forEach(r => { const a = PLACE_GEO[r.place], b = DEST_GEO[r.destination]; if (!a || !b) return;
+    const [x1, y1] = xy(a[0], a[1]), [x2, y2] = xy(b[0], b[1]), zero = !(r.rate > 0), n = (byPlace[r.place] || []).filter(c => c.destination === r.destination).length;
+    const tip = `<b>${esc(r.place)} → ${esc(r.destination)}</b> · ${esc(FCOMM_LABEL[comm] || comm)}<br>${zero ? "0 in the approval — check before use" : `${f2(r.rate)} EGP/MT excl. VAT · ${f2(r.rate * 1.14)} incl. 14% VAT`}${isN(r.old_rate) ? `<br>previous rate ${f2(r.old_rate)} (before ${esc(r.effective)})` : ""}<br>${n} contract${n === 1 ? "" : "s"} on this route`;
+    s += `<g data-tip="${esc(tip)}"><line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${zero ? "var(--bad)" : shade(r.rate)}" stroke-width="${zero ? 2 : 3 + Math.min(n, 12) * 0.5}" ${zero ? 'stroke-dasharray="6 5"' : ""} opacity=".85"/>`;
+    s += `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="transparent" stroke-width="14"/></g>`;
+    if (dest) { const mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
+      s += `<text x="${mx}" y="${my - 4}" text-anchor="middle" class="lbl" style="font-weight:700;paint-order:stroke;stroke:var(--surface);stroke-width:3px">${zero ? "0 — check" : f0(r.rate * mul)}</text>`; } });
+  // plants
+  Object.entries(DEST_GEO).forEach(([d, g]) => { const [x, y] = xy(g[0], g[1]);
+    s += `<rect x="${x - 8}" y="${y - 8}" width="16" height="16" rx="3" fill="var(--ink)"/><text x="${x - 12}" y="${y + 24}" text-anchor="middle" class="lbl" style="font-weight:700;paint-order:stroke;stroke:var(--surface);stroke-width:4px">${esc(d)} · plant</text>`; });
+  // loading places
+  const shown = new Set(rates.map(r => r.place).concat(Object.keys(byPlace)));
+  [...shown].forEach(p => { const g = PLACE_GEO[p]; if (!g) return; const [x, y] = xy(g[0], g[1]), cs = byPlace[p] || [], mt = sum(cs, c => c.qty_mt);
+    const noRoute = cs.length && !rates.some(r => r.place === p), on = $("fPlace").value === p;
+    const tip = `<b>${esc(p)}</b> · ${esc(g[2])}<br>${cs.length} ${esc(FCOMM_LABEL[comm] || comm)} contract${cs.length === 1 ? "" : "s"} · ${f0(mt)} MT${noRoute ? "<br><b>No rate in the freight table for this place — add the freight manually on each contract</b>" : ""}<br>Click to show only this loading place`;
+    s += `<g data-place="${esc(p)}" style="cursor:pointer" data-tip="${esc(tip)}"><circle cx="${x}" cy="${y}" r="${6 + Math.sqrt(cs.length) * 2.2}" fill="${noRoute ? "var(--surface)" : "var(--s1)"}" stroke="${on ? "var(--ink)" : noRoute ? "var(--bad)" : "var(--surface)"}" stroke-width="${on ? 3 : 2}" ${noRoute ? 'stroke-dasharray="3 3"' : ""}/>`;
+    const right = x > W * 0.72, off = 10 + Math.sqrt(cs.length) * 2.2;
+    s += `<text x="${right ? x - off : x + off}" y="${y + 4}" text-anchor="${right ? "end" : "start"}" class="lbl" style="paint-order:stroke;stroke:var(--surface);stroke-width:3px">${esc(p)}${cs.length ? ` · ${cs.length}` : ""}${noRoute ? " · no route" : ""}</text></g>`; });
+  s += `<text x="${W - 12}" y="${H - 10}" text-anchor="end" style="fill:var(--muted)">Positions approximate · line colour = freight (blue cheaper → red dearer) · thickness = contracts on the route</text></svg>`;
+  return s;
+}
+function renderTransport(v) {
+  const comms = [...new Set(FMAP.map(r => r.commodity))].sort((a, b) => (FCOMM_LABEL[a] ? 0 : 1) - (FCOMM_LABEL[b] ? 0 : 1) || a.localeCompare(b));
+  const cur = $("tmComm").value || (v.f.base ? (FCOMM[v.f.base] || v.f.base) : "CORN");
+  $("tmComm").innerHTML = comms.map(c => `<option value="${esc(c)}">${esc(FCOMM_LABEL[c] || c)}</option>`).join(""); $("tmComm").value = comms.includes(cur) ? cur : comms[0] || "";
+  const comm = $("tmComm").value, dest = $("tmDest").value, mul = vatMul();
+  // KPIs
+  const cs = v.contracts, route = cs.filter(c => /^Freight table/.test(c.freight_basis || "")), entry = cs.filter(c => /^Contract route entry/.test(c.freight_basis || "")), none = cs.filter(c => !isN(c.freight_egp_mt));
+  const changed = cs.filter(c => isN(c.freight_app_egp_mt) && (!isN(c.freight_egp_mt) || Math.abs(c.freight_app_egp_mt - c.freight_egp_mt) > 0.01));
+  const noneMt = sum(v.sav.filter(r => none.some(c => c.id === r.contract_id)), r => r.mt);
+  $("tmK").innerHTML = [
+    kcard("Freight from the route table", route.length, `${route.length} contracts`, '<span class="tag good">Specific</span>', `rate for commodity + loading place + plant on the delivery date, + VAT · ${entry.length} more with the route entered on the contract`),
+    kcard("No route freight — add manually", -none.length, `${none.length} contracts`, '<span class="tag bad">Missing</span>', `${f0(noneMt)} MT consumed compared excluding transport only · ${esc([...new Set(none.map(c => placeOf(c) || "no place"))].join(", ") || "—")}`),
+    kcard("Changed from the app's stored freight", null, `${changed.length} contracts`, '<span class="tag pot">Review</span>', "stored value was a different route, commodity or VAT basis — see the table below")].join("");
+  // map + rates
+  $("tmMap").innerHTML = transportMap(comm, dest, v);
+  const eff = [...new Set(FMAP.map(r => r.effective).filter(Boolean))].join(", ");
+  $("tmRatesSub").textContent = `${FCOMM_LABEL[comm] || comm} · EGP/MT · current rates effective ${eff || "—"}; previous rates apply to earlier deliveries. Shown ${mul > 1 ? "incl. 14% VAT" : "excl. VAT"}.`;
+  const rr = FMAP.filter(r => r.commodity === comm), places = [...new Set(rr.map(r => r.place))].sort((a, b) => regionOf(a).localeCompare(regionOf(b)) || a.localeCompare(b));
+  const cell2 = (p, d) => { const r = rr.find(x => x.place === p && x.destination === d); if (!r) return '<td class="na">—</td><td class="na">—</td>';
+    return r.rate > 0 ? `${td(r.rate * mul, f2)}${td(isN(r.old_rate) ? r.old_rate * mul : null, f2)}` : '<td class="n"><span class="tag bad" title="0 in the approval">0 — check</span></td><td class="na">—</td>'; };
+  $("tmRates").innerHTML = `<thead><tr><th>Loading place</th><th>Region</th><th class="n">→ النوبارية</th><th class="n">previous</th><th class="n">→ الصف</th><th class="n">previous</th><th class="n">Contracts</th></tr></thead><tbody>` +
+    places.map(p => `<tr class="row" data-place="${esc(p)}"><td>${esc(p)}</td><td class="note">${esc(regionOf(p))}</td>${cell2(p, "النوبارية")}${cell2(p, "الصف")}${td(cs.filter(c => fcommOf(c) === comm && placeOf(c) === p).length)}</tr>`).join("") + "</tbody>";
+  // contracts by loading place
+  const statusOf = c => isN(c._man) ? '<span class="tag pot">Manual</span>' : !isN(c.freight_egp_mt) ? '<span class="tag bad">No route — add manually</span>' :
+    /^Contract route entry/.test(c.freight_basis || "") ? '<span class="tag act">Contract route entry</span>' : '<span class="tag good">Route table</span>';
+  const rows = cs.slice().sort((a, b) => regionOf(placeOf(a)).localeCompare(regionOf(placeOf(b))) || placeOf(a).localeCompare(placeOf(b)) || String(b.storage_start || b.delivery_date).localeCompare(String(a.storage_start || a.delivery_date)));
+  const groups = groupBy(rows, c => placeOf(c) || "Not recorded");
+  let h = `<thead><tr><th>Contract</th><th>Commodity</th><th>Plant</th><th>Delivery / storage</th><th class="n">MT</th><th class="n">Freight used, incl. VAT</th><th>Status</th><th class="n">Route rate (excl. VAT)</th><th class="n">App value</th><th class="n">Used − app</th><th class="n">Manual freight</th><th>Basis / note</th></tr></thead><tbody>`;
+  Object.entries(groups).forEach(([p, g]) => {
+    const fr = g.map(c => isN(c._man) ? c._man : c.freight_egp_mt).filter(isN);
+    h += `<tr class="tot"><td colspan="12">${esc(regionOf(p === "Not recorded" ? "" : p))} · <b>${esc(p)}</b> — ${g.length} contract${g.length > 1 ? "s" : ""} · ${f0(sum(g, c => c.qty_mt))} MT${fr.length ? ` · freight ${f0(Math.min(...fr))}–${f0(Math.max(...fr))} EGP/MT` : ""}${g.some(c => !isN(c.freight_egp_mt)) ? ' · <span class="neg">some contracts need the freight entered</span>' : ""}</td></tr>`;
+    g.forEach(c => { const used = isN(c._man) ? c._man : c.freight_egp_mt, diff = isN(used) && isN(c.freight_app_egp_mt) ? used - c.freight_app_egp_mt : null;
+      h += `<tr><td><b>${esc(c.contract)}</b><br><span class="note">${esc(c.supplier)} · ${esc(c.id)}</span></td><td>${esc(c.commodity)}</td><td>${esc(c.destination || "—")}</td><td>${esc(c.storage_start || c.delivery_date || "—")}</td>${td(c.qty_mt)}` +
+        `<td class="n">${isN(used) ? `<b>${f2(used)}</b>` : NA_}</td><td>${statusOf(c)}</td>` +
+        `<td class="n">${isN(c.route_rate_ex) ? `${f2(c.route_rate_ex)}<br><span class="note">${esc(c.route_rate_which)}</span>` : "—"}</td>${td(c.freight_app_egp_mt, f2)}${td(diff, f2, 1)}` +
+        `<td class="n"><input class="ctl manIn" type="number" step="0.01" min="0" style="width:96px" data-id="${esc(c.id)}" value="${isN(MAN.per[c.id]) ? MAN.per[c.id] : ""}" placeholder="${isN(c.freight_egp_mt) ? "" : "add"}"></td>` +
+        `<td class="note" style="white-space:normal;min-width:260px">${esc(isN(c._man) ? manualFor(c)[1] : c.freight_basis || "")}${c.freight_note ? `<br><span class="neg">${esc(c.freight_note)}</span>` : ""}</td></tr>`; });
+  });
+  $("tmContracts").innerHTML = h + "</tbody>";
+  const nm = Object.keys(MAN.per).length;
+  $("manNote").innerHTML = `${isN(MAN.avg) ? `Average ${f2(MAN.avg)} EGP/MT applied to ${MAN.scope === "all" ? "all contracts" : "contracts without route freight"}. ` : "No manual average. "}${nm} contract-specific manual entr${nm === 1 ? "y" : "ies"}.`;
+  if (isN(MAN.avg)) $("manAvg").value = MAN.avg; $("manScope").value = MAN.scope;
+}
+function manualCsv() {
+  const rows = [["Contract ID", "Contract", "Commodity", "Loading place", "Plant", "Route freight used EGP/MT", "Manual freight EGP/MT", "Manual source"]].concat(
+    C.filter(c => isN(c._man) || !isN(c.freight_egp_mt)).map(c => [c.id, c.contract, c.commodity, c.loading_place || "", c.destination || "", isN(c.freight_egp_mt) ? c.freight_egp_mt.toFixed(2) : "N/A — add manually", isN(c._man) ? c._man : "", isN(c._man) ? manualFor(c)[1] : "needs freight"]));
+  const csv = "﻿" + rows.map(r => r.map(x => `"${String(x).replace(/"/g, '""')}"`).join(",")).join("\r\n");
+  const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([csv], {type: "text/csv;charset=utf-8"})); a.download = `Manual_freight_${M.as_of}.csv`;
+  document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+}
+
 // ── wiring ───────────────────────────────────────────────────────────
 function render() {
+  applyManual();
   const v = view(), K = kpis(v);
-  renderOverview(v, K); renderSavings(v); renderSvOpen(v); renderContracts(v); renderCbot(v); renderOpen(v); renderTrends(v);
+  renderOverview(v, K); renderSavings(v); renderSvOpen(v); renderTransport(v); renderContracts(v); renderCbot(v); renderOpen(v); renderTrends(v);
 }
 function showTab(p) { S.tab = p; document.querySelectorAll(".tab").forEach(t => t.classList.toggle("on", t.dataset.p === p));
   document.querySelectorAll(".panel").forEach(x => x.classList.toggle("on", x.id === "p-" + p)); }
@@ -1244,7 +1402,7 @@ $("badges").innerHTML = `<button class="badge ${M.management_ready ? "ok" : "no"
   `<span class="tag act">Actual = consumed (FIFO estimated)</span><span class="tag pot">Potential = not yet consumed</span><span class="tag ben">Benchmark = CBOT comparison</span>`;
 $("bReady").addEventListener("click", () => { if (!document.body.classList.contains("mgmt")) showTab("quality"); });
 document.querySelectorAll(".tab").forEach(t => t.addEventListener("click", () => showTab(t.dataset.p)));
-["fBase", "fOrigin", "fSupplier", "fFrom", "fTo", "fOpen", "fFix", "fDQ", "fAge"].forEach(id => $(id).addEventListener("change", render));
+["fBase", "fOrigin", "fSupplier", "fFrom", "fTo", "fOpen", "fFix", "fDQ", "fAge", "fRegion", "fPlace"].forEach(id => $(id).addEventListener("change", render));
 $("fOrder").addEventListener("change", () => { S.sort = {}; render(); });
 ["oBucket", "oRes", "oRem"].forEach(id => $(id).addEventListener("change", () => renderOpen(view())));
 const TXN = {side: "Side-by-side: including transport = inland transport on both sides; excluding = without it. Ocean freight stays in CIF.",
@@ -1256,7 +1414,7 @@ $("fQ").addEventListener("input", render);
 $("fPreset").addEventListener("change", e => { const v = e.target.value, end = M.as_of; let start = "";
   if (v === "ytd") start = end.slice(0, 4) + "-01-01"; else if (v) { const d = new Date(end); d.setDate(d.getDate() - +v); start = d.toISOString().slice(0, 10); }
   $("fFrom").value = start; $("fTo").value = v ? end : ""; render(); });
-$("bReset").addEventListener("click", () => { ["fBase", "fOrigin", "fSupplier", "fQ", "fFrom", "fTo", "fPreset", "fOpen", "fFix", "fDQ", "fAge", "fOrder", "oBucket", "oRes", "oRem"].forEach(id => $(id).value = ""); render(); });
+$("bReset").addEventListener("click", () => { ["fBase", "fOrigin", "fSupplier", "fQ", "fFrom", "fTo", "fPreset", "fOpen", "fFix", "fDQ", "fAge", "fOrder", "fRegion", "fPlace", "oBucket", "oRes", "oRem"].forEach(id => $(id).value = ""); render(); });
 $("cbSel").addEventListener("change", e => { S.cb = e.target.value; renderCbot(view()); });
 $("trLocBase").addEventListener("change", () => renderTrends(view()));
 $("trCbBase").addEventListener("change", () => renderTrends(view()));
@@ -1268,11 +1426,19 @@ $("bMgmt").addEventListener("click", () => { const on = document.body.classList.
 $("bTheme").addEventListener("click", () => { const r = document.documentElement, dark = r.getAttribute("data-theme") === "dark" ||
   (!r.getAttribute("data-theme") && matchMedia("(prefers-color-scheme: dark)").matches); r.setAttribute("data-theme", dark ? "light" : "dark"); });
 $("bXlsx").addEventListener("click", exportXlsx);
+["tmComm", "tmDest", "tmVat"].forEach(id => $(id).addEventListener("change", () => renderTransport(view())));
+$("manApply").addEventListener("click", () => { const x = parseFloat($("manAvg").value); MAN.avg = isFinite(x) && x >= 0 ? x : null; MAN.scope = $("manScope").value; saveMan(); render(); });
+$("manClear").addEventListener("click", () => { MAN.avg = null; MAN.per = {}; $("manAvg").value = ""; saveMan(); render(); });
+$("manCsv").addEventListener("click", manualCsv);
+document.addEventListener("change", e => { const t = e.target; if (!t.classList || !t.classList.contains("manIn")) return;
+  const x = parseFloat(t.value); if (isFinite(x) && x >= 0) MAN.per[t.dataset.id] = x; else delete MAN.per[t.dataset.id]; saveMan(); render(); });
 $("dqTiles").addEventListener("click", e => { const b = e.target.closest("button[data-dq]"); if (!b || !b.dataset.dq) return;
   S.dqTile = S.dqTile === b.dataset.dq ? "" : b.dataset.dq; renderQuality(); });
 document.addEventListener("click", e => {
   const th = e.target.closest("th[data-sort]");
   if (th) { const k = th.dataset.sort, i = +th.dataset.i, cur = S.sort[k]; S.sort[k] = {i, dir: cur && cur.i === i ? -cur.dir : -1}; render(); return; }
+  if (e.target.id === "manBannerClear") { MAN.avg = null; MAN.per = {}; $("manAvg").value = ""; saveMan(); render(); return; }
+  const pl = e.target.closest("[data-place]"); if (pl) { const p = pl.getAttribute("data-place"); $("fPlace").value = $("fPlace").value === p ? "" : p; render(); return; }
   const g = e.target.closest("[data-goto]"); if (g) { openContract(g.getAttribute("data-goto")); return; }
   const cpr = e.target.closest("tr.row[data-cp]");
   if (cpr) { S.cpOpen = S.cpOpen || new Set(); const id = cpr.dataset.cp; S.cpOpen.has(id) ? S.cpOpen.delete(id) : S.cpOpen.add(id); renderCbot(view()); return; }

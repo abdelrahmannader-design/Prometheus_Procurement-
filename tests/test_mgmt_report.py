@@ -326,3 +326,31 @@ class StorageWindowBenchmarkTests(unittest.TestCase):
         m = mr.build(inputs())
         self.assertEqual(mr.MATCHED, "Consumption-day CBOT")
         self.assertAlmostEqual(m["kpis"]["cbot_net_usd"], sum(r["usd"] for r in m["cbot"] if r["assessable"]))
+
+
+class RouteFreightTests(unittest.TestCase):
+    def test_no_route_freight_leaves_the_including_transport_comparison_out(self):
+        inp = inputs()
+        c = inp["contracts"][0]
+        c.update(landed_excl_egp_mt=c["landed_egp_mt"] - (c.get("freight_egp_mt") or 0), freight_egp_mt=None,
+                 freight_note="No freight table route", loading_place="دمياط", destination="النوبارية")
+        m = mr.build(inp)
+        rows = [r for r in m["savings"] if r["contract_id"] == c["id"]]
+        self.assertTrue(rows)
+        self.assertTrue(all(r["saving"] is None and r["cost"] is None for r in rows))
+        self.assertTrue(all(r["saving_excl"] is not None for r in rows))
+        ex = [e for e in m["excluded"] if e["category"] == "Inland freight not recorded"]
+        self.assertEqual([e["contract_id"] for e in ex], [c["id"]])
+        self.assertAlmostEqual(ex[0]["mt"], sum(r["mt"] for r in rows))
+        self.assertAlmostEqual(m["kpis"]["historical_mt"], sum(r["mt"] for r in m["savings"] if r["saving"] is not None))
+        self.assertTrue(m["management_ready"], [v for v in m["validation"] if not v["passed"]])
+
+    def test_route_freight_is_added_to_the_landed_cost_without_freight(self):
+        inp = inputs()
+        c = inp["contracts"][0]
+        base = c["landed_egp_mt"] - (c.get("freight_egp_mt") or 0)
+        c.update(landed_excl_egp_mt=base, freight_egp_mt=343.98)
+        m = mr.build(inp)
+        r = next(x for x in m["savings"] if x["contract_id"] == c["id"])
+        self.assertAlmostEqual(r["cost"], base + 343.98)
+        self.assertAlmostEqual(r["cost_excl"], base)

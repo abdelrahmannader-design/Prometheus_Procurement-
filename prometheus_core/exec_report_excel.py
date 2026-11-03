@@ -24,7 +24,7 @@ SHEETS = ("Management Summary", "Contract Master", "Local Market Price History",
           "Daily Consumption Allocation", "Savings vs Local", "Contract Savings Summary",
           "CBOT Fixed vs Consumption", "Contract CBOT Performance",
           "Open Contracts vs Local Today", "Excluded & Missing Data", "Validation & Sources",
-          "Local Purchases", "Monthly Trend")
+          "Local Purchases", "Monthly Trend", "Freight Map")
 NAVY, GREEN, RED, GREY, AMBER = "1F3A5F", "1A7A1A", "B3261E", "6B7280", "9A6B00"
 M0, M2, PCT = "#,##0;[Red]-#,##0", "#,##0.00;[Red]-#,##0.00", "0.0%"
 NA = "\"N/A — Missing Source Data\""  # Excel string literal for unsupported calculations
@@ -98,6 +98,17 @@ def place(b, name, after):
                     if names.index(name) > names.index(after) else 0)
 
 
+REGIONS = {"الدخيلة": "Alexandria", "برج العرب": "Alexandria", "أبو قير": "Alexandria",
+           "دمياط (ميدسوفتس + A3C)": "Damietta", "دمياط": "Damietta",
+           "مخازن السلام - مخازن النيل": "Cairo / Giza", "اكما (مدينة السلام)": "Cairo / Giza",
+           "مدينة السادس من أكتوبر": "Cairo / Giza", "أبو رواش": "Cairo / Giza", "السادات": "Sadat",
+           "النوبارية": "Beheira"}
+
+
+def region_of(place):
+    return REGIONS.get(place or "", "Other" if place else "Not recorded")
+
+
 def col(sheet, letter, last):
     return f"{q(SHEETS[sheet])}!${letter}${FIRST}:${letter}${last}"
 
@@ -117,6 +128,7 @@ def build_workbook(model, path):
     _monthly(b, model, last)
     last["op"] = _open(b, model)
     last["ex"] = _excluded(b, model)
+    _freight_map(b, model, last)
     _validation(b, model, last)
     _summary(b, model, last)
     for ws in b.wb.worksheets:
@@ -147,9 +159,11 @@ def _contract_master(b, m):
              "Pricing Date", "Exchange Rate", "FX Basis", "Landed Cost Incl. Transport EGP/MT", "Pricing Status",
              "Source Record ID", "Fixing Note", "Base", "Storage Start Date", "Receipt Status",
              "Pricing Status Class", "Final CIF USD/MT", "Form 4 FX", "Form 4 Date", "Inland Transport EGP/MT",
-             "Discharge EGP/MT", "Clearance EGP/MT", "Landed Cost Excl. Transport EGP/MT", "Reconciliation Flags"]
+             "Discharge EGP/MT", "Clearance EGP/MT", "Landed Cost Excl. Transport EGP/MT", "Reconciliation Flags",
+             "Loading Place", "Plant (Destination)", "Loading Region", "Inland Freight Basis",
+             "Route Rate Excl. VAT EGP/MT", "Route Rate Applied", "Freight Previously Stored in App EGP/MT", "Freight Note"]
     widths = [9, 22, 16, 11, 11, 9, 10, 10, 11, 10, 10, 11, 24, 9, 9, 10, 14, 9, 10, 26, 11, 13, 9, 11, 11,
-              10, 16, 40, 8, 12, 24, 13, 10, 9, 11, 11, 10, 10, 12, 50]
+              10, 16, 40, 8, 12, 24, 13, 10, 9, 11, 11, 10, 10, 12, 50, 22, 12, 22, 48, 11, 13, 13, 50]
     last = b.table(ws, "ContractMaster", heads, len(rows), widths)
     for i, c in enumerate(rows):
         r = FIRST + i
@@ -197,10 +211,19 @@ def _contract_master(b, m):
         b.put(ws, r, 36, blank(c.get("freight_egp_mt")) if c.get("freight_egp_mt") is not None else "N/A — Missing Source Data", M2)
         b.put(ws, r, 37, blank(c.get("discharge_egp_mt")), M2)
         b.put(ws, r, 38, blank(c.get("clearance_egp_mt")), M2)
-        b.f(ws, r, 39, f'=IF(AND(ISNUMBER(Y{r}),ISNUMBER(AJ{r})),Y{r}-AJ{r},{NA})',
-            (c["landed_egp_mt"] - c["freight_egp_mt"]) if None not in (c.get("landed_egp_mt"), c.get("freight_egp_mt"))
-            else "N/A — Missing Source Data", M2)
+        lx = c.get("landed_excl_egp_mt") if "landed_excl_egp_mt" in c else (
+            (c["landed_egp_mt"] - c["freight_egp_mt"]) if None not in (c.get("landed_egp_mt"), c.get("freight_egp_mt")) else None)
+        if c.get("freight_egp_mt") is not None and c.get("landed_egp_mt") is not None:
+            b.f(ws, r, 39, f'=IF(AND(ISNUMBER(Y{r}),ISNUMBER(AJ{r})),Y{r}-AJ{r},{NA})', lx, M2)
+        else:   # no route freight: the landed cost without inland freight as recorded
+            b.put(ws, r, 39, lx if lx is not None else "N/A — Missing Source Data", M2)
         b.put(ws, r, 40, "; ".join(c.get("flags") or []), color=AMBER if c.get("flags") else None)
+        b.put(ws, r, 41, c.get("loading_place") or "Not recorded"); b.put(ws, r, 42, c.get("destination") or "Not recorded")
+        b.put(ws, r, 43, region_of(c.get("loading_place_map") or c.get("loading_place")))
+        b.put(ws, r, 44, c.get("freight_basis") or "", color=RED if c.get("freight_egp_mt") is None and "freight_basis" in c else None)
+        b.put(ws, r, 45, blank(c.get("route_rate_ex")), M2); b.put(ws, r, 46, c.get("route_rate_which") or "")
+        b.put(ws, r, 47, blank(c.get("freight_app_egp_mt")), M2)
+        b.put(ws, r, 48, c.get("freight_note") or "")
     return last
 
 
@@ -306,20 +329,25 @@ def _savings(b, m):
     cmap = {c["id"]: c for c in m["contracts"]}
     for i, s in enumerate(rows):
         r = FIRST + i
+        na_ = "N/A — Missing Source Data"
         for j, v in enumerate([s["contract"], s["contract_id"], s["supplier"], s["commodity"], s["date"],
-                               s["mt"], s["cost"], s["local"], s["local_date"], s["local_age"],
+                               s["mt"], s["cost"] if s["cost"] is not None else na_, s["local"], s["local_date"], s["local_age"],
                                s["local_source"]], start=1):
             b.put(ws, r, j, blank(v), M0 if j == 6 else (M2 if j in (7, 8) else None))
-        b.f(ws, r, 12, f"=H{r}-G{r}", s["saving_mt"], M2)
-        b.f(ws, r, 13, f"=L{r}*F{r}", s["saving"], M0)
+        # No route-specific freight → no including-transport cost: N/A, left out of the totals.
+        b.f(ws, r, 12, f'=IF(ISNUMBER(G{r}),H{r}-G{r},{NA})', s["saving_mt"] if s["saving_mt"] is not None else na_, M2)
+        b.f(ws, r, 13, f'=IF(ISNUMBER(L{r}),L{r}*F{r},{NA})', s["saving"] if s["saving"] is not None else na_, M0)
         b.put(ws, r, 14, s["cif_basis"]); b.put(ws, r, 15, s["method"]); b.put(ws, r, 16, s["quality"])
         b.put(ws, r, 17, s["local_key"])
         b.f(ws, r, 18, f"=H{r}*F{r}", s["local"] * s["mt"], M0)
         b.put(ws, r, 19, s["base"])
         b.put(ws, r, 20, s["date"][:7])
         b.put(ws, r, 21, s["freight"] if s["freight"] is not None else "N/A — Missing Source Data", M2)
-        b.f(ws, r, 22, f'=IF(ISNUMBER(U{r}),G{r}-U{r},{NA})',
-            s["cost_excl"] if s["cost_excl"] is not None else "N/A — Missing Source Data", M2)
+        if s["cost"] is not None:
+            b.f(ws, r, 22, f'=IF(ISNUMBER(U{r}),G{r}-U{r},{NA})',
+                s["cost_excl"] if s["cost_excl"] is not None else "N/A — Missing Source Data", M2)
+        else:  # landed cost without inland freight, as recorded (no freight to take off)
+            b.put(ws, r, 22, s["cost_excl"] if s["cost_excl"] is not None else "N/A — Missing Source Data", M2)
         b.put(ws, r, 23, s["local_transport"] if s["local_transport"] is not None else "N/A — Missing Source Data", M2)
         b.f(ws, r, 24, f'=IF(ISNUMBER(W{r}),H{r}-W{r},{NA})',
             s["local_excl"] if s["local_excl"] is not None else "N/A — Missing Source Data", M2)
@@ -387,10 +415,10 @@ def _contract_savings(b, m, last):
         b.put(ws, r, 1, c["id"]); b.put(ws, r, 2, c["contract"]); b.put(ws, r, 3, c.get("supplier"))
         b.put(ws, r, 4, c.get("commodity"))
         b.f(ws, r, 5, f"=SUMIFS({col(3, 'G', last['al'])},{col(3, 'B', last['al'])},A{r})", c["consumed_mt"], M0)
-        b.f(ws, r, 6, f"=SUMIFS({col(4, 'F', last['sv'])},{col(4, 'B', last['sv'])},A{r})", h["priced_mt"], M0)
+        b.f(ws, r, 6, f'=SUMIFS({col(4, "F", last["sv"])},{col(4, "B", last["sv"])},A{r},{col(4, "G", last["sv"])},">0")', h["priced_mt"], M0)
         b.f(ws, r, 7, f"=E{r}-F{r}", c["consumed_mt"] - h["priced_mt"], M0)
         b.put(ws, r, 8, blank(c.get("landed_egp_mt")), M2)
-        b.f(ws, r, 9, f'=IF(F{r}=0,"",SUMIFS({col(4, "R", last["sv"])},{col(4, "B", last["sv"])},A{r})/F{r})',
+        b.f(ws, r, 9, f'=IF(F{r}=0,"",SUMIFS({col(4, "R", last["sv"])},{col(4, "B", last["sv"])},A{r},{col(4, "G", last["sv"])},">0")/F{r})',
             h["local_wavg"], M2)
         b.f(ws, r, 10, f'=IF(F{r}=0,"",SUMIFS({col(4, "M", last["sv"])},{col(4, "B", last["sv"])},A{r}))',
             h["saving"], M0, bold=True)
@@ -554,6 +582,34 @@ def _cbot_performance(b, m, last):
     return end
 
 
+# ── 6c. Freight Map ──────────────────────────────────────────────────
+
+def _freight_map(b, m, last):
+    ws = b.ws(SHEETS.index("Freight Map"))
+    place(b, ws.title, "Open Contracts vs Local Today")
+    rows = sorted(m.get("freight_map") or [], key=lambda r: (r["commodity"], region_of(r["place"]), r["place"], r["destination"]))
+    b.title(ws, "Freight Map", "Inland freight by commodity, loading place and plant, from the freight approval stored in the "
+            "app (EGP/MT excl. VAT). The previous rate applies to deliveries before the effective date. Each contract uses "
+            "its own route (Contract Master, columns AO–AV) — no average is used; a 0 rate needs checking before use.")
+    heads = ["Commodity", "Loading Place", "Loading Region", "Plant (Destination)", "Rate Excl. VAT EGP/MT",
+             "Previous Rate Excl. VAT", "Effective From", "VAT %", "Rate Incl. VAT EGP/MT", "Previous Rate Incl. VAT",
+             "Contracts on Route", "Note"]
+    end = b.table(ws, "FreightMap", heads, len(rows), [11, 26, 14, 14, 12, 12, 12, 7, 12, 12, 10, 40])
+    CM = lambda L_: col(1, L_, last["cm"])
+    for i, x in enumerate(rows):
+        r = FIRST + i
+        b.put(ws, r, 1, x["commodity"]); b.put(ws, r, 2, x["place"]); b.put(ws, r, 3, region_of(x["place"]))
+        b.put(ws, r, 4, x["destination"]); b.put(ws, r, 5, blank(x.get("rate")), M2); b.put(ws, r, 6, blank(x.get("old_rate")), M2)
+        b.put(ws, r, 7, x.get("effective") or ""); b.put(ws, r, 8, x.get("vat_pct") or 14.0)
+        b.f(ws, r, 9, f'=IF(ISNUMBER(E{r}),E{r}*(1+H{r}/100),"")', (x["rate"] * (1 + (x.get("vat_pct") or 14.0) / 100)) if x.get("rate") is not None else None, M2)
+        b.f(ws, r, 10, f'=IF(ISNUMBER(F{r}),F{r}*(1+H{r}/100),"")', (x["old_rate"] * (1 + (x.get("vat_pct") or 14.0) / 100)) if x.get("old_rate") is not None else None, M2)
+        n = sum(1 for c in m["contracts"] if c.get("route_key") == x.get("key"))
+        b.put(ws, r, 11, n, M0)
+        b.put(ws, r, 12, "0 in the approval — check before use" if not x.get("rate") else "", color=RED if not x.get("rate") else None)
+    ws.freeze_panes = "C5"
+    return end
+
+
 # ── 6b. Monthly Trend ────────────────────────────────────────────────
 
 def _monthly(b, m, last):
@@ -571,10 +627,10 @@ def _monthly(b, m, last):
         r = FIRST + i
         sv = [s for s in m["savings"] if s["date"][:7] == mo]
         cb = [x for x in m["cbot"] if x["assessable"] and x["date"][:7] == mo]
-        sav, mt = sum(s["saving"] for s in sv), sum(s["mt"] for s in sv)
+        sav, mt = sum(s["saving"] for s in sv if s["saving"] is not None), sum(s["mt"] for s in sv if s["saving"] is not None)
         b.put(ws, r, 1, mo)
         b.f(ws, r, 2, f"=SUMIFS({SV('M')},{SV('T')},A{r})", sav, M0)
-        b.f(ws, r, 3, f"=SUMIFS({SV('F')},{SV('T')},A{r})", mt, M0)
+        b.f(ws, r, 3, f'=SUMIFS({SV("F")},{SV("T")},A{r},{SV("G")},">0")', mt, M0)
         b.f(ws, r, 4, f'=IF(C{r}=0,"",B{r}/C{r})', (sav / mt) if mt else None, M2)
         b.f(ws, r, 5, f"=SUMIFS({CB('S')},{CB('Z')},A{r})", sum(x["usd"] for x in cb), M0)
         b.f(ws, r, 6, f'=SUMIFS({CB("S")},{CB("Z")},A{r},{CB("S")},">0")', sum(x["usd"] for x in cb if x["usd"] > 0), M0)
@@ -786,6 +842,10 @@ def _validation(b, m, last):
         "incl. inland freight vs local quote + local transport; Excluding transport = landed cost excl. inland "
         "freight vs the local quote itself. Ocean freight stays inside CIF in both. Missing transport is shown "
         "as 'N/A — Missing Source Data', never as zero, and that row is left out of that scenario's total.",
+        "Inland freight is route-specific, never an average: the contract's own route entry, else the freight approval "
+        "rate for its commodity, loading place and plant in force on its delivery date (previous rate before the effective "
+        "date) + 14% VAT (Freight Map; Contract Master AO–AV). No matching route = 'N/A — add the freight manually' and "
+        "that contract is compared excluding transport only.",
         "Landed cost: CIF × FX + discharge + clearance (+ inland freight in the incl. scenario). FX = Form 4 once "
         "entered (all commodities except SBM); historical rows keep their recorded basis; open contracts without "
         "Form 4 use the latest daily market FX, labelled 'Latest market FX — provisional (Form 4 pending)', and "
@@ -838,8 +898,8 @@ def _summary(b, m, last):
     OP = lambda c: col(8, c, last["op"])
     cards = [
         ("Historical savings vs local — incl. transport, EGP", f"=SUM({SV('M')})", k["historical_saving_egp"],
-         (f'="Excl. transport: EGP "&TEXT(SUM({SV("Z")}),"#,##0")&" · {k["historical_mt"]:,.0f} MT · actual, FIFO estimated"',
-          f"Excl. transport: EGP {k['historical_saving_excl_egp']:,.0f} · {k['historical_mt']:,.0f} MT · actual, FIFO estimated")),
+         (f'="{k["historical_mt"]:,.0f} MT with route freight · excl. transport: EGP "&TEXT(SUM({SV("Z")}),"#,##0")&" on {k["historical_mt_excl"]:,.0f} MT · FIFO estimated"',
+          f"{k['historical_mt']:,.0f} MT with route freight · excl. transport: EGP {k['historical_saving_excl_egp']:,.0f} on {k['historical_mt_excl']:,.0f} MT · FIFO estimated")),
         ("Open potential vs local — confirmed, incl. transport, EGP", f'=SUMIFS({OP("AP")},{OP("AW")},"Confirmed")',
          k["open_fixed_potential_egp"],
          (f'="Excl. transport: EGP "&TEXT(SUMIFS({OP("AO")},{OP("AW")},"Confirmed"),"#,##0")&" · indicative / provisional EGP "&TEXT(SUMIFS({OP("AP")},{OP("AW")},"Indicative / provisional"),"#,##0")&" kept separate"',
@@ -907,7 +967,7 @@ def _summary(b, m, last):
         rr = r + 2 + i
         b.put(ws, rr, 2, c["base"], bold=True)
         b.f(ws, rr, 3, f"=SUMIFS({SV('M')},{SV('S')},B{rr})", c["saving_egp"], M0)
-        b.f(ws, rr, 4, f"=SUMIFS({SV('F')},{SV('S')},B{rr})", c["priced_mt"], M0)
+        b.f(ws, rr, 4, f'=SUMIFS({SV("F")},{SV("S")},B{rr},{SV("G")},">0")', c["priced_mt"], M0)
         b.f(ws, rr, 5, f'=IF(D{rr}=0,"",C{rr}/D{rr})', c["saving_egp_mt"], M0)
         b.f(ws, rr, 6, f'=SUMIFS({OP("AP")},{OP("AU")},B{rr},{OP("AW")},"Confirmed")', c["open_fixed_egp"], M0)
         b.f(ws, rr, 7, f'=SUMIFS({OP("AP")},{OP("AU")},B{rr},{OP("AW")},"Indicative / provisional")', c["open_indicative_egp"], M0)
