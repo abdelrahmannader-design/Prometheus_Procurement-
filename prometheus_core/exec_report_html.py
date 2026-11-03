@@ -822,10 +822,40 @@ function headCell(r, sc) {
   const h = r["headroom_" + sc.k]; if (!isN(h)) return NA_;
   return `<span class="${sg(h)}"><b>${h >= 0 ? "+" : ""}${f2(h)}</b></span> <span class="note">${esc(r.unit)}</span><br><span class="note">${h >= 0 ? "CBOT can rise this much" : "local already cheaper"} · vs ${esc(r.ref_cbot_basis)} ${f2(r.ref_cbot)}</span>`;
 }
+// How an imported cost is built, column by column: CIF $/MT × FX = CIF EGP/MT,
+// + discharge + clearance = cost excl. transport, + inland freight = cost incl.
+// transport. g(r) returns the parts for an open-position row or a contract.
+const gOpen = o => ({cif: o.cif, fx: o.fx, cifE: o.cif_egp, disc: o.discharge, clr: o.clearance, discB: o.disc_basis, clrB: o.clr_basis,
+  discMiss: o.disc_missing, clrMiss: o.clr_missing, fr: o.freight, frB: o.man ? manualFor(CI[o.contract_id] || {})[1] : o.freight_basis,
+  frNote: (CI[o.contract_id] || {}).freight_note, excl: o.cost_excl, incl: o.cost_incl});
+const gCon = c => { const u = c.is_open && c.current && isN(c.current.cost_excl) ? c.current : null,
+    cif = u ? u.cif : c.cif_usd_mt, fxv = u ? u.fx : c.fx, disc = u ? u.disc : (c.discharge_egp_mt || 0), clr = u ? u.clr : (c.clearance_egp_mt || 0),
+    man = isN(c._man), fr = man ? c._man : c.freight_egp_mt, excl = c.landed_excl_egp_mt;
+  return {cif, fx: fxv, cifE: isN(cif) && isN(fxv) ? cif * fxv : null, disc, clr, discB: c.disc_basis, clrB: c.clr_basis, discMiss: c.disc_missing, clrMiss: c.clr_missing,
+    fr, frB: man ? manualFor(c)[1] : c.freight_basis, frNote: c.freight_note, excl, incl: isN(excl) && isN(fr) ? excl + fr : null}; };
+function bdTip(p, k) {
+  if (!isN(p.excl)) return "";
+  const s = `CIF ${f2(p.cif)} $/MT × FX ${fx(p.fx, 4)} = ${f2(p.cifE)} + discharge ${f2(p.disc)} + clearance ${f2(p.clr)} = ${f2(p.excl)} EGP/MT excl. transport`;
+  return k === "excl" ? s : isN(p.incl) ? `${s} + inland freight ${f2(p.fr)} (${p.frB}) = ${f2(p.incl)} EGP/MT incl. transport` : `${s} · inland freight not recorded, so no figure incl. transport`;
+}
+const feeCell = (v, b, miss) => miss ? `<span class="stale">0.00</span><br><span class="note">Not recorded — cost excludes it</span>` :
+  `${f2(v)}<br><span class="note">${esc(b || "")}</span>`;
+function bdCols(g) {
+  const L_ = scs(), inc = L_.some(sc => sc.k === "incl");
+  return [
+    {h: "CIF × FX = CIF EGP/MT", n: 1, v: r => g(r).cifE, html: r => { const p = g(r); return isN(p.cifE) ? `<b>${f2(p.cifE)}</b><br><span class="note">${f2(p.cif)} × ${fx(p.fx, 4)}</span>` : NA_; }},
+    {h: "+ Discharge EGP/MT", n: 1, v: r => g(r).disc, html: r => { const p = g(r); return feeCell(p.disc, p.discB, p.discMiss); }},
+    {h: "+ Clearance EGP/MT", n: 1, v: r => g(r).clr, html: r => { const p = g(r); return feeCell(p.clr, p.clrB, p.clrMiss); }},
+    ...(inc ? [{h: "+ Inland freight EGP/MT", n: 1, v: r => g(r).fr, html: r => { const p = g(r);
+      return isN(p.fr) ? `<b>${f2(p.fr)}</b><br><span class="note" title="${esc(p.frB || "")}">${esc(p.frB || "")}</span>`
+        : `<span class="na nm">N/A — add manually</span><br><span class="note">${esc(p.frNote || p.frB || "no route in the freight table")}</span>`; }}] : [])];
+}
+const costCol = (h, sc, g) => ({h, n: 1, na: 1, v: sc.ocost, html: r => { const v = sc.ocost(r); if (!isN(v)) return NA_;
+  return `<b data-tip="${esc(bdTip(g(r), sc.k))}">${f2(v)}</b><br><span class="note">${sc.k === "incl" ? "= excl. + freight" : "= CIF EGP + disch. + clear."}</span>`; }});
 function posCols() {
   const L_ = scs();
-  return [
-    ...L_.flatMap(sc => [{h: `Imported cost now ${sc.h}`, n: 1, na: 1, v: sc.ocost, f: f2}, {h: `Local ${sc.h}`, n: 1, na: 1, v: sc.olocal, f: f2},
+  return [...bdCols(gOpen),
+    ...L_.flatMap(sc => [costCol(`= Imported cost now ${sc.h}`, sc, gOpen), {h: `Local ${sc.h}`, n: 1, na: 1, v: sc.olocal, f: f2},
       {h: `Saving/MT now ${sc.h}`, n: 1, na: 1, v: sc.oper, f: f2, col: 1}]),
     {h: "Local date / age", v: r => r.local_age, html: r => (r.local_date ? esc(r.local_date) + "<br>" : "") + ageBadge(r.local_age)},
     ...L_.map(sc => ({h: `Break-even CBOT ${sc.h}`, n: 1, v: r => r["be_cbot_" + sc.k],
@@ -937,7 +967,8 @@ function ocols() {
     {h: "Fixed / Latest CBOT", n: 1, v: r => isN(r.fixed_cbot) ? r.fixed_cbot : r.latest_cbot, html: cbotCellO},
     {h: "Final / Indicative CIF $/MT", n: 1, v: r => r.cif, html: cifCellO},
     {h: "Form 4 / Latest FX", n: 1, v: r => r.fx, html: fxCellO},
-    ...L_.flatMap(sc => [{h: `Imported cost ${sc.h}`, n: 1, na: 1, v: sc.ocost, f: f2}, {h: `Local ${sc.h}`, n: 1, na: 1, v: sc.olocal, f: f2}]),
+    ...bdCols(gOpen),
+    ...L_.flatMap(sc => [costCol(`= Imported cost ${sc.h}`, sc, gOpen), {h: `Local ${sc.h}`, n: 1, na: 1, v: sc.olocal, f: f2}]),
     {h: "Local date / age", v: r => r.local_age, html: r => (r.local_date ? esc(r.local_date) + "<br>" : "") + ageBadge(r.local_age)},
     ...L_.map(sc => ({h: `Savings/MT ${sc.h}`, n: 1, na: 1, v: sc.oper, f: f2, col: 1})),
     ...L_.map(sc => ({h: `Total potential ${sc.h}`, n: 1, na: 1, v: sc.pot, col: 1, tot: rs => sum(rs, sc.pot)})),
@@ -1063,13 +1094,15 @@ function exportXlsx() {
     ["Open vs Local", [["Contract", "Contract ID", "Supplier", "Commodity", "Origin", "Qty MT", "Available MT", "Outstanding MT", "Remaining MT", "Storage Start", "Receipt Status",
         "Premium", "Premium Unit", "Futures Month", "Fixed CBOT", "Latest CBOT", "Latest CBOT Date", "CBOT Note", "CIF USD/MT", "CIF Basis", "FX", "FX Basis", "FX Date", "Form 4 Status",
         "Discharge EGP/MT", "Clearance EGP/MT", "Import Inland Transport EGP/MT", ...L_.flatMap(sc => [`Imported Cost ${sc.h}`, `Local ${sc.h}`]), "Local Date", "Local Age (days)", "Local Price Age Status",
-        ...L_.flatMap(sc => [`Savings/MT ${sc.h}`, `Total Potential ${sc.h}`]), "Pricing Status", "Valuation Class", "Totals Bucket", "Issues"],
+        ...L_.flatMap(sc => [`Savings/MT ${sc.h}`, `Total Potential ${sc.h}`]), "Pricing Status", "Valuation Class", "Totals Bucket", "Issues",
+        "CIF x FX EGP/MT", "Discharge Source", "Clearance Source", "Inland Freight Basis"],
       ...v.op.map(r => [r.contract, r.contract_id, r.supplier, r.commodity, r.origin, r.qty_mt, r.available_mt, r.outstanding_mt, r.unconsumed_mt, r.storage_start || "Not recorded", r.receipt_status,
         flatC(r.pricing_class) ? "flat price" : nv(r.premium), r.unit, r.futures, isN(r.fixed_cbot) ? r.fixed_cbot : (flatC(r.pricing_class) ? "" : "Not fixed"), r.latest_cbot, r.latest_cbot_date, r.cbot_note,
         nv(r.cif), r.cif_basis, nv(r.fx), r.fx_basis, r.fx_date, r.form4_status,
         r.disc_missing ? "Not recorded" : r.discharge, r.clr_missing ? "Not recorded" : r.clearance, nv(r.freight), ...L_.flatMap(sc => [nv(sc.ocost(r)), nv(sc.olocal(r))]), r.local_date || NA, r.local_age, ageTxt(r.local_age),
         ...L_.flatMap(sc => [nv(sc.oper(r)), nv(sc.pot(r))]), r.pricing_class, r.class,
-        {c: "Confirmed", i: "Indicative / provisional", x: "Excluded — missing source data"}[obucket(r)], (r.issues || []).concat(r.notes || []).join("; ")])]]];
+        {c: "Confirmed", i: "Indicative / provisional", x: "Excluded — missing source data"}[obucket(r)], (r.issues || []).concat(r.notes || []).join("; "),
+        nv(r.cif_egp), r.disc_basis || "", r.clr_basis || "", gOpen(r).frB || ""])]]];
   const files = [["[Content_Types].xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>` +
       sheets.map((_, i) => `<Override PartName="/xl/worksheets/sheet${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join("") + "</Types>"],
     ["_rels/.rels", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`],
@@ -1092,7 +1125,9 @@ function svcols() {
   return [{h: "Contract", v: c => c.contract}, {h: "Supplier", v: c => c.supplier}, {h: "Commodity", v: c => c.commodity}, COL.storage,
     COL.premium, COL.futures, COL.fixing, COL.cif, {h: "FX (Form 4 / basis)", n: 1, v: c => c.fx, html: fxCell}, COL.pstatus,
     {h: "Compared MT", n: 1, v: c => c.z.incl.mt, tot: rs => sum(rs, c => c.z.incl.mt)},
-    ...L_.flatMap(sc => [{h: `Landed ${sc.h} EGP/MT`, n: 1, na: 1, v: c => c.z[sc.k].cost, f: f2},
+    ...bdCols(gCon),
+    ...L_.flatMap(sc => [{h: `= Landed ${sc.h} EGP/MT`, n: 1, na: 1, v: c => c.z[sc.k].cost, html: c => { const v = c.z[sc.k].cost; if (!isN(v)) return NA_;
+      return `<b data-tip="${esc(bdTip(gCon(c), sc.k))}">${f2(v)}</b><br><span class="note">${sc.k === "incl" ? "= excl. + freight" : "= CIF EGP + disch. + clear."}</span>`; }},
       {h: `Wtd avg local ${sc.h} EGP/MT`, n: 1, na: 1, v: c => c.z[sc.k].local, f: f2},
       {h: `Savings ${sc.h} EGP/MT`, n: 1, na: 1, v: c => c.z[sc.k].per, f: f2, col: 1, tf: f2, tot: rs => { const m = sum(rs, c => isN(c.z[sc.k].sav) ? c.z[sc.k].mt : null); return m ? sum(rs, c => c.z[sc.k].sav) / m : null; }},
       {h: `Total savings ${sc.h} EGP`, n: 1, na: 1, v: c => c.z[sc.k].sav, col: 1, tot: rs => sum(rs, c => c.z[sc.k].sav)}]),

@@ -1057,6 +1057,11 @@ def open_valuation(c, remaining, latest_fx, latest_cbot, as_of, opts):
         "cif": cif, "cif_basis": cif_basis, "fx": fx, "fx_basis": fx_basis, "fx_date": fx_date,
         "form4_status": "Recorded" if f4 else ("Pending / Not recorded" if c.get("is_open") else "Not recorded"),
         "discharge": disc, "clearance": clr, "freight": freight,
+        # How the imported cost is built: CIF × FX + discharge + clearance (+ inland freight).
+        "cif_egp": (cif * fx) if None not in (cif, fx) else None,
+        "disc_basis": c.get("disc_basis") or ("Not recorded — 0 used" if c.get("disc_missing") else "Contract entry"),
+        "clr_basis": c.get("clr_basis") or ("Not recorded — 0 used" if c.get("clr_missing") else "Contract entry"),
+        "freight_basis": c.get("freight_basis") or ("" if freight is not None else "N/A — add the freight manually on the contract"),
         "disc_missing": bool(c.get("disc_missing")), "clr_missing": bool(c.get("clr_missing")),
         "notes": [n for n, m in (("discharge not recorded — cost excludes it", c.get("disc_missing")),
                                  ("clearance not recorded — cost excludes it", c.get("clr_missing"))) if m],

@@ -354,3 +354,28 @@ class RouteFreightTests(unittest.TestCase):
         r = next(x for x in m["savings"] if x["contract_id"] == c["id"])
         self.assertAlmostEqual(r["cost"], base + 343.98)
         self.assertAlmostEqual(r["cost_excl"], base)
+
+
+class CostBuildUpTests(unittest.TestCase):
+    def test_open_cost_is_cif_times_fx_plus_discharge_clearance_and_freight_with_sources(self):
+        inp = inputs()
+        c = inp["contracts"][1]
+        c.update(disc_basis="Contract entry", clr_basis="Not recorded — 0 used", clearance_egp_mt=0.0, clr_missing=True,
+                 freight_basis="Freight table: X → Y, 425.53 + 14% VAT")
+        m = mr.build(inp)
+        o = next(x for x in m["open"] if x["contract_id"] == "C2")
+        self.assertAlmostEqual(o["cif_egp"], o["cif"] * o["fx"])
+        self.assertAlmostEqual(o["cost_excl"], o["cif_egp"] + o["discharge"] + o["clearance"])
+        self.assertAlmostEqual(o["cost_incl"], o["cost_excl"] + o["freight"])
+        self.assertEqual((o["disc_basis"], o["clr_basis"]), ("Contract entry", "Not recorded — 0 used"))
+        self.assertTrue(o["clr_missing"])
+        self.assertTrue(o["freight_basis"].startswith("Freight table"))
+
+    def test_sources_default_when_the_app_does_not_send_them(self):
+        inp = inputs()
+        inp["contracts"][1].update(freight_egp_mt=None, disc_missing=True)
+        o = next(x for x in mr.build(inp)["open"] if x["contract_id"] == "C2")
+        self.assertEqual(o["disc_basis"], "Not recorded — 0 used")
+        self.assertEqual(o["clr_basis"], "Contract entry")
+        self.assertIn("add the freight manually", o["freight_basis"])
+        self.assertIsNone(o["cost_incl"])

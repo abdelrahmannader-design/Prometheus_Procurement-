@@ -161,9 +161,10 @@ def _contract_master(b, m):
              "Pricing Status Class", "Final CIF USD/MT", "Form 4 FX", "Form 4 Date", "Inland Transport EGP/MT",
              "Discharge EGP/MT", "Clearance EGP/MT", "Landed Cost Excl. Transport EGP/MT", "Reconciliation Flags",
              "Loading Place", "Plant (Destination)", "Loading Region", "Inland Freight Basis",
-             "Route Rate Excl. VAT EGP/MT", "Route Rate Applied", "Freight Previously Stored in App EGP/MT", "Freight Note"]
+             "Route Rate Excl. VAT EGP/MT", "Route Rate Applied", "Freight Previously Stored in App EGP/MT", "Freight Note",
+             "Discharge Source", "Clearance Source"]
     widths = [9, 22, 16, 11, 11, 9, 10, 10, 11, 10, 10, 11, 24, 9, 9, 10, 14, 9, 10, 26, 11, 13, 9, 11, 11,
-              10, 16, 40, 8, 12, 24, 13, 10, 9, 11, 11, 10, 10, 12, 50, 22, 12, 22, 48, 11, 13, 13, 50]
+              10, 16, 40, 8, 12, 24, 13, 10, 9, 11, 11, 10, 10, 12, 50, 22, 12, 22, 48, 11, 13, 13, 50, 26, 26]
     last = b.table(ws, "ContractMaster", heads, len(rows), widths)
     for i, c in enumerate(rows):
         r = FIRST + i
@@ -224,6 +225,8 @@ def _contract_master(b, m):
         b.put(ws, r, 45, blank(c.get("route_rate_ex")), M2); b.put(ws, r, 46, c.get("route_rate_which") or "")
         b.put(ws, r, 47, blank(c.get("freight_app_egp_mt")), M2)
         b.put(ws, r, 48, c.get("freight_note") or "")
+        b.put(ws, r, 49, c.get("disc_basis") or "", color=AMBER if c.get("disc_missing") else None)
+        b.put(ws, r, 50, c.get("clr_basis") or "", color=AMBER if c.get("clr_missing") else None)
     return last
 
 
@@ -683,11 +686,12 @@ def _open(b, m):
              "Pricing Status", "Valuation Class", "Open Contract", "Delivery Confirmed", "Base", "Issues",
              "Totals Bucket", "CBOT Factor", "CBOT Used For Valuation", "CBOT Basis",
              "Break-even CBOT Excl. Transport", "Break-even CBOT Incl. Transport", "Headroom Excl. Transport",
-             "Headroom Incl. Transport", "Local Equivalent Premium (CIF basis)"]
+             "Headroom Incl. Transport", "Local Equivalent Premium (CIF basis)",
+             "CIF x FX EGP/MT", "Discharge Source", "Clearance Source", "Inland Freight Basis"]
     last = b.table(ws, "OpenVsLocal", heads, len(rows),
                    [20, 9, 16, 11, 11, 9, 10, 10, 10, 10, 10, 11, 12, 22, 9, 10, 9, 10, 10, 11, 44,
                     10, 34, 9, 30, 11, 14, 10, 10, 11, 12, 12, 12, 10, 12, 11, 9, 30, 12, 12, 14, 14,
-                    12, 30, 8, 9, 8, 30, 22, 8, 11, 16, 13, 13, 13, 13, 14])
+                    12, 30, 8, 9, 8, 30, 22, 8, 11, 16, 13, 13, 13, 13, 14, 12, 26, 26, 50])
     na = "N/A — Missing Source Data"
     v = lambda x: na if x is None else x
     for i, o in enumerate(rows):
@@ -748,6 +752,11 @@ def _open(b, m):
         b.f(ws, r, 55, f'=IF(AND(ISNUMBER(BA{r}),ISNUMBER(AY{r})),BA{r}-AY{r},{NA})', v(o.get("headroom_excl")), M2, bold=True)
         b.f(ws, r, 56, f'=IF(AND(ISNUMBER(BB{r}),ISNUMBER(AY{r})),BB{r}-AY{r},{NA})', v(o.get("headroom_incl")), M2, bold=True)
         b.f(ws, r, 57, f'=IF(ISNUMBER(BC{r}),BC{r}+O{r},{NA})', v(o.get("local_eq_premium")), M2)
+        # Where each part of the imported cost comes from (AE = BF + AB + AC; AF = AE + AD).
+        b.f(ws, r, 58, f'=IF(AND(ISNUMBER(V{r}),ISNUMBER(X{r})),V{r}*X{r},{NA})', v(o.get("cif_egp")), M2)
+        b.put(ws, r, 59, o.get("disc_basis") or "", color=AMBER if o.get("disc_missing") else None)
+        b.put(ws, r, 60, o.get("clr_basis") or "", color=AMBER if o.get("clr_missing") else None)
+        b.put(ws, r, 61, o.get("freight_basis") or "", color=AMBER if o["freight"] is None else None)
     b.signs(ws, f"AM{FIRST}:AP{last}")
     b.signs(ws, f"BC{FIRST}:BD{last}")
     orange = PatternFill("solid", fgColor="FFE3B3")
