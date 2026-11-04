@@ -693,13 +693,13 @@ def _open(b, m):
     rows = m["open"]
     b.title(ws, "Open Contracts vs Local Today", "Current open valuations: unconsumed tonnes (available stock + "
             "outstanding) at the latest local price, with and without inland transport. Fixed CIF is kept as "
-            "recorded; unpriced contracts use the latest stored CBOT + premium (indicative); FX is Form 4 when "
+            "recorded; unpriced contracts use the app's live CBOT + premium (indicative; the last stored close if no live quote); FX is Form 4 when "
             "recorded, else the latest daily FX (provisional). Contracts not yet received are a current market "
             "valuation. Potential, not realized — only 'Confirmed' rows count in the confirmed total.")
     heads = ["Contract Number", "Contract ID", "Supplier", "Commodity", "Origin", "Contract Status",
              "Contract Qty MT", "Delivered MT", "Consumed MT", "Available Stock MT", "Outstanding MT",
              "Remaining (Unconsumed) MT", "Storage Start Date", "Receipt Status", "Premium", "Premium Unit",
-             "Futures Month", "Fixed CBOT", "Latest CBOT", "Latest CBOT Date", "CBOT Basis Note",
+             "Futures Month", "Fixed CBOT", "Live / Latest CBOT", "CBOT Date / Time", "CBOT Basis Note",
              "CIF USD/MT", "CIF Basis", "FX EGP/USD", "FX Basis", "FX Date", "Form 4 Status",
              "Discharge EGP/MT", "Clearance EGP/MT", "Import Inland Transport EGP/MT",
              "Imported Cost Excl. Transport EGP/MT", "Imported Cost Incl. Transport EGP/MT",
@@ -734,7 +734,8 @@ def _open(b, m):
         b.put(ws, r, 16, "" if flat else o["unit"]); b.put(ws, r, 17, "" if flat else o["futures"])
         b.put(ws, r, 18, blank(o["fixed_cbot"]) if o["fixed_cbot"] is not None else ("Not fixed" if not flat else ""), M2)
         b.put(ws, r, 19, "" if flat else blank(o["latest_cbot"]), M2)
-        b.put(ws, r, 20, "" if flat else o["latest_cbot_date"])
+        live_t = ((m.get("live_cbot") or {}).get(o["base"]) or {}).get("time") if o.get("latest_cbot_live") else None
+        b.put(ws, r, 20, "" if flat else (f"Live · {live_t}" if live_t else o["latest_cbot_date"]))
         b.put(ws, r, 21, "" if flat else o["cbot_note"], color=AMBER if "proxy" in (o["cbot_note"] or "") else None)
         b.put(ws, r, 22, v(o["cif"]), M2); b.put(ws, r, 23, o["cif_basis"])
         b.put(ws, r, 24, v(o["fx"]), "0.0000")
@@ -884,7 +885,7 @@ def _validation(b, m, last):
         "Form 4 use the latest daily market FX, labelled 'Latest market FX — provisional (Form 4 pending)', and "
         "switch automatically once Form 4 is entered. Discharge / clearance not recorded are flagged, not invented.",
         "Final CIF = (fixed CBOT + premium) × the commodity's factor. Open unpriced contracts are valued "
-        "indicatively at (latest stored CBOT + premium) × factor, labelled a proxy when the latest stored series "
+        "indicatively at (live CBOT + premium) × factor — the live quote the app uses, else the last stored close — labelled a proxy when the series "
         "is not the contract's own futures month. Flat-priced contracts keep their contract CIF; no premium is "
         "invented for them.",
         "Storage start date is shown as recorded ('Not recorded' when absent) and never assumed from the delivery "

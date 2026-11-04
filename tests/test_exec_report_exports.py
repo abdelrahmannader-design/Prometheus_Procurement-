@@ -117,7 +117,7 @@ class WorkbookTests(unittest.TestCase):
         for h in ("Import Inland Transport EGP/MT", "Savings Excl. Transport EGP/MT", "Local Price Age Status", "Storage Start Date"):
             self.assertIn(h, sv)
         op = heads("Open Contracts vs Local Today")
-        for h in ("Storage Start Date", "Premium", "Futures Month", "Fixed CBOT", "Latest CBOT", "FX Basis", "Form 4 Status",
+        for h in ("Storage Start Date", "Premium", "Futures Month", "Fixed CBOT", "Live / Latest CBOT", "FX Basis", "Form 4 Status",
                   "Imported Cost Excl. Transport EGP/MT", "Imported Cost Incl. Transport EGP/MT", "Local Price Age Status",
                   "Total Potential Excl. Transport EGP", "Total Potential Incl. Transport EGP", "Totals Bucket"):
             self.assertIn(h, op)

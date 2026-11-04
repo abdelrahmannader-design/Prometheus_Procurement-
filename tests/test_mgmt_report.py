@@ -404,3 +404,22 @@ class LocalEquivalentCbotTests(unittest.TestCase):
         self.assertIsNone(out["eq_cbot_diff"])
         flat = {"base": "SBM", "premium": 0.0, "fix": {"eligible": False}}
         self.assertIsNone(mr.equivalent_premium(flat, 25000.0, dt.date(2026, 10, 28), lambda b, d: (300.0, d), lambda d: (50.0, d))["eq_cbot"])
+
+
+class LiveCbotTests(unittest.TestCase):
+    def test_open_contracts_use_the_apps_live_cbot_like_the_app(self):
+        inp = inputs(live_cbot={"CORN": {"price": 446.0, "time": "2026-10-04 14:10:00", "symbol": "ZC=F"}})
+        m = mr.build(inp)
+        o = next(x for x in m["open"] if x["contract_id"] == "C2")
+        self.assertEqual(o["latest_cbot"], 446.0)
+        self.assertTrue(o["latest_cbot_live"])
+        self.assertAlmostEqual(o["cif"], (446.0 + 180.0) * 0.3937)
+        self.assertIn("Live CBOT from the app", o["cbot_note"])
+        self.assertEqual(o["ref_cbot_basis"], "live CBOT")
+
+    def test_without_a_live_quote_the_last_stored_close_is_used(self):
+        m = mr.build(inputs())
+        o = next(x for x in m["open"] if x["contract_id"] == "C2")
+        self.assertFalse(o["latest_cbot_live"])
+        self.assertEqual(o["latest_cbot"], 520.0)
+        self.assertEqual(o["ref_cbot_basis"], "latest stored CBOT")

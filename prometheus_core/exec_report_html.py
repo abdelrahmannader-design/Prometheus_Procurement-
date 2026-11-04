@@ -234,7 +234,7 @@ tr.rd>td{background:var(--bad-bg)}tr.rx>td{color:var(--ink2)}
   <label class="note">Contract <select class="ctl" id="cbSel"></select></label>
   <div id="cbChart"></div><div id="cbBars"></div><div id="cbSum" class="note"></div><div class="tw" style="margin-top:10px"><table id="cbDays"></table></div>
  </div>
- <div class="card"><h2>Open contracts — premium over CBOT, not yet compared</h2><p class="sub">Open CBOT contracts (including ones not yet received or with no delivery or storage date) have no consumption days to compare yet. Each is shown at the latest stored CBOT with the CIF it gives — (CBOT + premium) × factor, final for fixed contracts, indicative for unpriced ones — against today's local price, with the <b>break-even CBOT</b> (where the import would cost the same as local) and the <b>headroom</b> (how far the CBOT can rise before local is cheaper). Click a row for the full valuation.</p><div class="tw"><table id="tCbOpen"></table></div></div>
+ <div class="card"><h2>Open contracts — premium over CBOT, not yet compared</h2><p class="sub">Open CBOT contracts (including ones not yet received or with no delivery or storage date) have no consumption days to compare yet. Each is shown at the app's live CBOT (the same quote the app uses; the last stored close when the app has no live quote) with the CIF it gives — (CBOT + premium) × factor, final for fixed contracts, indicative for unpriced ones — against today's local price, with the <b>break-even CBOT</b> (where the import would cost the same as local) and the <b>headroom</b> (how far the CBOT can rise before local is cheaper). Click a row for the full valuation.</p><div class="tw"><table id="tCbOpen"></table></div></div>
  <div class="card"><h2>Contract by contract — fixed CBOT vs CBOT on each consumption day</h2><p class="sub">One row per fixed contract: tonne-weighted average CBOT on its consumption days against its fixing. Click a contract to break it down by consumption date and quantity. Saving per day = (CBOT that day − CBOT fixed) × factor × MT; positive = we fixed below the market on the day the tonnes were used (advantage), negative = missed opportunity. A benchmark, never added to the savings vs local.</p><div class="tw"><table id="tCP"></table></div></div>
 </section>
 
@@ -813,12 +813,12 @@ function cbotDaysU(c, rows) {
   rows = dayOrder(rows);
   const mt = sum(rows, r => r.mt), w = rows.filter(r => isN(r.cbot)), wm = sum(w, r => r.mt), i = rows.filter(r => isN(r.ind_diff)), im = sum(i, r => r.mt);
   const avg = wm ? sum(w, r => r.cbot * r.mt) / wm : null, lat = rows.find(r => isN(r.latest_cbot)) || {};
-  return `<thead><tr><th>Consumption date</th><th class="n">Consumed MT</th><th class="n">CBOT fixed</th><th class="n">Premium</th><th class="n">Indicative CIF $/MT</th>${BD_TH}<th class="n">CBOT that day</th><th>Price date</th><th class="n">Avg CBOT storage → last consumption</th>${LOCAL_TH}<th class="n">Latest CBOT</th><th class="n">Indicative difference</th><th class="n">Indicative USD/MT</th><th class="n">Indicative USD</th><th class="n">FX</th><th class="n">Indicative EGP</th><th>Result</th></tr></thead><tbody>` +
-    rows.map(r => `<tr><td>${esc(r.date)}</td>${td(r.mt)}<td class="n"><span class="tag pot">Not fixed yet</span></td>${td(r.premium, f2)}<td class="n" title="(latest CBOT + premium) × factor — indicative until priced">${isN(r.latest_cbot) && isN(r.premium) ? f2((r.latest_cbot + r.premium) * r.factor) : "—"}</td>${bdTds(svOf(r))}${td(r.cbot, f2)}<td>${esc(r.cbot_date || "—")}</td>${td(r.win_cbot, f2)}${localTds(r)}<td class="n">${f2(r.latest_cbot)} <span class="note">${esc(r.latest_cbot_date)}</span></td>` +
+  return `<thead><tr><th>Consumption date</th><th class="n">Consumed MT</th><th class="n">CBOT fixed</th><th class="n">Premium</th><th class="n">Indicative CIF $/MT</th>${BD_TH}<th class="n">CBOT that day</th><th>Price date</th><th class="n">Avg CBOT storage → last consumption</th>${LOCAL_TH}<th class="n">Live CBOT</th><th class="n">Indicative difference</th><th class="n">Indicative USD/MT</th><th class="n">Indicative USD</th><th class="n">FX</th><th class="n">Indicative EGP</th><th>Result</th></tr></thead><tbody>` +
+    rows.map(r => `<tr><td>${esc(r.date)}</td>${td(r.mt)}<td class="n"><span class="tag pot">Not fixed yet</span></td>${td(r.premium, f2)}<td class="n" title="(latest CBOT + premium) × factor — indicative until priced">${isN(r.latest_cbot) && isN(r.premium) ? f2((r.latest_cbot + r.premium) * r.factor) : "—"}</td>${bdTds(svOf(r))}${td(r.cbot, f2)}<td>${esc(r.cbot_date || "—")}</td>${td(r.win_cbot, f2)}${localTds(r)}<td class="n">${f2(r.latest_cbot)} <span class="note">${r.latest_cbot_live ? "live · " : ""}${esc(liveTime(r))}</span></td>` +
       `${td(r.ind_diff, f2, 1)}${td(r.ind_usd_mt, f2, 1)}${td(r.ind_usd, f0, 1)}${td(r.fx, x => fx(x, 4))}${td(r.ind_egp, f0, 1)}<td><span class="tag pot">${esc(r.result)}</span></td></tr>`).join("") +
     `<tr class="tot"><td>Total / average · ${rows.length} days</td>${td(mt)}<td class="n note">premium ${f2(c.premium)} ${esc((rows[0] || {}).unit || "")} over ${esc((rows[0] || {}).futures || "—")}</td><td></td><td></td>${bdTot(rows.map(r => Object.assign({}, svOf(r), {mt: r.mt})))}${td(avg, f2)}<td class="note">tonne-weighted</td>${td((rows.find(r => isN(r.win_cbot)) || {}).win_cbot, f2)}${localTot(eqAvg(rows))}${td(lat.latest_cbot, f2)}` +
     `${td(im ? sum(i, r => r.ind_diff * r.mt) / im : null, f2, 1)}${td(im ? sum(i, r => r.ind_usd) / im : null, f2, 1)}${td(sum(i, r => r.ind_usd), f0, 1)}<td></td>${td(sum(i, r => r.ind_egp), f0, 1)}<td class="note">Indicative — not in the CBOT totals</td></tr></tbody>` +
-    `<tfoot><tr><td colspan="30" class="note">Not priced yet: the result is fixed only when the contract is priced. Indicative = (CBOT that day − latest stored CBOT) × factor × MT, i.e. as if it were fixed at today's CBOT.</td></tr></tfoot>`;
+    `<tfoot><tr><td colspan="30" class="note">Not priced yet: the result is fixed only when the contract is priced. Indicative = (CBOT that day − live CBOT) × factor × MT, i.e. as if it were fixed at today's CBOT.</td></tr></tfoot>`;
 }
 // Each consumption date of one contract: the tonnes, the CBOT that day vs the fixing, and what it was worth.
 function cbotDays(c, rows) {
@@ -849,7 +849,7 @@ const OCB = [
   {h: "Storage start", v: r => r.storage_start, html: storageCell},
   {h: "Premium", n: 1, v: r => r.premium, html: r => premCell(r.premium, r.unit, r.pricing_class)},
   {h: "Futures month", v: r => r.futures || "—"},
-  {h: "Fixed / Latest CBOT", n: 1, v: r => isN(r.fixed_cbot) ? r.fixed_cbot : r.latest_cbot, html: cbotCellO},
+  {h: "Fixed / Live CBOT", n: 1, v: r => isN(r.fixed_cbot) ? r.fixed_cbot : r.latest_cbot, html: cbotCellO},
   {h: "CIF $/MT", n: 1, v: r => r.cif, html: cifCellO},
   {h: "FX", n: 1, v: r => r.fx, html: fxCellO},
   {h: "Pricing status", v: r => r.pricing_class, html: r => pTag(r.pricing_class)},
@@ -960,10 +960,12 @@ function renderCbot(v) {
 }
 
 // ── open tab ─────────────────────────────────────────────────────────
+// The live CBOT the app values open contracts at (its time), else the last stored close (its date).
+const liveTime = r => r.latest_cbot_live ? ((M.live_cbot || {})[r.base] || {}).time || r.latest_cbot_date : r.latest_cbot_date;
 function cbotCellO(r) {
   if (flatC(r.pricing_class)) return '<span class="note">— flat price</span>';
   const a = isN(r.fixed_cbot) ? `${f2(r.fixed_cbot)} <span class="tag ${r.fix_type === "Implied" ? "pot" : "act"}">${r.fix_type === "Implied" ? "Implied CBOT Fixing" : "Fixed"}</span>` : '<span class="tag pot">Not fixed</span>';
-  const b = isN(r.latest_cbot) ? `<br><span class="note">latest ${f2(r.latest_cbot)} · ${esc(r.latest_cbot_date)}</span>` : "";
+  const b = isN(r.latest_cbot) ? `<br><span class="note" title="${esc(r.cbot_note || "")}">${r.latest_cbot_live ? "<b>live</b>" : "latest stored"} ${f2(r.latest_cbot)} · ${esc(liveTime(r))}</span>` : "";
   const px = /proxy/i.test(r.cbot_note || "") ? `<br><span class="tag pot" title="${esc(r.cbot_note)}">Proxy series</span>` : "";
   return a + b + px;
 }
@@ -1002,7 +1004,7 @@ function ocols() {
     {h: "Remaining MT", n: 1, v: r => r.unconsumed_mt, html: r => `<b>${f0(r.unconsumed_mt)}</b><br><span class="note">stock ${f0(r.available_mt)} · outstanding ${f0(r.outstanding_mt)}</span>`, tot: rs => sum(rs, r => r.unconsumed_mt)},
     {h: "Storage start", v: r => r.storage_start, html: storageCell},
     {h: "Premium / Futures", n: 1, v: r => r.premium, html: r => flatC(r.pricing_class) ? '<span class="note">— flat price</span>' : `${premCell(r.premium, r.unit, r.pricing_class)}<br><span class="note">${esc(r.futures || "—")}</span>`},
-    {h: "Fixed / Latest CBOT", n: 1, v: r => isN(r.fixed_cbot) ? r.fixed_cbot : r.latest_cbot, html: cbotCellO},
+    {h: "Fixed / Live CBOT", n: 1, v: r => isN(r.fixed_cbot) ? r.fixed_cbot : r.latest_cbot, html: cbotCellO},
     {h: "Final / Indicative CIF $/MT", n: 1, v: r => r.cif, html: cifCellO},
     {h: "Form 4 / Latest FX", n: 1, v: r => r.fx, html: fxCellO},
     ...bdCols(gOpen),
@@ -1077,7 +1079,7 @@ function renderQuality() {
    <p>Local: origin-matched local market quote observed on or before the day; the last quote entered stays in force until the next one (no new quote = no change), shown with its date and age. A quote more than ${CD()} days old is marked <span class="stale">Local Market Price — N Days Old — STALE</span> but still used; days with no earlier quote are excluded as missing. Latest quotes: ${esc(Object.entries(src.local_latest || {}).map(([k, x]) => k + " " + x).join(" · "))}.</p>
    <p>Inland freight is route-specific, never an average: a contract with its route entered keeps that freight; otherwise the freight approval rate for its commodity, loading place and plant, as in force on its delivery date (previous rate before the effective date), + 14% VAT. A contract whose route cannot be matched shows "N/A — add the freight manually" and is compared excluding transport only. See the Transport map tab.</p>
    <p>Transport scenarios: including = landed cost with inland freight vs local quote + local transport; excluding = landed cost without inland freight vs the local quote itself. Each side uses its own recorded transport; ocean freight stays in CIF. Missing transport is shown as N/A — Missing Source Data, never as zero, and left out of that scenario's totals.</p>
-   <p>Landed cost: CIF × FX + discharge + clearance (+ inland freight when including transport). FX: Form 4 once entered (all commodities except SBM); historical rows keep their recorded basis; open contracts without Form 4 use the latest daily market FX ("Latest Market FX — Provisional") and switch automatically once Form 4 is entered. CBOT fixed: pricing lots, else Implied CBOT Fixing = CIF ÷ factor − premium (CORN 0.3937; SOYBEAN, WHEAT 0.36745; SBM 1.1023 with premium in $/short ton), so Final CIF = (fixed CBOT + premium) × factor. Unpriced contracts are never shown as fixed: their open tonnes are valued at (latest stored CBOT + premium) × factor, labelled a proxy when that series is not the contract's own futures month. Flat-priced contracts keep their contract CIF.</p>
+   <p>Landed cost: CIF × FX + discharge + clearance (+ inland freight when including transport). FX: Form 4 once entered (all commodities except SBM); historical rows keep their recorded basis; open contracts without Form 4 use the latest daily market FX ("Latest Market FX — Provisional") and switch automatically once Form 4 is entered. CBOT fixed: pricing lots, else Implied CBOT Fixing = CIF ÷ factor − premium (CORN 0.3937; SOYBEAN, WHEAT 0.36745; SBM 1.1023 with premium in $/short ton), so Final CIF = (fixed CBOT + premium) × factor. Unpriced contracts are never shown as fixed: their open tonnes are valued at (live CBOT + premium) × factor — the same live quote the app shows (the last stored close if the app has none) — labelled a proxy when that series is not the contract's own futures month. Flat-priced contracts keep their contract CIF.</p>
    <p>Storage start dates are shown as recorded (Not recorded when absent) and never taken from the delivery date. A contract with no storage start and no receipt is not treated as received: it gets a current market valuation and stays out of the FIFO stock; consumption already allocated to one is flagged for reconciliation, not deleted. Historical savings, current open potential and the CBOT benchmark are separate measures and are never added together.</p>`;
 }
 
@@ -1130,7 +1132,7 @@ function exportXlsx() {
     ["CBOT vs Consumption", [["Date", "Contract", "Contract ID", "MT", "CBOT fixed", "CBOT that day", "Price date", "Benchmark status", "Difference", "USD/MT", "USD", "EGP", "Result"],
       ...v.cb.map(r => [r.date, r.contract, r.contract_id, r.mt, r.fix, r.cbot, r.cbot_date, r.benchmark, r.diff, r.usd_mt, r.usd, r.egp, r.result])]],
     ["Open vs Local", [["Contract", "Contract ID", "Supplier", "Commodity", "Origin", "Qty MT", "Available MT", "Outstanding MT", "Remaining MT", "Storage Start", "Receipt Status",
-        "Premium", "Premium Unit", "Futures Month", "Fixed CBOT", "Latest CBOT", "Latest CBOT Date", "CBOT Note", "CIF USD/MT", "CIF Basis", "FX", "FX Basis", "FX Date", "Form 4 Status",
+        "Premium", "Premium Unit", "Futures Month", "Fixed CBOT", "Live / Latest CBOT", "CBOT Date", "CBOT Note", "CIF USD/MT", "CIF Basis", "FX", "FX Basis", "FX Date", "Form 4 Status",
         "Discharge EGP/MT", "Clearance EGP/MT", "Import Inland Transport EGP/MT", ...L_.flatMap(sc => [`Imported Cost ${sc.h}`, `Local ${sc.h}`]), "Local Date", "Local Age (days)", "Local Price Age Status",
         ...L_.flatMap(sc => [`Savings/MT ${sc.h}`, `Total Potential ${sc.h}`]), "Pricing Status", "Valuation Class", "Totals Bucket", "Issues",
         "CIF x FX EGP/MT", "Discharge Source", "Clearance Source", "Inland Freight Basis"],

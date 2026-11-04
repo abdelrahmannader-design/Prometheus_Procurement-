@@ -390,11 +390,23 @@ def build(inp, **overrides):
             pairs = [(d, v) for d, v in zip(hist.dates, hist.values) if d not in spk and d <= as_of]
             if pairs:
                 latest_cbot[base] = pairs[-1]
+    # The app values open contracts at its live CBOT quote (the price on its screen);
+    # the report uses the same quote when the app sends one, else the latest stored close.
+    cbot_src = {}
+    for base, q in (inp.get("live_cbot") or {}).items():
+        v, d = _n((q or {}).get("price")), _d((q or {}).get("time"))
+        if v is None or d is None:
+            continue
+        stored = latest_cbot.get(base)
+        latest_cbot[base] = (d, v)
+        cbot_src[base] = (f"Live CBOT from the app ({q.get('symbol') or base}, {str(q.get('time'))[:16]})"
+                          + (f" — the last stored close {stored[1]:,.2f} on {stored[0].isoformat()} is newer"
+                             if stored and stored[0] > d else ""))
     # An open contract's cost is current, not historical: recorded CIF if fixed,
     # else latest stored CBOT + its premium; Form 4 if recorded, else the latest
     # daily FX. Its consumed tonnes and its open tonnes use the same cost.
     for c in contracts.values():
-        c["current"] = current_cost(c, latest_fx, latest_cbot)
+        c["current"] = current_cost(c, latest_fx, latest_cbot, cbot_src)
         if c.get("is_open") and c["current"]["cost_excl"] is not None:
             # Both the landed cost without inland freight and with it (None when no route freight).
             c["landed_excl_egp_mt"] = c["current"]["cost_excl"]
@@ -580,7 +592,7 @@ def build(inp, **overrides):
                 "mt": r["mt"], "premium": _n(c.get("premium")), "unit": f["unit"], "factor": f["factor"],
                 "futures": (c.get("contract_month") or {}).get("code", c.get("futures_month") or ""),
                 "cbot": price, "cbot_date": pdate.isoformat() if pdate else "",
-                "latest_cbot": latest, "latest_cbot_date": latest_d, "fx": fx,
+                "latest_cbot": latest, "latest_cbot_date": latest_d, "latest_cbot_live": bool(cur.get("cbot_live")), "fx": fx,
                 "ind_diff": ind, "ind_usd_mt": ind * f["factor"] if ind is not None else None,
                 "ind_usd": ind * f["factor"] * r["mt"] if ind is not None else None,
                 "ind_egp": ind * f["factor"] * r["mt"] * fx if (ind is not None and fx) else None,
@@ -886,6 +898,7 @@ def build(inp, **overrides):
         "sources": inp.get("sources") or {},
         "cbot_series": _series_window(series, spikes, master, as_of),
         "freight_map": inp.get("freight_map") or [],
+        "live_cbot": inp.get("live_cbot") or {},
     }
     model["validation"] = validate(model)
     model["management_ready"] = all(v["passed"] for v in model["validation"])
@@ -966,7 +979,7 @@ def pricing_class(c):
     return "Unpriced"
 
 
-def current_cost(c, latest_fx, latest_cbot):
+def current_cost(c, latest_fx, latest_cbot, cbot_src=None):
     """CIF, FX and landed cost (with and without inland transport) as of today.
 
     Fixed contracts keep their recorded CIF; an unpriced CBOT contract is
@@ -981,15 +994,18 @@ def current_cost(c, latest_fx, latest_cbot):
     cif_rec = _n(c.get("cif_usd_mt"))
     pclass = c["pricing_class"]
     cbot_d, cbot_v = latest_cbot.get(base, (None, None))
+    src = (cbot_src or {}).get(base, "")
     cm = c.get("contract_month")
     cbot_note = ""
     if cbot_d is not None and cm:
         series_m = series_month_label(cbot_d, base)
-        cbot_note = (f"Latest stored CBOT is on {cm['code']} (front month)" if series_m == cm["code"] else
-                     f"Indicative proxy: stored series is the front month ({series_m}), not the contract's "
+        cbot_note = (f"{'Live' if src else 'Latest stored'} CBOT is on {cm['code']} (front month)" if series_m == cm["code"] else
+                     f"Indicative proxy: the {'live quote' if src else 'stored series'} is the front month ({series_m}), not the contract's "
                      f"{cm['code']} — contract-month prices are not stored")
     elif cbot_d is not None:
         cbot_note = "Indicative proxy: no futures month recorded on the contract"
+    if src:
+        cbot_note = f"{src} · {cbot_note}" if cbot_note else src
     issues = []
     if pclass == "Fixed" and cif_rec is not None:
         cif, cif_basis = cif_rec, "Final CIF (fixed)"
@@ -1001,10 +1017,10 @@ def current_cost(c, latest_fx, latest_cbot):
             lot_fix = sum((_n(x["qty_mt"]) or 0) * _n(x["cbot"]) for x in lots if _n(x.get("cbot")) is not None) / lot_mt
             share = min(lot_mt / qty, 1.0)
             cif = ((lot_fix + premium) * share + (cbot_v + premium) * (1 - share)) * factor
-            cif_basis = f"Indicative CIF: lots {lot_mt:,.0f} MT fixed + rest at latest CBOT + premium"
+            cif_basis = f"Indicative CIF: lots {lot_mt:,.0f} MT fixed + rest at {'live' if src else 'latest'} CBOT + premium"
         else:
             cif = (cbot_v + premium) * factor
-            cif_basis = "Indicative CIF: (latest CBOT + premium) × factor"
+            cif_basis = f"Indicative CIF: ({'live' if src else 'latest'} CBOT + premium) × factor"
     elif cif_rec is not None:
         cif, cif_basis = cif_rec, ("Provisional CIF (saved, not final)" if pclass != "Flat-priced" else "Contract CIF (flat price)")
     else:
@@ -1029,6 +1045,7 @@ def current_cost(c, latest_fx, latest_cbot):
         issues.append("no inland transport on the contract")
     return {"cif": cif, "cif_basis": cif_basis, "fx": fx, "fx_basis": fx_basis, "fx_date": fx_date,
             "form4": f4, "cbot": cbot_v, "cbot_date": cbot_d.isoformat() if cbot_d else "", "cbot_note": cbot_note,
+            "cbot_live": bool(src),
             "disc": disc, "clr": clr, "freight": freight, "cost_excl": cost_excl, "cost_incl": cost_incl,
             "issues": issues}
 
@@ -1083,6 +1100,7 @@ def open_valuation(c, remaining, latest_fx, latest_cbot, as_of, opts):
         "premium": premium, "unit": f.get("unit", ""), "futures": (cm or {}).get("code", c.get("futures_month", "")),
         "fixed_cbot": f.get("value"), "fix_type": f.get("type", ""),
         "latest_cbot": cbot_v, "latest_cbot_date": cbot_d.isoformat() if cbot_d else "", "cbot_note": cbot_note,
+        "latest_cbot_live": bool(cur.get("cbot_live")),
         "cif": cif, "cif_basis": cif_basis, "fx": fx, "fx_basis": fx_basis, "fx_date": fx_date,
         "form4_status": "Recorded" if f4 else ("Pending / Not recorded" if c.get("is_open") else "Not recorded"),
         "discharge": disc, "clearance": clr, "freight": freight,
@@ -1103,11 +1121,12 @@ def open_valuation(c, remaining, latest_fx, latest_cbot, as_of, opts):
         "potential_excl": sx * remaining if sx is not None else None,
         "potential": si * remaining if si is not None else None,
         "class": cls, "issues": issues, "delivery_status": c["delivery_status"],
-        **break_even(c, premium, f, cbot_v, fx, disc, clr, freight, l_price, l_incl),
+        **break_even(c, premium, f, cbot_v, fx, disc, clr, freight, l_price, l_incl,
+                     "live CBOT" if cur.get("cbot_live") else "latest stored CBOT"),
     }
 
 
-def break_even(c, premium, f, latest_cbot, fx, disc, clr, freight, l_excl, l_incl):
+def break_even(c, premium, f, latest_cbot, fx, disc, clr, freight, l_excl, l_incl, latest_label="latest stored CBOT"):
     """Where the CBOT would have to be for the import to cost the same as local.
 
     break-even CBOT = (local − discharge − clearance [− inland freight when
@@ -1119,7 +1138,7 @@ def break_even(c, premium, f, latest_cbot, fx, disc, clr, freight, l_excl, l_inc
     factor = FACTORS.get(c["base"])
     ref = f.get("value") if f.get("fixed") else latest_cbot
     out = {"be_cbot_excl": None, "be_cbot_incl": None, "headroom_excl": None, "headroom_incl": None,
-           "ref_cbot": ref, "ref_cbot_basis": "fixed CBOT" if f.get("fixed") else "latest stored CBOT",
+           "ref_cbot": ref, "ref_cbot_basis": "fixed CBOT" if f.get("fixed") else latest_label,
            "local_eq_premium": None, "premium_gap_now": None}
     if not factor or premium is None or not fx or c.get("pricing_class") in ("Flat-priced", "Not CBOT-based"):
         return out
