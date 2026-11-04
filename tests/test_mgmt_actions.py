@@ -327,3 +327,61 @@ class MtmAttributionTests(unittest.TestCase):
         a = attribute(self._row(446, 56.0, 15597, fees=800.0), self._row(446, 56.0, 15597, fees=720.1))
         self.assertAlmostEqual(a["other"], -79.9)
         self.assertIsNone(attribute({"fx": 56}, {"fx": 55})["from_cbot"])
+
+
+class MtmHistoryTests(unittest.TestCase):
+    def rec(self, day, cid="C1", cbot=446.0, fx=55.5, local=15597.0, prem=190.0, floating=True, qty=1000.0):
+        cif = (cbot + prem) * 0.3937 if floating else 280.0
+        own = cif * fx + 235 + 200 + 485.1
+        return {"date": day, "contract_id": cid, "contract_ref": cid, "base_commodity": "CORN", "commodity": "CORN-BRZ", "mode": "LIVE",
+                "qty_mt": qty, "cbot_price": cbot, "premium_quote": prem, "cbot_conversion": 0.3937, "cif_usd_mt": cif, "fx": fx,
+                "discharge_egp_mt": 235, "clearance_egp_mt": 200, "freight_egp_mt": 485.1, "own_after_egp_mt": own,
+                "local_egp_mt": local, "saving_egp_mt": local - own, "total_saving_egp": (local - own) * qty}
+
+    def lookups(self):
+        cb = {"2026-10-26": 444.0, "2026-10-27": 441.0, "2026-10-28": 443.0}
+        fx = {"2026-10-26": 55.6, "2026-10-27": 55.7, "2026-10-28": 55.8}
+        return ((lambda base, d: (cb.get(d), d if d in cb else None)), (lambda d: (fx.get(d), d)), (lambda c, d: (15497.0, "2026-10-25")))
+
+    def test_missing_trading_days_are_rebuilt_and_marked(self):
+        from prometheus_core import mtm_history as H
+        hist = [self.rec("2026-10-25"), self.rec("2026-10-29")]
+        cbot_on, fx_on, local_on = self.lookups()
+        days = ["2026-10-26", "2026-10-27", "2026-10-28", "2026-10-29"]
+        self.assertEqual(H.missing_days(hist, days, dt.date(2026, 11, 4)), ["2026-10-26", "2026-10-27", "2026-10-28"])
+        new = H.backfill(hist, {"C1": {}}, days, dt.date(2026, 11, 4), cbot_on, fx_on, local_on)
+        self.assertEqual([r["date"] for r in new], ["2026-10-26", "2026-10-27", "2026-10-28"])
+        r = new[1]
+        self.assertEqual(r["mode"], "RECONSTRUCTED")
+        self.assertAlmostEqual(r["cif_usd_mt"], (441.0 + 190.0) * 0.3937, places=5)   # floats with that day's close
+        self.assertAlmostEqual(r["fx"], 55.7)                                          # that day's market FX
+        self.assertAlmostEqual(r["saving_egp_mt"], 15497.0 - (r["cif_usd_mt"] * 55.7 + 235 + 200 + 485.1), places=3)
+        self.assertEqual(H.backfill(hist + new, {"C1": {}}, days, dt.date(2026, 11, 4), cbot_on, fx_on, local_on), [])
+
+    def test_fixed_cif_and_form4_follow_the_nearest_record(self):
+        from prometheus_core import mtm_history as H
+        hist = [self.rec("2026-10-25", floating=False, fx=56.0), self.rec("2026-10-29", floating=False, fx=56.0)]
+        cbot_on, fx_on, local_on = self.lookups()
+        r = H.reconstruct_day("2026-10-27", hist, {"C1": {"form4_fx": 56.0, "form4_date": "2026-10-20"}}, cbot_on, fx_on, local_on)[0]
+        self.assertEqual((r["cif_usd_mt"], r["fx"], r["fx_source"]), (280.0, 56.0, "Form 4"))
+        self.assertEqual(r["cbot_price"], 441.0)   # the day's close is recorded even when the CIF is fixed
+
+    def test_contract_entering_or_leaving_the_book(self):
+        from prometheus_core import mtm_history as H
+        hist = [self.rec("2026-10-25"), self.rec("2026-10-29"), self.rec("2026-10-29", cid="C2")]
+        cbot_on, fx_on, local_on = self.lookups()
+        ids = lambda c: [r["contract_id"] for r in H.reconstruct_day("2026-10-27", hist, c, cbot_on, fx_on, local_on)]
+        self.assertEqual(ids({"C1": {}, "C2": {"created_ts": "2026-10-28 09:00"}}), ["C1"])
+        self.assertEqual(ids({"C1": {}, "C2": {"created_ts": "2026-10-26 09:00"}}), ["C1", "C2"])
+
+    def test_book_by_day_parts_add_up_and_stale_flags(self):
+        from prometheus_core import mtm_history as H
+        hist = [self.rec("2026-10-25"), self.rec("2026-10-26", cbot=442.0, fx=55.4, local=15497.0)]
+        b = H.book_by_day(hist)
+        self.assertEqual(len(b), 2)
+        d = b[1]
+        self.assertAlmostEqual(d["from_cbot"] + d["from_fx"] + d["from_local"] + d["other"], d["d_saving_mt"], places=6)
+        self.assertAlmostEqual(d["cumulative_d_total"], d["d_total"])
+        self.assertEqual(H.stale_flags("2026-11-04", "2026-11-02 11:19", "2026-10-13"),
+                         ["CBOT quote from 2026-11-02", "FX market date 2026-10-13"])
+        self.assertEqual(H.stale_flags("2026-11-04", "2026-11-03 20:00", "2026-11-03"), [])
