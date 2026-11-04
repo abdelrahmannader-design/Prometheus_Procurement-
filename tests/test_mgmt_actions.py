@@ -2,6 +2,7 @@
 local price email, freight rate history and the daily commodity brief."""
 import os
 import sys
+import datetime as dt
 import tempfile
 import unittest
 
@@ -232,4 +233,67 @@ class DigestTests(unittest.TestCase):
         text, html = D.email_summary(b)
         self.assertIn("Daily Commodity Brief", text)
         self.assertIn("1 contract(s) missing data", text)
+        self.assertIn("<table", html)
+
+
+class PeriodicReportTests(unittest.TestCase):
+    def setUp(self):
+        from prometheus_core import periodic_reports as P
+        self.P = P
+        self.m = mr.build(inputs(live_cbot={"CORN": {"price": 515.0, "time": "2026-10-04 12:00"}}, rates={"CORN-BRZ": 250.0},
+                                 fx_series=[("2026-09-27", 51.0, "x"), ("2026-10-04", 52.0, "x")]))
+
+    def test_pricing_deadline_is_the_first_notice_day_of_the_futures_month(self):
+        rows = self.P.pricing_deadlines(self.m)
+        r = next(x for x in rows if x["contract_id"] == "C2")
+        self.assertEqual(r["futures"][:3], "DEC")
+        fnd = dt.date.fromisoformat(r["first_notice"])
+        self.assertEqual((fnd.month, fnd.day <= 30), (11, True))
+        self.assertEqual(r["days_to_fnd"], (fnd - dt.date(2026, 10, 4)).days)
+        self.assertAlmostEqual(r["egp_per_10"], 10 * 0.3937 * r["fx"] * r["unpriced_mt"])
+        self.assertNotIn("C1", [x["contract_id"] for x in rows])   # priced contracts are not listed
+
+    def test_stock_watch_flags_tonnes_on_order_without_an_arrival_date(self):
+        inp = inputs(rates={"CORN-BRZ": 250.0})
+        inp["contracts"][1].update(storage_start="", delivery_date="", qty_mt=3000.0)
+        rows = self.P.stock_watch(mr.build(inp))
+        r = next(x for x in rows if x["code"] == "CORN-BRZ")
+        self.assertEqual(r["daily_rate"], 250.0)
+        self.assertGreater(r["undated_mt"], 0)                  # on order, no delivery date
+        self.assertLess(r["cover_days"], 14)                    # 500 MT in stock at 250 MT/day
+        self.assertIn("no arrival date", r["status"])
+        self.assertEqual(r["next_arrival"], "")
+
+    def test_weekly_review_pipeline_and_action_list(self):
+        w = self.P.weekly_review(self.m)
+        self.assertTrue(any(x["item"] == "FX EGP/USD" and abs(x["chg_week"] - 1.0) < 1e-9 for x in w["market"]))
+        p = self.P.pipeline(self.m)
+        self.assertIn("C2", [r["contract_id"] for r in p["rows"]])
+        self.assertTrue(all(r["payment_terms"] == "not recorded" for r in p["rows"]))
+        snap = dict(self.m["snapshot"], as_of="2026-09-27", generated="2026-09-27 08:00", fix_keys=["Old|C1"])
+        a = self.P.action_list(self.m, [snap])
+        self.assertEqual(a["fixed"], 1)
+        self.assertEqual(next(r for r in a["rows"] if r["status"] == "FIXED")["contract"], "A-1")
+        self.assertEqual(a["new"], len(self.m["data_to_fix"]))
+
+    def test_writers_produce_files(self):
+        with tempfile.TemporaryDirectory() as d:
+            try:
+                import openpyxl  # noqa: F401
+                for fn, name in ((self.P.write_pricing_deadlines_excel, "pd.xlsx"), (self.P.write_pipeline_excel, "pl.xlsx"),
+                                 (self.P.write_action_list_excel, "al.xlsx")):
+                    fn(self.m, os.path.join(d, name))
+                    self.assertGreater(os.path.getsize(os.path.join(d, name)), 3000)
+            except ImportError:
+                pass
+            try:
+                import reportlab  # noqa: F401
+                for fn, name in ((self.P.write_stock_watch_pdf, "sw.pdf"), (self.P.write_weekly_review_pdf, "wr.pdf")):
+                    fn(self.m, os.path.join(d, name))
+                    with open(os.path.join(d, name), "rb") as fh:
+                        self.assertEqual(fh.read(4), b"%PDF")
+            except ImportError:
+                pass
+        text, html = self.P.weekly_email_summary(self.m, [])
+        self.assertIn("Weekly Pack", text)
         self.assertIn("<table", html)

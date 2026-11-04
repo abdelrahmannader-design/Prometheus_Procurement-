@@ -174,7 +174,9 @@ def snapshot(model, fx=None):
             "checksum": model.get("checksum", ""),
             "kpis": {key: k.get(key) for key, _, _ in SINCE_LAST_KPIS},
             "cbot": {b: q.get("price") for b, q in (model.get("live_cbot") or {}).items()},
-            "fx": fx}
+            "fx": fx,
+            # the to-fix items, so the weekly action list can mark them new / still open / fixed
+            "fix_keys": [f"{x['category']}|{x.get('contract_id') or x.get('detail', '')[:60]}" for x in model.get("data_to_fix") or []]}
 
 
 def since_last(model, history, fx=None):
