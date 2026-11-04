@@ -297,3 +297,33 @@ class PeriodicReportTests(unittest.TestCase):
         text, html = self.P.weekly_email_summary(self.m, [])
         self.assertIn("Weekly Pack", text)
         self.assertIn("<table", html)
+
+
+class MtmAttributionTests(unittest.TestCase):
+    def _row(self, cbot, fx, local, fees=720.1, prem=190.0):
+        from prometheus_core.mtm_attribution import attribute  # noqa: F401
+        cif = (cbot + prem) * 0.3937
+        return {"cif_usd_mt": cif, "fx": fx, "local_egp_mt": local, "saving_egp_mt": local - (cif * fx + fees)}
+
+    def test_form4_contract_cbot_down_local_down_more(self):
+        from prometheus_core.mtm_attribution import attribute, explain
+        a = attribute(self._row(442, 56.0, 15497), self._row(446, 56.0, 15597))
+        self.assertAlmostEqual(a["from_cbot"], 4 * 0.3937 * 56.0)
+        self.assertEqual(a["from_fx"], 0)
+        self.assertEqual(a["from_local"], -100)
+        self.assertAlmostEqual(a["from_cbot"] + a["from_fx"] + a["from_local"] + a["other"], a["change"])
+        self.assertLess(a["change"], 0)                       # red: local fell more than CBOT saved
+        self.assertEqual(explain(a), "CBOT +88 · FX 0 · local -100 · other 0")
+
+    def test_market_fx_contract_gains_from_the_fx_too(self):
+        from prometheus_core.mtm_attribution import attribute
+        a = attribute(self._row(442, 55.43, 15497), self._row(446, 55.53, 15597))
+        self.assertGreater(a["from_fx"], 0)
+        self.assertGreater(a["change"], 0)                    # green: CBOT + FX outweigh the local drop
+        self.assertAlmostEqual(sum(a[k] for k in ("from_cbot", "from_fx", "from_local", "other")), a["change"])
+
+    def test_fee_change_lands_in_other_and_missing_values_give_none(self):
+        from prometheus_core.mtm_attribution import attribute
+        a = attribute(self._row(446, 56.0, 15597, fees=800.0), self._row(446, 56.0, 15597, fees=720.1))
+        self.assertAlmostEqual(a["other"], -79.9)
+        self.assertIsNone(attribute({"fx": 56}, {"fx": 55})["from_cbot"])
