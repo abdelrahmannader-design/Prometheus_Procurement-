@@ -185,3 +185,34 @@ class DailyBriefTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BriefPositionAndStockTests(unittest.TestCase):
+    def test_open_position_uses_the_app_rows_when_given(self):
+        from prometheus_core import daily_brief as D
+        m = mr.build(inputs())
+        app_rows = [{"contract_id": "C2", "contract": "B-2", "supplier": "S", "commodity": "CORN-BRZ", "base": "CORN",
+                     "origin": "BRAZIL", "status": "Open", "qty": 1000.0, "cif": 250.0, "cif_formula": "(440.50+180.00)×0.3937 | DEC",
+                     "fx": 55.4, "freight": 485.0, "own_after": 14500.0, "local": 15397.0, "local_date": "2026-10-04",
+                     "local_flag": "", "sav_mt": 897.0, "total_sav": 897000.0, "decision": "Strong import edge", "threshold": 200.0}]
+        op = D.build(m, app_position=app_rows)["open_position"]
+        self.assertEqual(op["source"], "app")
+        g = op["groups"][0]
+        self.assertEqual((g["base"], g["qty"], g["total_sav"]), ("CORN", 1000.0, 897000.0))
+        r = g["rows"][0]
+        self.assertAlmostEqual(r["sav_to_consume"], 897.0 * r["to_consume_mt"])
+
+    def test_model_fallback_and_fifo_stock_against_cbot_and_local(self):
+        from prometheus_core import daily_brief as D
+        m = mr.build(inputs(live_cbot={"CORN": {"price": 515.0, "time": "2026-10-04 12:00"}}, rates={"CORN-BRZ": 250.0}))
+        b = D.build(m)
+        self.assertEqual(b["open_position"]["source"], "report model")
+        self.assertIn("C2", [r["contract_id"] for g in b["open_position"]["groups"] for r in g["rows"]])
+        lots = b["fifo"]["lots"]
+        self.assertTrue(lots)
+        o = next(x for x in m["open"] if x["contract_id"] == lots[0]["contract_id"])
+        self.assertAlmostEqual(lots[0]["stock_mt"], o["available_mt"])
+        if lots[0]["vs_local_incl"] is not None:
+            self.assertAlmostEqual(lots[0]["vs_local_incl"], o["saving_mt"] * o["available_mt"])
+        self.assertEqual(lots[0]["use_from"], "2026-10-04")   # FIFO from today at the configured rate
+        self.assertEqual(lots[0]["use_to"], "2026-10-06")     # 500 MT at 250 MT/day

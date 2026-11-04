@@ -62,7 +62,124 @@ def _changes(series, now_date, now_value):
     return out
 
 
-def build(model):
+def _decision(sav, threshold):
+    return ("Missing data" if sav is None else "Strong import edge" if sav >= threshold
+            else "Marginal" if sav > 0 else "Weak vs local")
+
+
+def open_position(model, app_position=None, threshold=200.0):
+    """Every contract not closed, as the app's Home table shows it, grouped by commodity.
+
+    ``app_position`` are the app's own rows (same cost function as its screen); without
+    them the rows come from the report model's current valuation (live CBOT, latest FX).
+    """
+    rem = {o["contract_id"]: o.get("unconsumed_mt") or 0.0 for o in model.get("open") or []}
+    stock = {o["contract_id"]: o.get("available_mt") or 0.0 for o in model.get("open") or []}
+    rows = []
+    if app_position:
+        rows = [dict(r) for r in app_position]
+        source = "app"
+    else:
+        source = "report model"
+        for c in sorted(model.get("contracts") or [], key=lambda c: c.get("delivery_date") or c.get("storage_start") or ""):
+            if (c.get("status") or "Open") == "Closed":
+                continue
+            cur = c.get("current") or {}
+            f = c.get("fix") or {}
+            prem, cb = _n(c.get("premium")), _n(cur.get("cbot"))
+            fut = (c.get("contract_month") or {}).get("code") or c.get("futures_month") or ""
+            formula = (f"({cb:.2f}+{prem:.2f})×{f.get('factor')} | {fut}" if f.get("eligible") and not f.get("fixed")
+                       and None not in (cb, prem) else "fixed" if f.get("fixed") else "")
+            own, loc = _n(c.get("landed_egp_mt")), _n(c.get("local_today"))
+            sav = (loc - own) if None not in (own, loc) else None
+            qty = _n(c.get("qty_mt"))
+            comm = (c.get("commodity") or c["base"]).upper()
+            rows.append({"contract_id": c["id"], "contract": c.get("contract", ""), "supplier": c.get("supplier", ""),
+                         "commodity": comm, "base": c["base"], "origin": c.get("origin", ""), "status": c.get("status") or "Open",
+                         "qty": qty, "cif": _n(cur.get("cif")) or _n(c.get("cif_usd_mt")), "cif_formula": formula,
+                         "fx": _n(cur.get("fx")) or _n(c.get("fx")), "freight": _n(c.get("freight_egp_mt")),
+                         "own_after": own, "local": loc, "local_date": c.get("local_today_date") or "", "local_flag": "",
+                         "sav_mt": sav, "total_sav": sav * qty if None not in (sav, qty) else None,
+                         "decision": _decision(sav, threshold)})
+    for r in rows:
+        r["to_consume_mt"] = rem.get(r["contract_id"], 0.0)
+        r["stock_mt"] = stock.get(r["contract_id"], 0.0)
+        r["sav_to_consume"] = r["sav_mt"] * r["to_consume_mt"] if r.get("sav_mt") is not None else None
+    groups = []
+    order = ["CORN", "SOYBEAN", "SBM", "SFM", "DDGS"]
+    for base in [b for b in order if any(r["base"] == b for r in rows)] + sorted({r["base"] for r in rows} - set(order)):
+        g = [r for r in rows if r["base"] == base]
+        qty = sum(r["qty"] or 0 for r in g)
+        groups.append({"base": base, "rows": g, "contracts": len(g), "qty": qty,
+                       "to_consume_mt": sum(r["to_consume_mt"] for r in g),
+                       "own_after": sum((r["own_after"] or 0) * (r["qty"] or 0) for r in g) / qty if qty else None,
+                       "local": sum((r["local"] or 0) * (r["qty"] or 0) for r in g) / qty if qty else None,
+                       "total_sav": sum(r["total_sav"] or 0 for r in g),
+                       "sav_to_consume": sum(r["sav_to_consume"] or 0 for r in g)})
+    for g in groups:
+        g["sav_mt"] = g["total_sav"] / g["qty"] if g["qty"] else None
+    qty = sum(g["qty"] for g in groups)
+    return {"source": source, "groups": groups, "qty": qty, "total_sav": sum(g["total_sav"] for g in groups),
+            "to_consume_mt": sum(g["to_consume_mt"] for g in groups),
+            "sav_to_consume": sum(g["sav_to_consume"] for g in groups),
+            "own_after": sum((g["own_after"] or 0) * g["qty"] for g in groups) / qty if qty else None,
+            "sav_mt": sum(g["total_sav"] for g in groups) / qty if qty else None}
+
+
+def fifo_stock(model):
+    """Stock on hand, lot by lot in FIFO order, against today's CBOT and today's local price.
+
+    vs CBOT: (live CBOT − the lot's fixed CBOT) × factor × FX × MT — what the same tonnes would
+    cost more (+) or less (−) at today's CBOT and the same premium; unpriced lots float with the CBOT.
+    vs local: (local today − landed cost) × MT, including and excluding inland transport.
+    Expected consumption: the configured daily rate applied in FIFO order from today.
+    """
+    as_of = _d(model.get("as_of")) or dt.date.today()
+    rates = model.get("rates") or {}
+    lots = [o for o in model.get("open") or [] if (o.get("available_mt") or 0) > 1e-6]
+    cons = {c["id"]: c for c in model.get("contracts") or []}
+    out = []
+    for code in sorted({(cons.get(o["contract_id"], {}).get("commodity") or o["base"]) for o in lots}):
+        g = sorted([o for o in lots if (cons.get(o["contract_id"], {}).get("commodity") or o["base"]) == code],
+                   key=lambda o: (o.get("storage_start") or "9999", o["contract"]))
+        rate = _n(rates.get(code)) or _n(rates.get(g[0]["base"]))
+        cum = 0.0
+        for o in g:
+            mt = o["available_mt"]
+            fac = FACTORS.get(o["base"])
+            fixed, live = _n(o.get("fixed_cbot")), _n(o.get("latest_cbot"))
+            fx = _n(o.get("fx"))
+            d = (live - fixed) if None not in (fixed, live) else None
+            vs_cbot = d * fac * fx * mt if None not in (d, fac, fx) else None
+            start = as_of + dt.timedelta(days=cum / rate) if rate else None
+            cum += mt
+            end = as_of + dt.timedelta(days=cum / rate) if rate else None
+            si, sx = _n(o.get("saving_mt")), _n(o.get("saving_excl_mt"))
+            out.append({"code": code, "base": o["base"], "contract": o["contract"], "contract_id": o["contract_id"],
+                        "supplier": o.get("supplier", ""), "storage_start": o.get("storage_start") or "not recorded",
+                        "stock_mt": mt, "pricing": o.get("pricing_class", ""), "premium": _n(o.get("premium")),
+                        "unit": UNITS.get(o["base"], ""), "fixed_cbot": fixed, "live_cbot": live,
+                        "cbot_diff": d, "vs_cbot_egp": vs_cbot, "cif": _n(o.get("cif")), "fx": fx,
+                        "cost_excl": _n(o.get("cost_excl")), "cost_incl": _n(o.get("cost_incl")),
+                        "local_excl": _n(o.get("local_excl")), "local_incl": _n(o.get("local_incl")),
+                        "local_date": o.get("local_date") or "",
+                        "sav_incl_mt": si, "sav_excl_mt": sx,
+                        "vs_local_incl": si * mt if si is not None else None, "vs_local_excl": sx * mt if sx is not None else None,
+                        "use_from": start.isoformat() if start else "", "use_to": end.isoformat() if end else "",
+                        "daily_rate": rate})
+    tot = {}
+    for r in out:
+        t = tot.setdefault(r["code"], {"code": r["code"], "base": r["base"], "lots": 0, "stock_mt": 0.0, "vs_cbot_egp": 0.0,
+                                       "vs_local_incl": 0.0, "vs_local_excl": 0.0, "use_to": "", "daily_rate": r["daily_rate"]})
+        t["lots"] += 1
+        t["stock_mt"] += r["stock_mt"]
+        for k in ("vs_cbot_egp", "vs_local_incl", "vs_local_excl"):
+            t[k] += r[k] or 0.0
+        t["use_to"] = max(t["use_to"], r["use_to"])
+    return {"lots": out, "totals": list(tot.values())}
+
+
+def build(model, app_position=None, threshold=200.0):
     as_of = _d(model.get("as_of")) or dt.date.today()
     today = as_of.isoformat()
     live = model.get("live_cbot") or {}
@@ -205,7 +322,9 @@ def build(model):
             e = r["edge_incl"] if r.get("edge_incl") is not None else r["edge_excl"]
             headline.append(f"{r['code']}: {'import' if e > 0 else 'local'} cheaper by {abs(e):,.0f} EGP/MT "
                             f"({'incl.' if r.get('edge_incl') is not None else 'excl.'} transport)")
+    threshold = (app_position[0].get("threshold") if app_position else None) or threshold
     return {"as_of": today, "generated": model.get("generated", ""), "market": market, "local": local, "parity": parity,
+            "open_position": open_position(model, app_position, threshold), "fifo": fifo_stock(model),
             "position": position, "cover": cover, "alerts": trig, "alerts_all": model.get("alerts") or [],
             "fixes": fixes, "fixes_total": len(model.get("data_to_fix") or []), "since_last": since, "exposure": exp,
             "headline": headline,
@@ -337,6 +456,52 @@ def write_excel(brief, path):
           ["Commodity", "Futures month", "Contracts", "MT", "Avg premium", "CBOT now", "Step", "EGP per step", "Contracts"],
           rows, [12, 12, 10, 11, 11, 10, 7, 15, 70], {4: "#,##0", 5: "#,##0.00", 6: "#,##0.00", 8: "#,##0"})
 
+    op = brief["open_position"]
+    rows = []
+    for g in op["groups"]:
+        rows.append([f"{g['base']} ({g['contracts']} contracts)", "", "", "", "", g["qty"], g["to_consume_mt"], "", "", "", "", "",
+                     g["own_after"], g["local"], g["sav_mt"], g["total_sav"], g["sav_to_consume"], ""])
+        rows += [[r["contract"], r["supplier"], r["commodity"], r["origin"], r["status"], r["qty"], r["to_consume_mt"], r["stock_mt"],
+                  r["cif"], r["cif_formula"], r["fx"], r["freight"], r["own_after"],
+                  (r["local"] if not r.get("local_flag") else f"{r['local']:,.0f} {r['local_flag']}") if r["local"] is not None else None,
+                  r["sav_mt"], r["total_sav"], r["sav_to_consume"], r["decision"]] for r in g["rows"]]
+    rows.append([f"TOTAL ({sum(g['contracts'] for g in op['groups'])} open)", "", "", "", "", op["qty"], op["to_consume_mt"], "", "", "",
+                 "", "", op["own_after"], "", op["sav_mt"], op["total_sav"], op["sav_to_consume"], ""])
+    ws = sheet("Open Contracts", "Every contract not closed, as on the app's Home screen (" + op["source"] + "): CIF at the live "
+               "CBOT + premium for unpriced contracts, today's FX unless Form 4, route freight, own cost after all fees "
+               "against today's local price. Sav total = Sav/MT × contract MT (as the app); the next column uses only the "
+               "tonnes still to consume. * local price older than 14 days · † today's local used as a stand-in.",
+               ["Contract", "Supplier", "Commodity", "Origin", "Status", "MT", "Still to consume MT", "In stock MT", "CIF $",
+                "CIF formula / live CBOT", "FX", "Freight", "Own after", "Local", "Sav/MT", "Sav total EGP (contract MT)",
+                "Sav on tonnes to consume EGP", "Decision"], rows,
+               [22, 15, 11, 10, 8, 9, 11, 9, 9, 30, 9, 8, 10, 10, 9, 15, 15, 18],
+               {6: "#,##0", 7: "#,##0", 8: "#,##0", 9: "#,##0.00", 11: "0.0000", 12: "#,##0", 13: "#,##0", 14: "#,##0",
+                15: "+#,##0;-#,##0", 16: "+#,##0;-#,##0", 17: "+#,##0;-#,##0"})
+    for i, r in enumerate(rows, 5):
+        if r[0].startswith("TOTAL") or "contracts)" in r[0]:
+            for j in range(1, 19):
+                ws.cell(row=i, column=j).font = bold
+        if r[17] in ("Strong import edge", "Weak vs local"):
+            ws.cell(row=i, column=18).font = green if r[17] == "Strong import edge" else red
+    fs = brief["fifo"]
+    rows = [[r["code"], r["contract"], r["storage_start"], r["stock_mt"], r["use_from"], r["use_to"], r["pricing"], r["premium"],
+             r["fixed_cbot"], r["live_cbot"], r["cbot_diff"], r["vs_cbot_egp"], r["cif"], r["fx"], r["cost_excl"], r["cost_incl"],
+             r["local_excl"], r["local_incl"], r["sav_excl_mt"], r["sav_incl_mt"], r["vs_local_excl"], r["vs_local_incl"]] for r in fs["lots"]]
+    rows += [[""]] + [[f"Total {t['code']}", f"{t['lots']} lots", "", t["stock_mt"], "", t["use_to"], "", None, None, None, None,
+                       t["vs_cbot_egp"], None, None, None, None, None, None, None, None, t["vs_local_excl"], t["vs_local_incl"]]
+                      for t in fs["totals"]]
+    sheet("FIFO Stock", "Stock on hand lot by lot in FIFO order (oldest first), with the dates it is expected to be used at the "
+          "configured daily rate. vs CBOT = (live CBOT − fixed CBOT) × factor × FX × MT: positive = the stock was fixed below "
+          "today's CBOT (cheaper than buying the same now); unpriced lots float with the CBOT. vs local = (local today − landed "
+          "cost) × MT.",
+          ["Commodity", "Contract", "Storage date", "In stock MT", "Use from", "Use until", "Pricing", "Premium", "CBOT fixed",
+           "Live CBOT", "Live − fixed", "vs CBOT EGP", "CIF $/MT", "FX", "Cost excl. transport", "Cost incl. transport",
+           "Local excl.", "Local incl.", "Saving/MT excl.", "Saving/MT incl.", "vs local excl. EGP", "vs local incl. EGP"], rows,
+          [11, 22, 12, 10, 11, 11, 12, 9, 10, 10, 10, 13, 9, 9, 12, 12, 11, 11, 11, 11, 14, 14],
+          {4: "#,##0", 8: "#,##0.00", 9: "#,##0.00", 10: "#,##0.00", 11: "+#,##0.00;-#,##0.00", 12: "+#,##0;-#,##0",
+           13: "#,##0.00", 14: "0.0000", 15: "#,##0", 16: "#,##0", 17: "#,##0", 18: "#,##0", 19: "+#,##0;-#,##0",
+           20: "+#,##0;-#,##0", 21: "+#,##0;-#,##0", 22: "+#,##0;-#,##0"})
+
     sheet("Stock Cover", "Stock on open contracts and outstanding tonnes against the configured daily consumption rate "
           "(consumption days are FIFO estimates).",
           ["Commodity", "In stock MT", "Outstanding MT", "Daily rate MT", "Consumed last 7 days MT", "Days of cover (stock)",
@@ -352,6 +517,10 @@ def write_excel(brief, path):
         rows += [["Change", r["label"], r["unit"], r["now"], r["change"]] for r in sl["rows"] if r.get("change")]
     sheet("Watch List", "Triggered pricing alerts, then the data to fix (high and medium), then the changes since the last report.",
           ["Type", "Contract / item", "Commodity", "Detail", "Action / value"], rows, [10, 26, 11, 80, 50])
+    order = ["Brief", "Open Contracts", "FIFO Stock", "Market", "Local Market", "Import vs Local", "Open Position",
+             "Exposure", "Stock Cover", "Watch List"]
+    wb._sheets.sort(key=lambda w: order.index(w.title) if w.title in order else len(order))
+    wb.active = 0
     wb.calculation.fullCalcOnLoad = True
     wb.save(path)
     from .xlsx_cache import store_formula_results
@@ -386,7 +555,7 @@ def write_pdf(brief, path):
 
     def table(heads, rows, widths, colour_cols=()):
         data = [[Paragraph(f"<b>{h}</b>", ParagraphStyle("th", parent=body, fontSize=7.5, leading=9, textColor=colors.white)) for h in heads]]
-        data += [[Paragraph(str(c), ParagraphStyle("td", parent=body, fontSize=7.5, leading=9)) if isinstance(c, str) and len(c) > 18 else c
+        data += [[Paragraph(str(c), ParagraphStyle("td", parent=body, fontSize=7.5, leading=9)) if isinstance(c, str) and len(c) > 15 else c
                   for c in r] for r in rows]
         t = Table(data, colWidths=[w * cm for w in widths], repeatRows=1)
         st = [("BACKGROUND", (0, 0), (-1, 0), navy), ("FONTSIZE", (0, 1), (-1, -1), 7.5),
@@ -439,6 +608,42 @@ def write_pdf(brief, path):
     notes = [f"{r['code']}: {r['ref_note']}" for r in brief["parity"] if r.get("ref_note")]
     if notes:
         el += [Paragraph("Check: " + " · ".join(notes), ParagraphStyle("w", parent=small, textColor=RED))]
+    op = brief["open_position"]
+    if op["groups"]:
+        rows, bold_rows = [], []
+        for g in op["groups"]:
+            bold_rows.append(len(rows) + 1)
+            rows.append([f"{g['base']} ({g['contracts']})", "", "", f(g["qty"]), f(g["to_consume_mt"]), "", "", "", "",
+                         f(g["own_after"]), f(g["local"]), f(g["sav_mt"], 0, True), f(g["total_sav"], 0, True), f(g["sav_to_consume"], 0, True), ""])
+            rows += [[r["contract"], r["supplier"], r["origin"], f(r["qty"]), f(r["to_consume_mt"]), f(r["cif"], 2), r["cif_formula"] or "—",
+                      f(r["fx"], 4), f(r["freight"]), f(r["own_after"]), (f(r["local"]) + (" " + r["local_flag"] if r.get("local_flag") else "")),
+                      f(r["sav_mt"], 0, True), f(r["total_sav"], 0, True), f(r["sav_to_consume"], 0, True), r["decision"]] for r in g["rows"]]
+        bold_rows.append(len(rows) + 1)
+        rows.append([f"TOTAL ({sum(g['contracts'] for g in op['groups'])} open)", "", "", f(op["qty"]), f(op["to_consume_mt"]), "", "", "", "",
+                     f(op["own_after"]), "", f(op["sav_mt"], 0, True), f(op["total_sav"], 0, True), f(op["sav_to_consume"], 0, True), ""])
+        t = table(["Contract", "Supplier", "Origin", "MT", "To consume", "CIF $", "CIF formula / live CBOT", "FX", "Freight", "Own after",
+                   "Local", "Sav/MT", "Sav total EGP", "Sav to consume", "Decision"], rows,
+                  [2.8, 2.0, 1.5, 1.3, 1.4, 1.3, 3.8, 1.4, 1.1, 1.4, 1.4, 1.3, 1.9, 1.9, 2.6], colour_cols=(11, 12, 13))
+        t.setStyle(TableStyle([("FONTNAME", (0, i), (-1, i), "Helvetica-Bold") for i in bold_rows] +
+                              [("BACKGROUND", (0, i), (-1, i), colors.HexColor("#DCE3EF")) for i in bold_rows]))
+        el += [Paragraph("Open contracts position (as on the app's Home screen)", h2), t,
+               Paragraph("Sav total = Sav/MT × contract MT, as in the app; “Sav to consume” uses only the tonnes not yet consumed. "
+                         "* local price older than 14 days · † today's local price used as a stand-in.", small)]
+    fs = brief["fifo"]
+    if fs["lots"]:
+        rows = [[r["code"], r["contract"], r["storage_start"], f(r["stock_mt"]), f"{r['use_from']} → {r['use_to']}" if r["use_to"] else "—",
+                 r["pricing"], f(r["fixed_cbot"], 2) if r["fixed_cbot"] is not None else "floats", f(r["live_cbot"], 2),
+                 f(r["cbot_diff"], 2, True), f(r["vs_cbot_egp"], 0, True), f(r["cost_incl"]), f(r["local_incl"]),
+                 f(r["sav_incl_mt"], 0, True), f(r["vs_local_incl"], 0, True), f(r["vs_local_excl"], 0, True)] for r in fs["lots"]]
+        rows += [["Total", f"{t_['code']} · {t_['lots']} lot{'s' if t_['lots'] != 1 else ''}", "", f(t_["stock_mt"]), f"until {t_['use_to']}" if t_["use_to"] else "", "", "", "",
+                  "", f(t_["vs_cbot_egp"], 0, True), "", "", "", f(t_["vs_local_incl"], 0, True), f(t_["vs_local_excl"], 0, True)] for t_ in fs["totals"]]
+        el += [Paragraph("FIFO stock on hand vs CBOT and local", h2),
+               table(["Commodity", "Contract", "Storage", "Stock MT", "Expected use (FIFO)", "Pricing", "CBOT fixed", "Live CBOT",
+                      "Live − fixed", "vs CBOT EGP", "Cost incl.", "Local incl.", "Sav/MT incl.", "vs local incl. EGP", "vs local excl. EGP"],
+                     rows, [1.7, 2.8, 1.7, 1.3, 3.0, 1.6, 1.4, 1.4, 1.4, 1.9, 1.4, 1.4, 1.4, 2.0, 2.0], colour_cols=(8, 9, 12, 13, 14)),
+               Paragraph("vs CBOT: positive = the stock was fixed below today's CBOT (it would cost this much more to buy the same "
+                         "tonnes today at the same premium); unpriced lots float with the CBOT. vs local: (today's local − landed "
+                         "cost) × stock. Expected use applies the configured daily rate in FIFO order from today.", small)]
     el += [Paragraph("Open position", h2),
            table(["Commodity", "Contracts", "To consume MT", "In stock", "Outstanding", "Not priced MT", "Potential incl. EGP",
                   "Potential excl. EGP", "Avg headroom", "Tightest headroom"],
