@@ -634,7 +634,9 @@ def weekly_email_summary(model, history=None):
                       f"{urgent[0]['first_notice']} ({urgent[0]['days_to_fnd']} days)"]
     if risks:
         lines += ["", "STOCK RISKS"] + [f"  {r['code']}: {r['status']}" for r in risks]
-    lines += ["", f"ACTION LIST: {a['open']} open · {a['new']} new · {a['fixed']} fixed since last week", "",
+    act = (f"{a['open']} open · {a['new']} new · {a['fixed']} fixed since last week" if a["previous"]
+           else f"{a['open']} open (first weekly list — next week shows what is new and what was fixed)")
+    lines += ["", f"ACTION LIST: {act}", "",
               "Attached: Weekly Savings & Market Review (PDF), Procurement Pipeline (Excel), Action List (Excel)."]
     hh = [f'<div style="font:14px Arial,sans-serif;color:#222"><h2 style="margin:0 0 4px;color:#1F2A44">Weekly Pack — week {esc(w["week"])}</h2>']
     hh.append(f"<p>Consumed <b>{tot('mt'):,.0f} MT</b> (previous week {tot('mt_prev'):,.0f}) · saving vs local incl. transport "
@@ -660,6 +662,6 @@ def weekly_email_summary(model, history=None):
                   ("Commodity", "Local-equivalent now", "Week ago", "Our premium", "Gap")) + "</tr>" + "".join(
                   f"<tr><td {tl}>{esc(t['code'])}</td><td {td}>{_f(t['now'], 1)}</td><td {td}>{_f(t['week_ago'], 1)}</td>"
                   f"<td {td}>{_f(t['ref_premium'], 1)}</td><td {td}><b>{_f(t['gap_now'], 1, True)}</b></td></tr>" for t in w["premium_trend"]) + "</table>")
-    hh.append(f"<p><b>Action list:</b> {a['open']} open · {a['new']} new · {a['fixed']} fixed since last week.</p>"
+    hh.append(f"<p><b>Action list:</b> {act}.</p>"
               "<p style='color:#666;font-size:12px'>Attached: Weekly Savings &amp; Market Review (PDF), Procurement Pipeline (Excel), Action List (Excel).</p></div>")
     return "\n".join(lines), "".join(hh)
