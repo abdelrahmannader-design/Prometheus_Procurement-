@@ -163,6 +163,7 @@ tr.rd>td{background:var(--bad-bg)}tr.rx>td{color:var(--ink2)}
  <button class="tab" data-p="contracts">Contracts</button>
  <button class="tab" data-p="cbot">CBOT fixed vs consumption</button>
  <button class="tab" data-p="open">Open contracts vs local</button>
+ <button class="tab" data-p="actions">Actions &amp; alerts</button>
  <button class="tab" data-p="transport">Transport map</button>
  <button class="tab" data-p="trends">Trends &amp; breakdowns</button>
  <button class="tab tech" data-p="quality">Data quality</button>
@@ -247,6 +248,14 @@ tr.rd>td{background:var(--bad-bg)}tr.rx>td{color:var(--ink2)}
    <label>Tonnes<select class="ctl" id="oRem"><option value="">All rows</option><option value="rem">Only rows with tonnes remaining</option></select></label>
    <span class="legend" style="margin:0"><span><i style="background:var(--good)"></i>Saving (confirmed)</span><span><i style="background:var(--warn)"></i>Provisional / indicative</span><span><i style="background:var(--bad)"></i>Dearer than local</span><span><i style="background:var(--muted)"></i>Not assessable</span></span></div>
   <div class="tw"><table id="tO"></table></div></div>
+</section>
+
+<section class="panel" id="p-actions">
+ <div class="kpis" id="akpis"></div>
+ <div class="card"><h2>Pricing alerts</h2><p class="sub">Targets set in the app (Pricing alerts…) on contracts not priced yet, checked against the live CBOT and the headroom against today's local price. Triggered first. Click a row to open the contract.</p><div class="tw"><table id="tAl"></table></div></div>
+ <div class="card"><h2>Price exposure — tonnes whose cost is not fixed yet</h2><p class="sub">EGP change in import cost for a 10 ¢/bu CBOT move (10 $/short ton for SBM) on tonnes not priced, and for a 1 EGP move in the FX on contracts still without Form 4. A rise makes the import dearer by this amount; a fall saves it.</p><div class="grid2"><div class="tw"><table id="tExC"></table></div><div class="tw"><table id="tExF"></table></div></div></div>
+ <div class="card"><h2>Since the last report</h2><p class="sub" id="slSub"></p><div class="tw"><table id="tSl"></table></div></div>
+ <div class="card"><h2>Data to fix</h2><p class="sub">Every missing or doubtful input, most important first — fix it on the contract, the freight table or the local prices. Click a row to open the contract.</p><div class="tw"><table id="tFix"></table></div></div>
 </section>
 
 <section class="panel" id="p-transport">
@@ -1457,6 +1466,34 @@ function manualCsv() {
 }
 
 // ── wiring ───────────────────────────────────────────────────────────
+// ── Actions & alerts (from the model; not affected by the filters) ──
+function renderActions() {
+  const AL = M.alerts || [], EX = M.exposure || {cbot: [], fx: []}, SL = M.since_last || {rows: []}, FX_ = M.data_to_fix || [];
+  const trig = AL.filter(a => a.status === "TRIGGERED"), high = FX_.filter(x => x.severity === "High");
+  $("akpis").innerHTML = [
+    kcard("Pricing alerts triggered", trig.length ? -1 : 0, `${trig.length} of ${AL.length}`, '<span class="tag pot">Alerts</span>', AL.length ? "targets set in the app on contracts not priced yet" : "no targets set yet — use Pricing alerts… in the app"),
+    kcard("Tonnes not priced", null, `${f0(EX.total_unpriced_mt)} MT`, '<span class="tag">Exposure</span>', `${money("EGP", EX.total_cbot_egp_per_step)} per 10 ¢ CBOT move`),
+    kcard("Tonnes on provisional FX", null, `${f0(EX.total_fx_mt)} MT`, '<span class="tag">Exposure</span>', `${money("EGP", EX.total_fx_egp_per_step)} per 1 EGP FX move · no Form 4 yet`),
+    kcard("Data to fix", high.length ? -1 : 0, `${FX_.length} items`, '<span class="tag">To do</span>', `${high.length} high · ${FX_.filter(x => x.severity === "Medium").length} medium`)].join("");
+  const f2n = x => isN(x) ? f2(x) : "—";
+  $("tAl").innerHTML = AL.length ? `<thead><tr><th>Status</th><th>Contract</th><th>Commodity</th><th>Futures</th><th class="n">Not priced MT</th><th class="n">Live CBOT</th><th class="n">Break-even</th><th class="n">Headroom</th><th class="n">Fix at ≤</th><th class="n">Protect ≥</th><th class="n">Headroom ≤</th><th>Why / note</th></tr></thead><tbody>` +
+    AL.map(a => `<tr class="row" data-goto="${esc(a.contract_id)}"><td>${a.status === "TRIGGERED" ? '<span class="tag bad">TRIGGERED</span>' : `<span class="tag">${esc(a.status)}</span>`}</td><td><b>${esc(a.contract)}</b><br><span class="note">${esc(a.supplier)}</span></td><td>${esc(a.base)}</td><td>${esc(a.futures)}</td>${td(a.unpriced_mt)}` +
+      `<td class="n">${f2n(a.cbot)} <span class="note">${a.cbot_live ? "live" : "stored"}</span></td><td class="n">${f2n(a.be_cbot)}</td><td class="n ${sg(a.headroom)}">${f2n(a.headroom)} <span class="note">${esc(a.headroom_basis)}</span></td><td class="n">${f2n(a.cbot_below)}</td><td class="n">${f2n(a.cbot_above)}</td><td class="n">${f2n(a.headroom_below)}</td>` +
+      `<td>${a.triggered.length ? `<b class="neg">${a.triggered.map(esc).join("<br>")}</b>` : ""}${a.note ? `<br><span class="note">${esc(a.note)}</span>` : ""}</td></tr>`).join("") + "</tbody>"
+    : '<tbody><tr><td class="note">No pricing targets set. In the app, use “Pricing alerts…” to set a CBOT to fix at, a CBOT to protect against, or a minimum headroom against local.</td></tr></tbody>';
+  $("tExC").innerHTML = `<thead><tr><th>Commodity</th><th>Futures</th><th class="n">Contracts</th><th class="n">Not priced MT</th><th class="n">of which consumed</th><th class="n">Avg premium</th><th class="n">CBOT now</th><th class="n">EGP per ±step</th></tr></thead><tbody>` +
+    (EX.cbot || []).map(r => `<tr><td><b>${esc(r.base)}</b></td><td>${esc(r.futures)}</td><td class="n" title="${esc(r.contract_names)}">${r.contracts}</td>${td(r.unpriced_mt)}${td(r.consumed_unpriced_mt)}${td(r.avg_premium, f2)}${td(r.cbot, f2)}<td class="n"><b>±${f0(r.egp_per_step)}</b> <span class="note">per ${r.step} ${esc(r.unit)}</span></td></tr>`).join("") +
+    `<tr class="tot"><td>Total</td><td></td><td></td>${td(EX.total_unpriced_mt)}<td></td><td></td><td></td><td class="n">±${f0(EX.total_cbot_egp_per_step)}</td></tr></tbody>`;
+  $("tExF").innerHTML = `<thead><tr><th>Commodity</th><th class="n">Contracts without Form 4</th><th class="n">MT</th><th class="n">Value USD</th><th class="n">EGP per ±1 EGP FX</th></tr></thead><tbody>` +
+    (EX.fx || []).map(r => `<tr><td><b>${esc(r.base)}</b></td>${td(r.contracts)}${td(r.mt)}${td(r.usd)}<td class="n"><b>±${f0(r.egp_per_step)}</b></td></tr>`).join("") +
+    `<tr class="tot"><td>Total</td><td></td>${td(EX.total_fx_mt)}<td></td><td class="n">±${f0(EX.total_fx_egp_per_step)}</td></tr></tbody>`;
+  $("slSub").textContent = SL.previous ? `Against the report of ${SL.previous.generated} (data as of ${SL.previous.as_of}).` : "No earlier report saved yet — the app keeps each export, so the next report will show what changed.";
+  $("tSl").innerHTML = SL.rows.length ? `<thead><tr><th>Figure</th><th class="n">Previous</th><th class="n">Now</th><th class="n">Change</th></tr></thead><tbody>` +
+    SL.rows.map(r => { const d = /CBOT|FX/.test(r.label) ? f2 : f0; return `<tr><td>${esc(r.label)} <span class="note">${esc(r.unit)}</span></td>${td(r.previous, d)}${td(r.now, d)}<td class="n ${/CBOT|FX/.test(r.label) ? "" : sg(r.change)}">${isN(r.change) ? (r.change > 0 ? "+" : "") + d(r.change) : "—"}</td></tr>`; }).join("") + "</tbody>" : "";
+  $("tFix").innerHTML = FX_.length ? `<thead><tr><th>Severity</th><th>Issue</th><th>Contract</th><th>Commodity</th><th class="n">MT</th><th>Detail</th><th>What to do</th></tr></thead><tbody>` +
+    FX_.map(x => `<tr class="row" ${x.contract_id ? `data-goto="${esc(x.contract_id)}"` : ""}><td><span class="tag ${x.severity === "High" ? "bad" : x.severity === "Medium" ? "pot" : ""}">${esc(x.severity)}</span></td><td>${esc(x.category)}</td><td>${x.contract ? `<b>${esc(x.contract)}</b>` : "—"}</td><td>${esc(x.base)}</td>${td(x.mt)}<td>${esc(x.detail)}</td><td class="note">${esc(x.action)}</td></tr>`).join("") + "</tbody>"
+    : '<tbody><tr><td class="note">Nothing to fix.</td></tr></tbody>';
+}
 function render() {
   applyManual();
   const v = view(), K = kpis(v);
@@ -1474,8 +1511,11 @@ function openContract(id) {
 $("ttl").textContent = M.title;
 $("meta").textContent = `Data as of ${M.as_of} · generated ${M.generated} · ${C.length} contracts · checksum ${M.checksum}`;
 $("badges").innerHTML = `<button class="badge ${M.management_ready ? "ok" : "no"}" id="bReady">${M.management_ready ? "✔ Management-ready — all " + M.validation.length + " checks passed" : "✖ Not management-ready — " + M.validation.filter(x => !x.passed).length + " check(s) failed"}</button>` +
+  ((M.alerts || []).some(a => a.status === "TRIGGERED") || (M.data_to_fix || []).length ? `<button class="badge no" id="bAct">${(M.alerts || []).filter(a => a.status === "TRIGGERED").length} alert(s) · ${(M.data_to_fix || []).length} to fix</button>` : "") +
   `<span class="tag act">Actual = consumed (FIFO estimated)</span><span class="tag pot">Potential = not yet consumed</span><span class="tag ben">Benchmark = CBOT comparison</span>`;
 $("bReady").addEventListener("click", () => { if (!document.body.classList.contains("mgmt")) showTab("quality"); });
+if ($("bAct")) $("bAct").addEventListener("click", () => showTab("actions"));
+renderActions();
 document.querySelectorAll(".tab").forEach(t => t.addEventListener("click", () => showTab(t.dataset.p)));
 ["fBase", "fOrigin", "fSupplier", "fFrom", "fTo", "fOpen", "fFix", "fDQ", "fAge", "fRegion", "fPlace"].forEach(id => $(id).addEventListener("change", render));
 $("fOrder").addEventListener("change", () => { S.sort = {}; render(); });

@@ -24,7 +24,8 @@ SHEETS = ("Management Summary", "Contract Master", "Local Market Price History",
           "Daily Consumption Allocation", "Savings vs Local", "Contract Savings Summary",
           "CBOT Fixed vs Consumption", "Contract CBOT Performance",
           "Open Contracts vs Local Today", "Excluded & Missing Data", "Validation & Sources",
-          "Local Purchases", "Monthly Trend", "Freight Map")
+          "Local Purchases", "Monthly Trend", "Freight Map", "Actions & Alerts", "Price Exposure",
+          "Since Last Report")
 NAVY, GREEN, RED, GREY, AMBER = "1F3A5F", "1A7A1A", "B3261E", "6B7280", "9A6B00"
 M0, M2, PCT = "#,##0;[Red]-#,##0", "#,##0.00;[Red]-#,##0.00", "0.0%"
 NA = "\"N/A — Missing Source Data\""  # Excel string literal for unsupported calculations
@@ -129,6 +130,9 @@ def build_workbook(model, path):
     last["op"] = _open(b, model)
     last["ex"] = _excluded(b, model)
     _freight_map(b, model, last)
+    _actions(b, model)
+    _exposure(b, model)
+    _since_last(b, model)
     _validation(b, model, last)
     _summary(b, model, last)
     for ws in b.wb.worksheets:
@@ -620,8 +624,8 @@ def _freight_map(b, m, last):
             "its own route (Contract Master, columns AO–AV) — no average is used; a 0 rate needs checking before use.")
     heads = ["Commodity", "Loading Place", "Loading Region", "Plant (Destination)", "Rate Excl. VAT EGP/MT",
              "Previous Rate Excl. VAT", "Effective From", "VAT %", "Rate Incl. VAT EGP/MT", "Previous Rate Incl. VAT",
-             "Contracts on Route", "Note"]
-    end = b.table(ws, "FreightMap", heads, len(rows), [11, 26, 14, 14, 12, 12, 12, 7, 12, 12, 10, 40])
+             "Contracts on Route", "Note", "Rate History (excl. VAT)"]
+    end = b.table(ws, "FreightMap", heads, len(rows), [11, 26, 14, 14, 12, 12, 12, 7, 12, 12, 10, 40, 50])
     CM = lambda L_: col(1, L_, last["cm"])
     for i, x in enumerate(rows):
         r = FIRST + i
@@ -633,7 +637,91 @@ def _freight_map(b, m, last):
         n = sum(1 for c in m["contracts"] if c.get("route_key") == x.get("key"))
         b.put(ws, r, 11, n, M0)
         b.put(ws, r, 12, "0 in the approval — check before use" if not x.get("rate") else "", color=RED if not x.get("rate") else None)
+        b.put(ws, r, 13, "  →  ".join(f"{h['rate']:,.2f} from {h['effective'] or 'start'}" for h in x.get("history") or []))
     ws.freeze_panes = "C5"
+    return end
+
+
+# ── Actions & Alerts, Price Exposure, Since Last Report ────────────────
+
+def _actions(b, m):
+    ws = b.ws(SHEETS.index("Actions & Alerts"))
+    place(b, ws.title, SHEETS[0])
+    al, fx_ = m.get("alerts") or [], m.get("data_to_fix") or []
+    b.title(ws, "Actions & Alerts", "Pricing alerts set in the app on contracts not priced yet (checked against the live CBOT "
+            "and the headroom vs today's local price), then every input to fix, most important first.")
+    heads = ["Type", "Status / Severity", "Contract", "Contract ID", "Commodity", "Futures", "MT", "Live CBOT", "Break-even CBOT",
+             "Headroom", "Fix At CBOT ≤", "Protect At CBOT ≥", "Headroom ≤", "Detail", "What To Do"]
+    rows = [["Pricing alert", a["status"], a["contract"], a["contract_id"], a["base"], a["futures"], a["unpriced_mt"], a["cbot"],
+             a["be_cbot"], a["headroom"], a["cbot_below"], a["cbot_above"], a["headroom_below"],
+             "; ".join(a["triggered"]) or a.get("note", ""), "Consider fixing / protecting" if a["triggered"] else ""] for a in al]
+    rows += [["Data to fix", x["severity"], x["contract"], x["contract_id"], x["base"], "", x.get("mt"), None, None, None, None,
+              None, None, f"{x['category']}: {x['detail']}", x["action"]] for x in fx_]
+    end = b.table(ws, "ActionsAlerts", heads, len(rows), [12, 13, 22, 9, 10, 9, 10, 10, 11, 10, 10, 11, 10, 70, 50])
+    for i, row in enumerate(rows):
+        r = FIRST + i
+        for j, v in enumerate(row, start=1):
+            hot = (row[1] == "TRIGGERED") or (row[1] == "High")
+            b.put(ws, r, j, blank(v), M0 if j == 7 else (M2 if 8 <= j <= 13 else None),
+                  color=RED if hot and j in (2, 14) else (AMBER if row[1] == "Medium" and j == 2 else None), bold=hot and j == 2)
+    ws.freeze_panes = "D5"
+    return end
+
+
+def _exposure(b, m):
+    ws = b.ws(SHEETS.index("Price Exposure"))
+    place(b, ws.title, "Open Contracts vs Local Today")
+    ex = m.get("exposure") or {"cbot": [], "fx": []}
+    b.title(ws, "Price Exposure", "Tonnes whose cost is not fixed yet. CBOT: EGP change in import cost for the step shown "
+            "(10 ¢/bu; 10 $/short ton for SBM) = step × factor × FX × MT. FX: EGP change for a 1 EGP move on contracts still "
+            "without Form 4 = CIF USD/MT × MT. A rise makes the import dearer by this amount.")
+    heads = ["Exposure", "Commodity", "Futures Month", "Contracts", "MT", "Of Which Consumed MT", "Avg Premium", "CBOT / CIF Now",
+             "Step", "Factor", "FX", "EGP Per Step", "Contract Names"]
+    fx_now = (m.get("fx_series") or [[None, None]])[-1][1]
+    rows = [("CBOT", r) for r in ex.get("cbot", [])] + [("FX", r) for r in ex.get("fx_contracts", [])]
+    end = b.table(ws, "PriceExposure", heads, len(rows), [9, 10, 11, 9, 10, 12, 10, 11, 7, 8, 9, 14, 70])
+    for i, (kind, x) in enumerate(rows):
+        r = FIRST + i
+        if kind == "CBOT":
+            fac = FACTORS.get(x["base"])
+            vals = ["CBOT", x["base"], x["futures"], x["contracts"], x["unpriced_mt"], x["consumed_unpriced_mt"], x["avg_premium"],
+                    x["cbot"], x["step"], fac, None, None, x["contract_names"]]
+        else:
+            vals = ["FX", x["base"], "", 1, x["mt"], None, None, x["cif"], 1.0, None, x["fx"], None, x["contract"]]
+        for j, v in enumerate(vals, start=1):
+            b.put(ws, r, j, blank(v), M0 if j in (4, 5, 6) else ("0.0000" if j in (10, 11) else M2 if j in (7, 8, 9) else None))
+        if kind == "CBOT":
+            # EGP per step is summed over contracts at each contract's own FX, so it is stored, not re-derived here.
+            b.put(ws, r, 12, x["egp_per_step"], M0, bold=True)
+        else:
+            b.f(ws, r, 12, f"=I{r}*H{r}*E{r}", x["egp_per_step"], M0, bold=True)
+    if rows:
+        r = end + 2
+        b.put(ws, r, 1, "Total CBOT", bold=True)
+        b.f(ws, r, 12, f'=SUMIFS(L{FIRST}:L{end},A{FIRST}:A{end},"CBOT")', ex.get("total_cbot_egp_per_step"), M0, bold=True)
+        b.put(ws, r + 1, 1, "Total FX", bold=True)
+        b.f(ws, r + 1, 12, f'=SUMIFS(L{FIRST}:L{end},A{FIRST}:A{end},"FX")', ex.get("total_fx_egp_per_step"), M0, bold=True)
+    ws.freeze_panes = "C5"
+    return end
+
+
+def _since_last(b, m):
+    ws = b.ws(SHEETS.index("Since Last Report"))
+    place(b, ws.title, "Actions & Alerts")
+    sl = m.get("since_last") or {"previous": None, "rows": []}
+    prev = sl.get("previous")
+    b.title(ws, "Since Last Report", (f"Headline figures against the report of {prev.get('generated')} (data as of "
+                                      f"{prev.get('as_of')})." if prev else
+                                      "No earlier report saved yet — the app keeps each export, so the next report shows the changes."))
+    heads = ["Figure", "Unit", "Previous", "Now", "Change"]
+    rows = sl.get("rows") or []
+    end = b.table(ws, "SinceLast", heads, len(rows), [44, 9, 16, 16, 16])
+    for i, x in enumerate(rows):
+        r = FIRST + i
+        fmt = M2 if ("CBOT" in x["label"] or "FX" in x["label"]) else M0
+        b.put(ws, r, 1, x["label"]); b.put(ws, r, 2, x["unit"])
+        b.put(ws, r, 3, blank(x["previous"]), fmt); b.put(ws, r, 4, blank(x["now"]), fmt)
+        b.f(ws, r, 5, f'=IF(AND(ISNUMBER(C{r}),ISNUMBER(D{r})),D{r}-C{r},"")', x["change"], fmt, bold=True)
     return end
 
 

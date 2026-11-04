@@ -160,7 +160,7 @@ class HtmlTests(unittest.TestCase):
     def test_dashboard_controls_exist(self):
         for hook in ('data-p="savings"', 'id="svT"', 'data-p="trends"', 'id="trMonth"', 'id="trLocal"', 'id="trCbot"', 'id="trSupplier"', 'id="trSource"', 'id="bMgmt"', 'id="bTheme"', 'id="bXlsx"', "window.print()", 'id="fFrom"', 'id="fDQ"',
                      'data-p="cbot"', 'data-p="open"', 'data-p="quality"', "@media print",
-                     'prefers-color-scheme:dark', 'id="txSeg"', 'data-tx="side" class="on"', 'id="fAge"', 'id="fOrder"', 'data-p="transport"', 'id="fPlace"', 'id="fRegion"', 'id="manAvg"', 'id="tmMap"', 'function bdCols', 'function bdTds', 'Local equiv. CBOT − fixed', '② Avg CBOT storage → last consumption', '+ Clearance EGP/MT', '= Imported cost now',
+                     'prefers-color-scheme:dark', 'id="txSeg"', 'data-tx="side" class="on"', 'id="fAge"', 'id="fOrder"', 'data-p="transport"', 'id="fPlace"', 'id="fRegion"', 'id="manAvg"', 'id="tmMap"', 'function renderActions', 'data-p="actions"', 'id="tFix"', 'function bdCols', 'function bdTds', 'Local equiv. CBOT − fixed', '② Avg CBOT storage → last consumption', '+ Clearance EGP/MT', '= Imported cost now',
                      'id="oBucket"', 'id="oRes"', "STALE", "N/A — Missing Source Data"):
             self.assertIn(hook, self.doc)
 

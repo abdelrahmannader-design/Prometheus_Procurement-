@@ -899,10 +899,15 @@ def build(inp, **overrides):
         "cbot_series": _series_window(series, spikes, master, as_of),
         "freight_map": inp.get("freight_map") or [],
         "live_cbot": inp.get("live_cbot") or {},
+        "fx_series": [[str(r[0])[:10], r[1]] for r in (inp.get("fx_series") or [])
+                      if str(r[0])[:10] >= (as_of - dt.timedelta(days=400)).isoformat()],
     }
     model["validation"] = validate(model)
     model["management_ready"] = all(v["passed"] for v in model["validation"])
     model["checksum"] = checksum(model)
+    # Decision and housekeeping sections: alerts, exposure, changes since last report, data to fix.
+    from .mgmt_actions import add_sections
+    add_sections(model, inp)
     return model
 
 
