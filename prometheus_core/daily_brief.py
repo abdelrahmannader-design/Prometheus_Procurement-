@@ -112,18 +112,24 @@ def open_position(model, app_position=None, threshold=200.0):
         qty = sum(r["qty"] or 0 for r in g)
         groups.append({"base": base, "rows": g, "contracts": len(g), "qty": qty,
                        "to_consume_mt": sum(r["to_consume_mt"] for r in g),
-                       "own_after": sum((r["own_after"] or 0) * (r["qty"] or 0) for r in g) / qty if qty else None,
-                       "local": sum((r["local"] or 0) * (r["qty"] or 0) for r in g) / qty if qty else None,
-                       "total_sav": sum(r["total_sav"] or 0 for r in g),
-                       "sav_to_consume": sum(r["sav_to_consume"] or 0 for r in g)})
-    for g in groups:
-        g["sav_mt"] = g["total_sav"] / g["qty"] if g["qty"] else None
-    qty = sum(g["qty"] for g in groups)
-    return {"source": source, "groups": groups, "qty": qty, "total_sav": sum(g["total_sav"] for g in groups),
+                       "own_after": _wavg(g, "own_after"), "local": _wavg(g, "local"),
+                       "total_sav": sum(r["total_sav"] or 0 for r in g), "sav_mt": _wavg(g, "sav_mt"),
+                       "sav_to_consume": sum(r["sav_to_consume"] or 0 for r in g),
+                       "missing": sum(1 for r in g if r.get("sav_mt") is None)})
+    rows_all = [r for g in groups for r in g["rows"]]
+    return {"source": source, "groups": groups, "qty": sum(g["qty"] for g in groups),
+            "total_sav": sum(g["total_sav"] for g in groups),
             "to_consume_mt": sum(g["to_consume_mt"] for g in groups),
             "sav_to_consume": sum(g["sav_to_consume"] for g in groups),
-            "own_after": sum((g["own_after"] or 0) * g["qty"] for g in groups) / qty if qty else None,
-            "sav_mt": sum(g["total_sav"] for g in groups) / qty if qty else None}
+            "own_after": _wavg(rows_all, "own_after"), "sav_mt": _wavg(rows_all, "sav_mt"),
+            "missing": sum(g["missing"] for g in groups)}
+
+
+def _wavg(rows, key):
+    """Tonne-weighted average over the rows that have the figure (a missing one is not a zero)."""
+    w = [(r[key], r.get("qty") or 0) for r in rows if r.get(key) is not None and (r.get("qty") or 0) > 0]
+    mt = sum(q for _v, q in w)
+    return sum(v * q for v, q in w) / mt if mt else None
 
 
 def fifo_stock(model):
@@ -175,7 +181,13 @@ def fifo_stock(model):
         t["stock_mt"] += r["stock_mt"]
         for k in ("vs_cbot_egp", "vs_local_incl", "vs_local_excl"):
             t[k] += r[k] or 0.0
+            t.setdefault(k + "_n", 0)
+            t[k + "_n"] += r[k] is not None
         t["use_to"] = max(t["use_to"], r["use_to"])
+    for t in tot.values():
+        for k in ("vs_cbot_egp", "vs_local_incl", "vs_local_excl"):
+            if not t.pop(k + "_n"):
+                t[k] = None   # no lot has the figure (e.g. all unpriced: the stock floats with the CBOT)
     return {"lots": out, "totals": list(tot.values())}
 
 
@@ -680,3 +692,84 @@ def write_pdf(brief, path):
                              "“Data to fix…” in the app.", small)]
     doc.build(el)
     return path
+
+
+# ── email body for the CEO digest ────────────────────────────────────────
+
+def email_summary(brief):
+    """A short summary for the body of the CEO digest email: (plain text, HTML)."""
+    from html import escape as esc
+
+    def n(v, d=0, sign=False):
+        if v is None:
+            return "—"
+        return f"{v:+,.{d}f}" if sign else f"{v:,.{d}f}"
+
+    op, fs, k = brief.get("open_position") or {"groups": []}, brief.get("fifo") or {"totals": []}, brief.get("kpis") or {}
+    mk = [m for m in brief.get("market") or [] if m.get("value") is not None]
+    alerts, fixes = brief.get("alerts") or [], [f for f in brief.get("fixes") or [] if f["severity"] == "High"]
+    exp = brief.get("exposure") or {}
+    text = [f"Prometheus Procurement — Daily Commodity Brief {brief['as_of']}", ""]
+    text += ["MARKET"] + [f"  {m['item']}: {n(m['value'], 4 if m['base'] == 'FX' else 2)} {m['unit']} "
+                          f"(prev {n(m['d1'], 2, True)}, 1w {n(m['d7'], 2, True)})" for m in mk]
+    text += ["", "IMPORT TODAY VS LOCAL"] + [f"  {h}" for h in brief.get("headline") or []]
+    text += ["", "OPEN CONTRACTS"] + [f"  {g['base']}: {g['contracts']} contracts, {n(g['qty'])} MT ({n(g['to_consume_mt'])} MT to consume), "
+                                      f"own cost {n(g['own_after'])} vs local {n(g['local'])} EGP/MT, saving {n(g['sav_mt'], 0, True)} EGP/MT · "
+                                      f"{n(g['sav_to_consume'], 0, True)} EGP on tonnes to consume"
+                                      + (f" ({g['missing']} contract(s) missing data)" if g["missing"] else "") for g in op["groups"]]
+    text += ["", "FIFO STOCK ON HAND"] + [f"  {t['code']}: {n(t['stock_mt'])} MT, used by {t['use_to'] or '—'}, vs CBOT {n(t['vs_cbot_egp'], 0, True) if t['vs_cbot_egp'] is not None else 'floats (not priced)'}, "
+                                          f"vs local {n(t['vs_local_incl'], 0, True)} EGP" for t in fs["totals"]]
+    if exp:
+        text += ["", f"EXPOSURE: {n(exp.get('total_unpriced_mt'))} MT not priced = {n(exp.get('total_cbot_egp_per_step'))} EGP per 10 c CBOT move; "
+                     f"{n(exp.get('total_fx_mt'))} MT without Form 4 = {n(exp.get('total_fx_egp_per_step'))} EGP per 1 EGP FX move"]
+    text += ["", f"ALERTS TRIGGERED: {len(alerts)}"] + [f"  {a['contract']}: {'; '.join(a['triggered'])}" for a in alerts]
+    text += [f"HIGH-PRIORITY DATA TO FIX: {len(fixes)}"] + [f"  {f['contract'] or f['base']}: {f['category']}" for f in fixes[:5]]
+    text += ["", f"Historical savings incl. transport: EGP {n(k.get('historical_saving_egp'))} · open potential confirmed EGP "
+                 f"{n(k.get('open_fixed_potential_egp'))}, indicative EGP {n(k.get('open_indicative_potential_egp'))}",
+             "Detail in the attached PDF and Excel."]
+
+    td = 'style="padding:4px 8px;border-bottom:1px solid #e3e8f0;text-align:right"'
+    tl = 'style="padding:4px 8px;border-bottom:1px solid #e3e8f0;text-align:left"'
+    th = 'style="padding:5px 8px;background:#1F2A44;color:#fff;text-align:left;font-weight:600"'
+    col = lambda v: ("#1B7F3B" if (v or 0) > 0 else "#B00020" if (v or 0) < 0 else "#333")
+
+    def table(heads, rows):
+        return ('<table cellspacing="0" style="border-collapse:collapse;font:13px Arial,sans-serif;margin:4px 0 14px">'
+                + "<tr>" + "".join(f"<th {th}>{esc(h)}</th>" for h in heads) + "</tr>"
+                + "".join("<tr>" + "".join(c for c in r) + "</tr>" for r in rows) + "</table>")
+    h = [f'<div style="font:14px Arial,sans-serif;color:#222"><h2 style="margin:0 0 4px;color:#1F2A44">Daily Commodity Brief — {esc(brief["as_of"])}</h2>',
+         '<p style="margin:0 0 12px;color:#666;font-size:12px">Prometheus Procurement · figures from the app; full detail in the attached PDF and Excel.</p>']
+    if alerts:
+        h.append('<p style="background:#fdecee;color:#B00020;padding:8px;border-radius:4px"><b>Pricing alerts triggered:</b><br>'
+                 + "<br>".join(f"{esc(a['contract'])}: {esc('; '.join(a['triggered']))}" for a in alerts) + "</p>")
+    h.append('<h3 style="margin:10px 0 2px">Market</h3>' + table(["", "Now", "vs previous", "1 week", "1 month"], [
+        [f"<td {tl}>{esc(m['item'])}</td>", f"<td {td}><b>{n(m['value'], 4 if m['base'] == 'FX' else 2)}</b> {esc(m['unit'])}</td>"]
+        + [f"<td {td}>{n(m[x], 2, True)}</td>" for x in ("d1", "d7", "d30")]
+        for m in mk]))
+    h.append('<h3 style="margin:10px 0 2px">Import today vs local (EGP/MT)</h3>' + table(
+        ["Commodity", "Import incl. transport", "Local incl.", "Edge", "Verdict"],
+        [[f"<td {tl}>{esc(r['code'])}</td>", f"<td {td}>{n(r.get('import_incl') or r.get('import_excl'))}</td>",
+          f"<td {td}>{n((r['local_excl'] or 0) + (r['local_transport'] or 0) if r['local_excl'] is not None else None)}</td>",
+          f'<td {td}><b style="color:{col(r.get("edge_incl") if r.get("edge_incl") is not None else r.get("edge_excl"))}">'
+          f'{n(r.get("edge_incl") if r.get("edge_incl") is not None else r.get("edge_excl"), 0, True)}</b></td>',
+          f"<td {tl}>{esc(r['verdict'])}</td>"] for r in brief.get("parity") or []]))
+    h.append('<h3 style="margin:10px 0 2px">Open contracts</h3>' + table(
+        ["Commodity", "Contracts", "MT", "To consume", "Own cost", "Local", "Saving/MT", "Saving on tonnes to consume"],
+        [[f"<td {tl}><b>{esc(g['base'])}</b></td>", f"<td {td}>{g['contracts']}</td>", f"<td {td}>{n(g['qty'])}</td>",
+          f"<td {td}>{n(g['to_consume_mt'])}</td>", f"<td {td}>{n(g['own_after'])}</td>", f"<td {td}>{n(g['local'])}</td>",
+          f'<td {td}><span style="color:{col(g["sav_mt"])}">{n(g["sav_mt"], 0, True)}</span></td>',
+          f'<td {td}><b style="color:{col(g["sav_to_consume"])}">EGP {n(g["sav_to_consume"], 0, True)}</b></td>'] for g in op["groups"]]))
+    if fs["totals"]:
+        h.append('<h3 style="margin:10px 0 2px">FIFO stock on hand</h3>' + table(
+            ["Commodity", "Stock MT", "Used by", "vs CBOT EGP", "vs local EGP"],
+            [[f"<td {tl}>{esc(t['code'])}</td>", f"<td {td}>{n(t['stock_mt'])}</td>", f"<td {td}>{esc(t['use_to'] or '—')}</td>",
+              (f'<td {td}><span style="color:{col(t["vs_cbot_egp"])}">{n(t["vs_cbot_egp"], 0, True)}</span></td>' if t["vs_cbot_egp"] is not None
+               else f'<td {td}><span style="color:#888">floats (not priced)</span></td>'),
+              f'<td {td}><span style="color:{col(t["vs_local_incl"])}">{n(t["vs_local_incl"], 0, True)}</span></td>'] for t in fs["totals"]]))
+    if exp:
+        h.append(f"<p><b>Exposure:</b> {n(exp.get('total_unpriced_mt'))} MT not priced = EGP {n(exp.get('total_cbot_egp_per_step'))} per 10 ¢ CBOT move · "
+                 f"{n(exp.get('total_fx_mt'))} MT without Form 4 = EGP {n(exp.get('total_fx_egp_per_step'))} per 1 EGP FX move.</p>")
+    if fixes:
+        h.append("<p><b>High-priority data to fix:</b> " + "; ".join(esc(f"{f['contract'] or f['base']}: {f['category']}") for f in fixes[:5]) + "</p>")
+    h.append("</div>")
+    return "\n".join(text), "".join(h)

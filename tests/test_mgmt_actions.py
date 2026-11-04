@@ -216,3 +216,20 @@ class BriefPositionAndStockTests(unittest.TestCase):
             self.assertAlmostEqual(lots[0]["vs_local_incl"], o["saving_mt"] * o["available_mt"])
         self.assertEqual(lots[0]["use_from"], "2026-10-04")   # FIFO from today at the configured rate
         self.assertEqual(lots[0]["use_to"], "2026-10-06")     # 500 MT at 250 MT/day
+
+
+class DigestTests(unittest.TestCase):
+    def test_group_averages_skip_missing_rows_and_email_summary_has_both_bodies(self):
+        from prometheus_core import daily_brief as D
+        m = mr.build(inputs())
+        base = {"supplier": "S", "commodity": "SBM", "base": "SBM", "origin": "USA", "status": "Open", "cif_formula": "",
+                "fx": 55.0, "freight": 377.0, "local_date": "", "local_flag": "", "decision": "", "threshold": 200.0, "cif": 450.0}
+        rows = [dict(base, contract_id="X1", contract="X1", qty=500.0, own_after=25000.0, local=27000.0, sav_mt=2000.0, total_sav=1e6),
+                dict(base, contract_id="X2", contract="X2", qty=500.0, own_after=None, local=27000.0, sav_mt=None, total_sav=None)]
+        b = D.build(m, app_position=rows)
+        g = b["open_position"]["groups"][0]
+        self.assertEqual((g["own_after"], g["sav_mt"], g["missing"]), (25000.0, 2000.0, 1))
+        text, html = D.email_summary(b)
+        self.assertIn("Daily Commodity Brief", text)
+        self.assertIn("1 contract(s) missing data", text)
+        self.assertIn("<table", html)
