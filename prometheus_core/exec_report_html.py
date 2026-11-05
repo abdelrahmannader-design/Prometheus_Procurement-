@@ -95,6 +95,7 @@ main{max-width:1440px;margin:0 auto;padding:6px 24px 60px}
 .hbar::-webkit-scrollbar-thumb{background:var(--accent,#2f6db5);border-radius:7px;border:3px solid var(--card)}
 .hasbar{scrollbar-width:none}.hasbar::-webkit-scrollbar{height:0}
 @media print{.hbar{display:none}}
+th.hh{cursor:help;text-decoration:underline dotted;text-decoration-color:var(--muted);text-underline-offset:3px}
 table{border-collapse:collapse;width:100%;font-size:12.5px}
 th{text-align:left;font-weight:600;color:var(--ink2);padding:7px 8px;border-bottom:1px solid var(--axis);white-space:nowrap;cursor:pointer;position:sticky;top:0;background:var(--surface)}
 td{padding:6px 8px;border-bottom:1px solid var(--grid);vertical-align:top}
@@ -1560,6 +1561,83 @@ function renderActions() {
     FX_.map(x => `<tr class="row" ${x.contract_id ? `data-goto="${esc(x.contract_id)}"` : ""}><td><span class="tag ${x.severity === "High" ? "bad" : x.severity === "Medium" ? "pot" : ""}">${esc(x.severity)}</span></td><td>${esc(x.category)}</td><td>${x.contract ? `<b>${esc(x.contract)}</b>` : "—"}</td><td>${esc(x.base)}</td>${td(x.mt)}<td>${esc(x.detail)}</td><td class="note">${esc(x.action)}</td></tr>`).join("") + "</tbody>"
     : '<tbody><tr><td class="note">Nothing to fix.</td></tr></tbody>';
 }
+// ── column-head explanations: hover a header to see what it means and how it is calculated ──
+const HEAD_HELP = [
+  [/^② − ① USD\/MT/, "Storage-average result minus consumption-day result, per tonne. Positive = judging by the average from the storage date makes the fixing look better than judging day by day."],
+  [/^① Difference/, "① Consumption-day benchmark: CBOT on that consumption day − the CBOT you fixed. Positive (green) = the market was above your fixing that day, so you fixed cheaper. Total row = tonne-weighted average."],
+  [/^② Difference/, "② Storage-window benchmark: average CBOT from the storage date to the last consumption day − the CBOT you fixed. One value for the whole contract; it does not depend on the estimated consumption days. Positive = you fixed below that average."],
+  [/^① USD\/MT/, "① Difference × the commodity factor (corn 0.3937, soybean / wheat 0.36745, SBM 1.1023) = USD per tonne saved (+) or missed (−) against the CBOT on the consumption day."],
+  [/^② USD\/MT/, "② Difference × the commodity factor = USD per tonne saved (+) or missed (−) against the storage-window average CBOT."],
+  [/^① (Saving|Net) USD|^① Advantage USD|^① Missed USD/, "① USD/MT × tonnes consumed. Advantage = the positive days, missed = the negative days, net = both. A benchmark, not cash: it is not added to the savings vs local."],
+  [/^② (Saving|Net) USD/, "② USD/MT × tonnes consumed: the result against the storage-window average CBOT. A benchmark, not cash."],
+  [/^① (Saving|Net) EGP/, "① USD result × FX = the consumption-day CBOT result in EGP (contract FX: Form 4 when recorded)."],
+  [/^② (Saving|Net) EGP/, "② USD result × FX = the storage-window CBOT result in EGP."],
+  [/^① Result/, "Advantage when ① Difference ≥ the neutral band, missed opportunity when ≤ −band, else neutral."],
+  [/^① (CBOT that day|Price date)|^CBOT that day|^Price date/, "The CBOT stored in the app for the consumption day (front-month daily close), and the date of that price."],
+  [/^① Avg CBOT/, "Tonne-weighted average of the CBOT on each consumption day of the contract."],
+  [/^② Avg CBOT|^Avg CBOT storage/, "Average of the CBOT prices stored from the storage date (or first consumption day when no storage date) to the last consumption day."],
+  [/^Both agree/, "Whether the two benchmarks point the same way. 'Differs' = the verdict depends on the estimated consumption days — check them."],
+  [/^CBOT fixed|^CBOT fixing|^Fixed \/ Live CBOT/, "The CBOT your contract is priced at: recorded pricing lots, else implied = CIF ÷ factor − premium. 'Live' = the app's live quote used for contracts not priced yet."],
+  [/^Fixing type/, "Recorded = from pricing lots; implied = CIF ÷ factor − premium; not fixed = still unpriced."],
+  [/^(Live CBOT|CBOT now)/, "The CBOT quote the app values open contracts at (live quote, else the last stored close), with its time."],
+  [/^Premium gap|^Avg premium gap/, "Local equivalent premium − contract premium. Positive = the local market was dearer than importing at your premium."],
+  [/^Local equiv\. CBOT − fixed/, "Local equivalent CBOT − the CBOT you fixed. Positive = you fixed below the level at which local would have cost the same: you beat the local market."],
+  [/Local equiv\. CBOT/i, "(Local price excl. transport − discharge − clearance) ÷ that day's FX ÷ factor − contract premium: the CBOT at which this contract would have cost the same as buying locally."],
+  [/Local equiv\. premium/i, "(Local price excl. transport − discharge − clearance) ÷ that day's FX ÷ factor − that day's CBOT: the premium the local price amounts to over CBOT, comparable with your premium."],
+  [/^Contract premium|^Premium( \/ Futures)?$|^Avg premium/, "Your contract's premium over the futures month (¢/bu; $/short ton for SBM)."],
+  [/^Futures( month)?$/, "The futures month the premium is quoted over (year inferred when not recorded)."],
+  [/^Final \/ Indicative CIF|^CIF \$\/MT|^Final CIF|^Indicative CIF/, "CIF in USD/MT. Final = fixed (lots, or the final CIF entered). Indicative = (live CBOT + premium) × factor for contracts not priced yet."],
+  [/^CIF × FX|^= CIF EGP/, "CIF $/MT × FX = the CIF in EGP per tonne."],
+  [/^× FX|^FX \(Form 4|^Form 4 \/ Latest FX|^Contract FX|^FX$/, "The FX used for the contract's cost: Form 4 when recorded (all commodities except SBM), else the recorded / latest market FX (provisional)."],
+  [/^FX that day/, "The daily FX stored for that day — used to turn the local price into a USD / CBOT-equivalent."],
+  [/^\+ Discharge/, "Discharge (intake) EGP/MT: the contract entry, else the supplier intake default. With 'Port costs: average', the average replaces discharge + clearance."],
+  [/^\+ Clearance/, "Clearance EGP/MT from the contract. 'Not recorded' = 0 used, so the cost is understated."],
+  [/^\+ Inland freight|^Freight used/, "Route freight EGP/MT incl. 14% VAT: the contract's route entry, else the freight table rate for its loading place → plant on its delivery date; manual entries override."],
+  [/^= Landed excl|^= Imported cost (now )?excl|^Landed excl/, "CIF × FX + discharge + clearance = cost per tonne without inland freight."],
+  [/^= Landed incl|^= Imported cost (now )?incl|^Landed incl/, "Landed excl. transport + inland freight = cost per tonne delivered to the plant."],
+  [/^Local price excl|^Local excl|^Wtd avg local excl/, "Local market price EGP/MT without transport (the quote in force that day; tonne-weighted where averaged)."],
+  [/^Local price incl|^Local incl|^Wtd avg local incl|^Avg local price incl|^Local EGP\/MT/, "Local price + the transport on its quote = delivered local cost per tonne."],
+  [/^Local quote of|^Local date|^Age|^Oldest local quote/, "Date of the local quote in force and its age in days (a quote stays in force until a new one is entered; > 5 days is flagged STALE)."],
+  [/^MT on quotes > 5/, "Tonnes compared against a local quote older than 5 days."],
+  [/^Local quotes/, "Share of tonnes compared with a same-day quote, a recent one (≤ 5 days) or a stale one."],
+  [/^Local record/, "The local price record used (index in the app's local prices)."],
+  [/^Saving EGP\/MT|^Savings( incl\.| excl\.)? EGP\/MT|^Savings\/MT|^Saving\/MT now|^EGP\/MT (incl|excl)/, "Local price − landed cost per tonne (incl. transport: both delivered; excl.: both without inland transport). Positive = importing was cheaper."],
+  [/^Saving EGP$|^Total savings|^Savings (incl|excl)\. EGP$|^Savings (incl|excl) EGP/, "Saving per tonne × tonnes consumed."],
+  [/^Savings %/, "Savings ÷ (local price × tonnes)."],
+  [/^Total potential/, "Saving per tonne now × tonnes not yet consumed: what the open tonnes are worth against today's local price (potential, not realised)."],
+  [/^Break-even CBOT/, "(Local − discharge − clearance [− freight]) ÷ FX ÷ factor − premium: the CBOT at which the import would cost the same as local."],
+  [/^Headroom/, "Break-even CBOT − the CBOT the contract is valued at: how far CBOT can rise before local is cheaper (negative = local already cheaper)."],
+  [/^Indicative/, "For contracts not priced yet: as if fixed at today's CBOT — kept out of the CBOT totals."],
+  [/^CBOT result USD/, "Net ① result in USD for the contract (consumption-day benchmark)."],
+  [/^Compared MT|^MT consumed|^Consumed MT|^MT with CBOT/, "Tonnes consumed (FIFO estimate) that could be compared — with a local price, or with a CBOT price that day."],
+  [/^Not yet consumed|^Remaining MT|^Not priced MT|^of which consumed/, "Tonnes still to consume (stock + outstanding), or not priced yet."],
+  [/^Pricing status|^Valuation/, "Fixed / partially fixed / unpriced / flat; valuation = confirmed (fixed CIF + Form 4) or indicative / provisional."],
+  [/^Storage start/, "The storage (receipt) date: consumption is allocated FIFO from it and the storage-window benchmark starts there."],
+  [/^EGP per ±step/, "Step (10 ¢/bu; 10 $/st for SBM) × factor × FX × tonnes not priced = EGP cost change for that CBOT move."],
+  [/^EGP per ±1 EGP FX/, "CIF USD × tonnes on contracts without Form 4 = EGP cost change for a 1 EGP FX move."],
+  [/^Difference$/, "CBOT on the consumption day (or the average) − the CBOT you fixed; positive = you fixed below the market."],
+  [/^Result$/, "The CBOT verdict for that day: advantage, neutral or missed opportunity (against the neutral band)."],
+  [/^Assessment$/, "Overall CBOT verdict for the contract from its tonne-weighted ① difference."],
+  [/^Pricing( \/ fixing)? date/, "The date the CBOT was fixed (from pricing lots); 'Not recorded' when the fixing is implied from the CIF."],
+  [/^Data quality$/, "How the row is supported: FIFO estimate, same-day or carried local quote, final or provisional CIF."],
+  [/^Sourced allocated MT|^Excluded \/ unallocated MT|^Total consumed MT/, "Consumption reconciliation: tonnes allocated to a contract or local purchase vs tonnes kept out (no source, no price…) — they must add up to the total consumed."],
+  [/^App value|^Used − app/, "Freight the app stored on the contract before route-specific freight, and the difference to the route freight now used."],
+  [/^Route rate/, "Freight table rate for the route (EGP/MT, excl. VAT) in force on the delivery date."],
+  [/^Manual freight/, "Your what-if freight for this contract (browser only); it replaces the route freight in every figure incl. transport."],
+  [/^Contracts without Form 4/, "Open contracts still valued at the market FX: their cost moves with the FX until Form 4 is recorded."],
+  [/^Value USD/, "CIF × contract tonnes (indicative CIF at the live CBOT for contracts not priced)."],
+  [/^First day|^Last day/, "First / last consumption day of the contract in this selection (FIFO estimate)."],
+  [/^Region$|^Loading place|^Plant$|^→ /, "Loading place / region and plant (destination) of the freight route; '→ plant' columns are the route rates to that plant."],
+  [/^Contracts$/, "Number of contracts in the row."],
+  [/^Basis \/ note|^Delivery \/ storage/, "Where the figure comes from (freight route, delivery or storage date)."],
+  [/^Severity|^Issue|^What to do/, "Data to fix: high = changes a figure now (e.g. clearance missing on tonnes still to consume)."],
+];
+function headHelp() {
+  document.querySelectorAll("main th:not([data-tip])").forEach(th => {
+    const t = th.textContent.replace(/[▲▼]/g, "").trim(), hit = HEAD_HELP.find(([re]) => re.test(t));
+    if (hit) { th.setAttribute("data-tip", `<b>${esc(t)}</b><br>${esc(hit[1])}`); th.classList.add("hh"); }
+  });
+}
 // Pinned horizontal scrollbars: one per wide scroll container, synced both ways.
 function hbars() {
   document.querySelectorAll("main .tw, main .detwrap").forEach(el => {
@@ -1582,6 +1660,7 @@ function hbars() {
     el.classList.toggle("hasbar", !inner);
   });
   placeInnerBars();
+  headHelp();
 }
 function placeInnerBars() {
   const H = window.innerHeight;
