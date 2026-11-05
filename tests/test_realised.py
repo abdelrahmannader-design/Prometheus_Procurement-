@@ -235,5 +235,86 @@ class RealEngineTests(unittest.TestCase):
         self.assertEqual(tot["grand_qty_excl"], 500)
 
 
+class _Var:
+    def __init__(self, v=""):
+        self.v = v
+
+    def set(self, v):
+        self.v = v
+
+    def get(self):
+        return self.v
+
+
+class _Tile:
+    def __init__(self):
+        self.shown = True
+
+    def grid(self):
+        self.shown = True
+
+    def grid_remove(self):
+        self.shown = False
+
+
+@needs_app
+class TransportViewTests(unittest.TestCase):
+    """Home savings view: Both (default) / Incl. transport / Excl. transport."""
+
+    @classmethod
+    def setUpClass(cls):
+        spec = importlib.util.spec_from_file_location("prometheus_realised_view", APP)
+        cls.module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.module)
+
+    def _app(self):
+        app = self.module.App.__new__(self.module.App)
+        app.state_obj = {"ui": {}}
+        for n in ("hd_kpi_prev", "hd_kpi_realized_mt", "hd_kpi_saving", "hd_kpi_prev_x",
+                  "hd_kpi_realized_mt_x", "hd_kpi_transport_eff", "hd_kpi_saving_x", "hd_kpi_scope_var"):
+            setattr(app, n, _Var())
+        caps = ("Realised Savings", "Saving / MT", "MTD Realised") + app._HD_XROW
+        app._hd_tiles = {k: (_Tile(), _Var(k)) for k in caps}
+        app._hd_tile_hints = {k: _Var() for k in caps}
+        app._hd_mtd = (100000.0, 150000.0)
+        app._home_compact_money = lambda v: f"{v:+,.0f}"
+        return app
+
+    METRICS = {"realized_saving": -8600000.0, "realized_saving_excl": 413843.0,
+               "realized_per_mt": -108.0, "realized_per_mt_excl": 5.0, "method": "consumption"}
+
+    def test_default_is_both(self):
+        app = self._app()
+        self.assertEqual(app._hd_transport_view(), "both")
+        app._hd_apply_transport_view(self.METRICS, "CORN")
+        self.assertTrue(all(app._hd_tiles[k][0].shown for k in app._HD_XROW))
+        self.assertEqual(app.hd_kpi_prev.get(), "-8,600,000")
+        self.assertEqual(app.hd_kpi_prev_x.get(), "+413,843")
+        self.assertEqual(app.hd_kpi_transport_eff.get(), "-9,013,843")
+        self.assertEqual(app._hd_tiles["Realised Savings"][1].get(), "Realised · incl. transport")
+        self.assertIn("side by side", app.hd_kpi_scope_var.get())
+
+    def test_excl_and_incl(self):
+        app = self._app()
+        app.state_obj["ui"]["realised_transport_view"] = "excl"
+        app._hd_apply_transport_view(self.METRICS, "CORN")
+        self.assertFalse(any(app._hd_tiles[k][0].shown for k in app._HD_XROW))
+        self.assertEqual(app.hd_kpi_prev.get(), "+413,843")
+        self.assertEqual(app.hd_kpi_realized_mt.get(), "EGP +5")
+        self.assertEqual(app.hd_kpi_saving.get(), "+150,000")
+        self.assertIn("incl. transport -8,600,000", app._hd_tile_hints["Realised Savings"].get())
+        app.state_obj["ui"]["realised_transport_view"] = "incl"
+        app._hd_apply_transport_view(self.METRICS, "CORN")
+        self.assertEqual(app.hd_kpi_prev.get(), "-8,600,000")
+        self.assertEqual(app.hd_kpi_saving.get(), "+100,000")
+        self.assertEqual(app._hd_tiles["Realised Savings"][1].get(), "Realised Savings")
+
+    def test_old_method_has_no_excl_row(self):
+        app = self._app()
+        app._hd_apply_transport_view({**self.METRICS, "method": "delivery", "realized_saving_excl": None}, "ALL")
+        self.assertFalse(any(app._hd_tiles[k][0].shown for k in app._HD_XROW))
+        self.assertEqual(app.hd_kpi_prev.get(), "-8,600,000")
+
+
 if __name__ == "__main__":
     unittest.main()
