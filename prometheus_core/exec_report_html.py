@@ -84,6 +84,17 @@ main{max-width:1440px;margin:0 auto;padding:6px 24px 60px}
 @media(max-width:1000px){.grid2{grid-template-columns:minmax(0,1fr)}}
 .says{margin:0;padding-left:20px}.says li{margin:4px 0}
 .tw{overflow-x:auto}
+/* A horizontal scrollbar pinned to the bottom of the screen for every wide table (and a second one,
+   just above it, for an opened contract's day table), kept in step with the table it belongs to. */
+.hbar{position:sticky;bottom:0;left:0;overflow-x:auto;overflow-y:hidden;height:17px;z-index:6;background:var(--card);
+  border-top:1px solid var(--line);box-shadow:0 -2px 6px rgba(0,0,0,.06)}
+.hbar.inner{position:fixed;bottom:18px;z-index:7;display:none}
+.hbar>div{height:1px}
+.hbar{scrollbar-width:auto;scrollbar-color:var(--accent,#2f6db5) var(--card)}
+.hbar::-webkit-scrollbar{height:14px}.hbar::-webkit-scrollbar-track{background:var(--card)}
+.hbar::-webkit-scrollbar-thumb{background:var(--accent,#2f6db5);border-radius:7px;border:3px solid var(--card)}
+.hasbar{scrollbar-width:none}.hasbar::-webkit-scrollbar{height:0}
+@media print{.hbar{display:none}}
 table{border-collapse:collapse;width:100%;font-size:12.5px}
 th{text-align:left;font-weight:600;color:var(--ink2);padding:7px 8px;border-bottom:1px solid var(--axis);white-space:nowrap;cursor:pointer;position:sticky;top:0;background:var(--surface)}
 td{padding:6px 8px;border-bottom:1px solid var(--grid);vertical-align:top}
@@ -177,6 +188,9 @@ tr.rd>td{background:var(--bad-bg)}tr.rx>td{color:var(--ink2)}
  <span class="note"><b>Transport basis</b></span>
  <div class="seg" id="txSeg" role="group" aria-label="Transport scenario"><button data-tx="side" class="on">Side-by-side</button><button data-tx="incl">Including transportation</button><button data-tx="excl">Excluding transportation</button></div>
  <span class="note" id="txNote"></span>
+ <span class="note" style="margin-left:14px"><b>Port costs</b></span>
+ <div class="seg" id="pcSeg" role="group" aria-label="Port costs basis"><button data-pc="actual" class="on">Actual per contract</button><button data-pc="avg">Average for all</button></div>
+ <label class="note" style="display:inline-flex;align-items:center;gap:4px">discharge + clearance <input id="pcAvg" type="number" min="0" step="10" value="500" style="width:78px" class="ctl"> EGP/MT</label>
 </div>
 <div class="filters" id="filters">
  <label>Commodity<select id="fBase"></select></label>
@@ -197,6 +211,7 @@ tr.rd>td{background:var(--bad-bg)}tr.rx>td{color:var(--ink2)}
 </div>
 <main>
 <div class="card warnbox" id="manBanner" style="display:none;margin-top:10px"></div>
+<div class="card warnbox" id="pcBanner" style="display:none;margin-top:10px"></div>
 <section class="panel on" id="p-overview">
  <div class="kpis" id="kpis"></div>
  <div class="card mgmt-only" id="mgmtNote"></div>
@@ -372,7 +387,7 @@ function eqAvg(rows) {
   return {local: wt("local"), local_excl: wt("local_excl"), eq: wt("eq_premium"), gap: wt("premium_gap"), eqc: wt("eq_cbot"), eqd: wt("eq_cbot_diff"),
           prem: (w.find(([, s]) => isN(s.contract_premium)) || [{}, {}])[1].contract_premium, unit: (w.find(([, s]) => s.premium_unit) || [{}, {}])[1].premium_unit || ""};
 }
-const LOCAL_TH = `<th class="n">Local price incl.</th><th class="n">Local price excl.</th><th class="n">Local equiv. premium</th><th class="n">Contract premium</th><th class="n">Premium gap</th><th class="n">Local equiv. CBOT</th><th class="n">Local equiv. CBOT − fixed</th>`;
+const LOCAL_TH = `<th class="n">Local price excl.</th><th class="n">Local price incl.</th><th class="n">Local equiv. premium</th><th class="n">Contract premium</th><th class="n">Premium gap</th><th class="n">Local equiv. CBOT</th><th class="n">Local equiv. CBOT − fixed</th>`;
 // Local-equivalent CBOT: the CBOT at which the contract, at its own premium, would have cost the
 // same as the local price that day = (local excl. − discharge − clearance) ÷ FX that day ÷ factor − contract premium.
 function eqcTip(r) {
@@ -384,24 +399,27 @@ const eqcTds = s => (isN(s.eq_cbot) ? `<td class="n" title="${esc(eqcTip(s))}"><
 function localTds(r) {
   const s = svOf(r), u = s.premium_unit ? ` <span class="note">${esc(s.premium_unit)}</span>` : "";
   if (!s.date) return '<td class="na" colspan="7">No Savings vs local row for this day</td>';
-  return `${td(s.local, f2)}${td(s.local_excl, f2)}` + (isN(s.eq_premium) ? `<td class="n" title="${esc(premTip(s))}"><b>${f2(s.eq_premium)}</b>${u}</td>` : '<td class="n na">N/A</td>') +
+  return `${td(s.local_excl, f2)}${td(s.local, f2)}` + (isN(s.eq_premium) ? `<td class="n" title="${esc(premTip(s))}"><b>${f2(s.eq_premium)}</b>${u}</td>` : '<td class="n na">N/A</td>') +
     (isN(s.contract_premium) ? `<td class="n">${f2(s.contract_premium)}${u}</td>` : '<td class="n note">—</td>') + td(s.premium_gap, f2, 1) + eqcTds(s);
 }
-const localTot = e => `${td(e.local, f2)}${td(e.local_excl, f2)}${td(e.eq, f2)}${td(e.prem, f2)}${td(e.gap, f2, 1)}${td(e.eqc, f2)}${td(e.eqd, f2, 1)}`;
+const localTot = e => `${td(e.local_excl, f2)}${td(e.local, f2)}${td(e.eq, f2)}${td(e.prem, f2)}${td(e.gap, f2, 1)}${td(e.eqc, f2)}${td(e.eqd, f2, 1)}`;
 // Cost build-up of one consumption day (a Savings vs local row): CIF × FX + discharge + clearance (+ freight).
 const BD_TH = `<th class="n">CIF $/MT</th><th class="n">× FX</th><th class="n">= CIF EGP/MT</th><th class="n">+ Discharge</th><th class="n">+ Clearance</th><th class="n">= Landed excl. transport</th><th class="n">+ Inland freight</th><th class="n">= Landed incl. transport</th>`;
-function bdTds(s) {
-  if (!s || !s.date) return '<td class="na" colspan="8">No Savings vs local row for this day</td>';
+const BD_TH_NOCIF = BD_TH.replace('<th class="n">CIF $/MT</th>', "");
+function bdTds(s, noCif) {
+  if (!s || !s.date) return `<td class="na" colspan="${noCif ? 7 : 8}">No Savings vs local row for this day</td>`;
   const fee = (v, b, m) => m ? `<td class="n stale" title="Not recorded — cost excludes it">0.00 <span class="note">not recorded</span></td>` : `<td class="n" title="${esc(b || "")}">${f2(v)}</td>`;
   const frB = s.man ? manualFor(CI[s.contract_id] || {})[1] : s.freight_basis;
-  return `${td(s.cif_used, f2)}${td(s.fx_used, x => fx(x, 4))}${td(s.cif_egp, f2)}${fee(s.discharge, s.disc_basis, s.disc_missing)}${fee(s.clearance, s.clr_basis, s.clr_missing)}` +
+  const pa = s.port_avg;
+  return `${noCif ? "" : td(s.cif_used, f2)}${td(s.fx_used, x => fx(x, 4))}${td(s.cif_egp, f2)}${fee(s.discharge, pa ? "Average discharge + clearance (what-if)" : s.disc_basis, pa ? false : s.disc_missing)}` +
+    `${fee(s.clearance, pa ? "included in the average" : s.clr_basis, pa ? false : s.clr_missing)}` +
     `<td class="n"><b>${isN(s.cost_excl) ? f2(s.cost_excl) : "N/A"}</b></td>` +
     (isN(s.freight) ? `<td class="n" title="${esc(frB || "")}">${f2(s.freight)}${s.man ? ' <span class="tag pot">manual</span>' : ""}</td>` : '<td class="n na" title="No route in the freight table — add it manually">N/A</td>') +
     `<td class="n"><b>${isN(s.cost) ? f2(s.cost) : "N/A"}</b></td>`;
 }
-function bdTot(rows) {
+function bdTot(rows, noCif) {
   const w = (k, rs) => { const x = rs.filter(r => isN(r[k])), m = sum(x, r => r.mt); return m ? sum(x, r => r[k] * r.mt) / m : null; };
-  return `${td(w("cif_used", rows), f2)}${td(w("fx_used", rows), x => fx(x, 4))}${td(w("cif_egp", rows), f2)}${td(w("discharge", rows), f2)}${td(w("clearance", rows), f2)}${td(w("cost_excl", rows), f2)}${td(w("freight", rows), f2)}${td(w("cost", rows), f2)}`;
+  return `${noCif ? "" : td(w("cif_used", rows), f2)}${td(w("fx_used", rows), x => fx(x, 4))}${td(w("cif_egp", rows), f2)}${td(w("discharge", rows), f2)}${td(w("clearance", rows), f2)}${td(w("cost_excl", rows), f2)}${td(w("freight", rows), f2)}${td(w("cost", rows), f2)}`;
 }
 const STALE_IDS = new Set(M.savings.filter(r => r.local_stale).map(r => r.contract_id).concat(M.open.filter(r => r.local_stale).map(r => r.contract_id)));
 // Order filter: newest or oldest first by date; empty = each table's own default (by value).
@@ -752,7 +770,7 @@ function detail(c, v) {
   const fxLine = fx(c.fx, 4) + ` <span class="note">${esc(c.fx_basis)}</span>` + (c.form4_fx ? `<br><span class="note">Form 4 ${fx(c.form4_fx, 4)} · ${esc(c.form4_date || "date not recorded")}</span>` : (c.is_open ? '<br><span class="note">Form 4: Pending / Not recorded</span>' : ""));
   const pr = dl([["Pricing status", pTag(c.pricing_class)], ["Premium", premCell(c.premium, f.unit || c.premium_label, c.pricing_class)], ["Futures month", esc(futCode(c))],
     ["CBOT fixing", fixCell(c)], ["Pricing / fixing date", pdate(c) ? esc(pdate(c)) : '<span class="note">Not recorded</span>'], ["CIF USD/MT", cifCell(c)], ["FX EGP/USD", fxLine],
-    ["Landed EGP/MT", f2(c.landed_egp_mt) + ` <span class="note">incl. transport</span>`],
+    ["Landed EGP/MT", f2(isN(gCon(c).incl) ? gCon(c).incl : c.landed_egp_mt) + ` <span class="note">incl. transport${pcOn() ? " · average port costs" : ""}</span>`],
     ["Import inland transport", isN(c.freight_egp_mt) ? f2(c.freight_egp_mt) + " EGP/MT" : NA_]]);
   const lo = dl([["Consumed", f0(c.consumed_mt) + " MT"], ["Compared vs local", f0(sum(srows, r => r.mt)) + " MT"], ["Period", esc((c.first_date || "—") + " → " + (c.last_date || "—"))],
     ...L_.flatMap(sc => { const A = aggS(srows, sc); return [[`Wtd avg local ${sc.h}`, f2(A.local)], [`Landed ${sc.h}`, f2(A.cost)],
@@ -822,10 +840,10 @@ function cbotDaysU(c, rows) {
   rows = dayOrder(rows);
   const mt = sum(rows, r => r.mt), w = rows.filter(r => isN(r.cbot)), wm = sum(w, r => r.mt), i = rows.filter(r => isN(r.ind_diff)), im = sum(i, r => r.mt);
   const avg = wm ? sum(w, r => r.cbot * r.mt) / wm : null, lat = rows.find(r => isN(r.latest_cbot)) || {};
-  return `<thead><tr><th>Consumption date</th><th class="n">Consumed MT</th><th class="n">CBOT fixed</th><th class="n">Premium</th><th class="n">Indicative CIF $/MT</th>${BD_TH}<th class="n">CBOT that day</th><th>Price date</th><th class="n">Avg CBOT storage → last consumption</th>${LOCAL_TH}<th class="n">Live CBOT</th><th class="n">Indicative difference</th><th class="n">Indicative USD/MT</th><th class="n">Indicative USD</th><th class="n">FX</th><th class="n">Indicative EGP</th><th>Result</th></tr></thead><tbody>` +
-    rows.map(r => `<tr><td>${esc(r.date)}</td>${td(r.mt)}<td class="n"><span class="tag pot">Not fixed yet</span></td>${td(r.premium, f2)}<td class="n" title="(latest CBOT + premium) × factor — indicative until priced">${isN(r.latest_cbot) && isN(r.premium) ? f2((r.latest_cbot + r.premium) * r.factor) : "—"}</td>${bdTds(svOf(r))}${td(r.cbot, f2)}<td>${esc(r.cbot_date || "—")}</td>${td(r.win_cbot, f2)}${localTds(r)}<td class="n">${f2(r.latest_cbot)} <span class="note">${r.latest_cbot_live ? "live · " : ""}${esc(liveTime(r))}</span></td>` +
+  return `<thead><tr><th>Consumption date</th><th class="n">Consumed MT</th><th class="n">CBOT fixed</th><th class="n">Premium</th><th class="n">Indicative CIF $/MT</th>${BD_TH_NOCIF}<th class="n">CBOT that day</th><th>Price date</th><th class="n">Avg CBOT storage → last consumption</th>${LOCAL_TH}<th class="n">Live CBOT</th><th class="n">Indicative difference</th><th class="n">Indicative USD/MT</th><th class="n">Indicative USD</th><th class="n">FX</th><th class="n">Indicative EGP</th><th>Result</th></tr></thead><tbody>` +
+    rows.map(r => `<tr><td>${esc(r.date)}</td>${td(r.mt)}<td class="n"><span class="tag pot">Not fixed yet</span></td>${td(r.premium, f2)}<td class="n" title="(latest CBOT + premium) × factor — indicative until priced">${isN(r.latest_cbot) && isN(r.premium) ? f2((r.latest_cbot + r.premium) * r.factor) : "—"}</td>${bdTds(svOf(r), true)}${td(r.cbot, f2)}<td>${esc(r.cbot_date || "—")}</td>${td(r.win_cbot, f2)}${localTds(r)}<td class="n">${f2(r.latest_cbot)} <span class="note">${r.latest_cbot_live ? "live · " : ""}${esc(liveTime(r))}</span></td>` +
       `${td(r.ind_diff, f2, 1)}${td(r.ind_usd_mt, f2, 1)}${td(r.ind_usd, f0, 1)}${td(r.fx, x => fx(x, 4))}${td(r.ind_egp, f0, 1)}<td><span class="tag pot">${esc(r.result)}</span></td></tr>`).join("") +
-    `<tr class="tot"><td>Total / average · ${rows.length} days</td>${td(mt)}<td class="n note">premium ${f2(c.premium)} ${esc((rows[0] || {}).unit || "")} over ${esc((rows[0] || {}).futures || "—")}</td><td></td><td></td>${bdTot(rows.map(r => Object.assign({}, svOf(r), {mt: r.mt})))}${td(avg, f2)}<td class="note">tonne-weighted</td>${td((rows.find(r => isN(r.win_cbot)) || {}).win_cbot, f2)}${localTot(eqAvg(rows))}${td(lat.latest_cbot, f2)}` +
+    `<tr class="tot"><td>Total / average · ${rows.length} days</td>${td(mt)}<td class="n note">premium ${f2(c.premium)} ${esc((rows[0] || {}).unit || "")} over ${esc((rows[0] || {}).futures || "—")}</td><td></td><td></td>${bdTot(rows.map(r => Object.assign({}, svOf(r), {mt: r.mt})), true)}${td(avg, f2)}<td class="note">tonne-weighted</td>${td((rows.find(r => isN(r.win_cbot)) || {}).win_cbot, f2)}${localTot(eqAvg(rows))}${td(lat.latest_cbot, f2)}` +
     `${td(im ? sum(i, r => r.ind_diff * r.mt) / im : null, f2, 1)}${td(im ? sum(i, r => r.ind_usd) / im : null, f2, 1)}${td(sum(i, r => r.ind_usd), f0, 1)}<td></td>${td(sum(i, r => r.ind_egp), f0, 1)}<td class="note">Indicative — not in the CBOT totals</td></tr></tbody>` +
     `<tfoot><tr><td colspan="30" class="note">Not priced yet: the result is fixed only when the contract is priced. Indicative = (CBOT that day − live CBOT) × factor × MT, i.e. as if it were fixed at today's CBOT.</td></tr></tfoot>`;
 }
@@ -836,14 +854,14 @@ function cbotDays(c, rows) {
   const avg = amt ? sum(a, r => r.cbot * r.mt) / amt : null, usd = sum(a, r => r.usd), egp = sum(a, r => r.egp);
   const n = M.options.neutral_cbot, d = isN(avg) ? avg - c.fix.value : null, wr = rows.find(r => isN(r.win_cbot)) || {};
   const tag = (u, res) => `<span class="tag ${u > 0 ? "good" : u < 0 ? "bad" : ""}">${esc(res)}</span>`;
-  return `<thead><tr><th>Consumption date</th><th class="n">Consumed MT</th><th class="n">CBOT fixed</th><th class="n">Premium</th><th class="n">CIF $/MT</th>${BD_TH}<th class="n">① CBOT that day</th><th class="n">② Avg CBOT storage → last consumption</th>` +
+  return `<thead><tr><th>Consumption date</th><th class="n">Consumed MT</th><th class="n">CBOT fixed</th><th class="n">Premium</th><th class="n">CIF $/MT</th>${BD_TH_NOCIF}<th class="n">① CBOT that day</th><th class="n">② Avg CBOT storage → last consumption</th>` +
     `<th class="n">① Saving USD</th><th class="n">② Saving USD</th><th>① Result</th>${LOCAL_TH}<th class="n">① Difference</th><th class="n">② Difference</th><th class="n">① USD/MT</th><th class="n">② USD/MT</th>` +
     `<th>① Price date</th><th class="n">FX</th><th class="n">① Saving EGP</th><th class="n">② Saving EGP</th></tr></thead><tbody>` +
-    rows.map(r => `<tr><td>${esc(r.date)}</td>${td(r.mt)}${td(r.fix, f2)}${td(r.premium, f2)}<td class="n" title="${esc(cifTip(c))}">${f2(r.cif)}</td>${bdTds(svOf(r))}${td(r.cbot, f2)}${td(r.win_cbot, f2)}` +
+    rows.map(r => `<tr><td>${esc(r.date)}</td>${td(r.mt)}${td(r.fix, f2)}${td(r.premium, f2)}<td class="n" title="${esc(cifTip(c))}">${f2(r.cif)}</td>${bdTds(svOf(r), true)}${td(r.cbot, f2)}${td(r.win_cbot, f2)}` +
       (r.assessable ? `${td(r.usd, f0, 1)}${td(r.win_usd, f0, 1)}<td>${tag(r.usd, r.result)}</td>${localTds(r)}${td(r.diff, f2, 1)}${td(r.win_diff, f2, 1)}${td(r.usd_mt, f2, 1)}${td(r.win_usd_mt, f2, 1)}`
                     : `<td class="na">—</td>${td(r.win_usd, f0, 1)}<td class="na">Not compared: ${esc(r.benchmark)}</td>${localTds(r)}<td class="na">—</td>${td(r.win_diff, f2, 1)}<td class="na">—</td>${td(r.win_usd_mt, f2, 1)}`) +
       `<td>${esc(r.cbot_date || "—")}</td>${td(r.fx, x => fx(x, 4))}${td(r.egp, f0, 1)}${td(r.win_egp, f0, 1)}</tr>`).join("") +
-    `<tr class="tot"><td>Total / average · ${rows.length} days</td>${td(mt)}${td(c.fix.value, f2)}${td(c.premium, f2)}${td(c.cif_usd_mt, f2)}${bdTot(rows.map(r => Object.assign({}, svOf(r), {mt: r.mt})))}${td(avg, f2)}${td(wr.win_cbot, f2)}` +
+    `<tr class="tot"><td>Total / average · ${rows.length} days</td>${td(mt)}${td(c.fix.value, f2)}${td(c.premium, f2)}${td(c.cif_usd_mt, f2)}${bdTot(rows.map(r => Object.assign({}, svOf(r), {mt: r.mt})), true)}${td(avg, f2)}${td(wr.win_cbot, f2)}` +
     `${td(usd, f0, 1)}${td(sum(rows, r => r.win_usd), f0, 1)}<td>${!amt ? "Not assessable" : d >= n ? "Advantage" : d <= -n ? "Missed opportunity" : "Neutral"}</td>${localTot(eqAvg(rows))}` +
     `${td(d, f2, 1)}${td(wr.win_diff, f2, 1)}${td(amt ? usd / amt : null, f2, 1)}${td(wr.win_usd_mt, f2, 1)}<td class="note">① tonne-weighted</td>` +
     `${td(amt ? sum(a, r => r.fx * r.mt) / amt : null, x => fx(x, 4))}${td(egp, f0, 1)}${td(sum(rows, r => r.win_egp), f0, 1)}</tr></tbody>` +
@@ -872,13 +890,17 @@ function headCell(r, sc) {
 // How an imported cost is built, column by column: CIF $/MT × FX = CIF EGP/MT,
 // + discharge + clearance = cost excl. transport, + inland freight = cost incl.
 // transport. g(r) returns the parts for an open-position row or a contract.
-const gOpen = o => ({cif: o.cif, fx: o.fx, cifE: o.cif_egp, disc: o.discharge, clr: o.clearance, discB: o.disc_basis, clrB: o.clr_basis,
-  discMiss: o.disc_missing, clrMiss: o.clr_missing, fr: o.freight, frB: o.man ? manualFor(CI[o.contract_id] || {})[1] : o.freight_basis,
+const gOpen = o => ({cif: o.cif, fx: o.fx, cifE: o.cif_egp, disc: o.discharge, clr: o.clearance,
+  discB: o.port_avg ? "Average discharge + clearance (what-if)" : o.disc_basis, clrB: o.port_avg ? "included in the average" : o.clr_basis,
+  discMiss: o.port_avg ? false : o.disc_missing, clrMiss: o.port_avg ? false : o.clr_missing, fr: o.freight, frB: o.man ? manualFor(CI[o.contract_id] || {})[1] : o.freight_basis,
   frNote: (CI[o.contract_id] || {}).freight_note, excl: o.cost_excl, incl: o.cost_incl});
 const gCon = c => { const u = c.is_open && c.current && isN(c.current.cost_excl) ? c.current : null,
     cif = u ? u.cif : c.cif_usd_mt, fxv = u ? u.fx : c.fx, disc = u ? u.disc : (c.discharge_egp_mt || 0), clr = u ? u.clr : (c.clearance_egp_mt || 0),
-    man = isN(c._man), fr = man ? c._man : c.freight_egp_mt, excl = c.landed_excl_egp_mt;
-  return {cif, fx: fxv, cifE: isN(cif) && isN(fxv) ? cif * fxv : null, disc, clr, discB: c.disc_basis, clrB: c.clr_basis, discMiss: c.disc_missing, clrMiss: c.clr_missing,
+    man = isN(c._man), fr = man ? c._man : c.freight_egp_mt, avg = pcOn(),
+    excl = avg && isN(c.landed_excl_egp_mt) ? c.landed_excl_egp_mt - disc - clr + PC.avg : c.landed_excl_egp_mt;
+  return {cif, fx: fxv, cifE: isN(cif) && isN(fxv) ? cif * fxv : null, disc: avg ? PC.avg : disc, clr: avg ? 0 : clr,
+    discB: avg ? "Average discharge + clearance (what-if)" : c.disc_basis, clrB: avg ? "included in the average" : c.clr_basis,
+    discMiss: avg ? false : c.disc_missing, clrMiss: avg ? false : c.clr_missing,
     fr, frB: man ? manualFor(c)[1] : c.freight_basis, frNote: c.freight_note, excl, incl: isN(excl) && isN(fr) ? excl + fr : null}; };
 function bdTip(p, k) {
   if (!isN(p.excl)) return "";
@@ -1354,19 +1376,63 @@ const vatMul = () => $("tmVat").value === "ex" ? 1 : 1.14;
 // Manual freight (what-if): an average (for contracts without route freight, or for all) and per-contract entries.
 const MAN = (() => { try { return Object.assign({avg: null, scope: "missing", per: {}}, JSON.parse(localStorage.getItem("pp_manual_freight_v1") || "{}")); } catch (e) { return {avg: null, scope: "missing", per: {}}; } })();
 const saveMan = () => { try { localStorage.setItem("pp_manual_freight_v1", JSON.stringify(MAN)); } catch (e) { /* storage unavailable */ } };
-M.savings.forEach(r => { r._f0 = {cost: r.cost, saving: r.saving, saving_mt: r.saving_mt, freight: r.freight}; });
-M.open.forEach(o => { o._f0 = {freight: o.freight, cost_incl: o.cost_incl, landed: o.landed, saving_mt: o.saving_mt, potential: o.potential, be_cbot_incl: o.be_cbot_incl, headroom_incl: o.headroom_incl}; });
+// Originals of every figure a what-if (manual freight, average port costs) can change; restored before each render.
+const SAV_KEYS = ["cost", "cost_excl", "saving", "saving_mt", "saving_excl", "saving_excl_mt", "freight", "discharge", "clearance",
+  "port_costs", "eq_premium", "premium_gap", "eq_cbot", "eq_cbot_diff"];
+const OPEN_KEYS = ["freight", "cost_incl", "cost_excl", "landed", "saving_mt", "saving_excl_mt", "potential", "potential_excl", "discharge",
+  "clearance", "be_cbot_incl", "be_cbot_excl", "headroom_incl", "headroom_excl", "local_eq_premium", "premium_gap_now"];
+const snap = (r, keys) => Object.fromEntries(keys.map(k => [k, r[k]]));
+M.savings.forEach(r => { r._f0 = snap(r, SAV_KEYS); });
+M.open.forEach(o => { o._f0 = snap(o, OPEN_KEYS); });
+// Port-cost basis: the discharge + clearance stored on each contract, or one average for every contract.
+const PC = (() => { try { return Object.assign({mode: "actual", avg: 500}, JSON.parse(localStorage.getItem("pp_port_costs_v1") || "{}")); } catch (e) { return {mode: "actual", avg: 500}; } })();
+const pcOn = () => PC.mode === "avg" && isN(PC.avg);
+function applyPort() {
+  if (!pcOn()) { $("pcBanner").style.display = "none"; return; }
+  const A = PC.avg;
+  M.savings.forEach(r => {
+    const d = A - ((r.discharge || 0) + (r.clearance || 0));
+    if (isN(r.cost_excl)) { r.cost_excl += d; r.saving_excl_mt = isN(r.local_excl) ? r.local_excl - r.cost_excl : null; r.saving_excl = isN(r.saving_excl_mt) ? r.saving_excl_mt * r.mt : null; }
+    if (isN(r.cost)) { r.cost += d; r.saving_mt = r.local - r.cost; r.saving = r.saving_mt * r.mt; }
+    r.discharge = A; r.clearance = 0; r.port_avg = true;
+    if (r.premium_factor && isN(r.day_fx) && r.day_fx && isN(r.local_excl)) {
+      r.port_costs = A;
+      const usd = (r.local_excl - A) / r.day_fx / r.premium_factor;
+      if (isN(r.day_cbot)) { r.eq_premium = usd - r.day_cbot; r.premium_gap = isN(r.contract_premium) ? r.eq_premium - r.contract_premium : null; }
+      if (isN(r.contract_premium)) { r.eq_cbot = usd - r.contract_premium; r.eq_cbot_diff = isN(r.fixed_cbot) ? r.eq_cbot - r.fixed_cbot : null; }
+    }
+  });
+  M.open.forEach(o => {
+    const d = A - ((o.discharge || 0) + (o.clearance || 0));
+    if (isN(o.cost_excl)) { o.cost_excl += d; o.saving_excl_mt = isN(o.local_excl) ? o.local_excl - o.cost_excl : null; o.potential_excl = isN(o.saving_excl_mt) ? o.saving_excl_mt * o.unconsumed_mt : null; }
+    if (isN(o.cost_incl)) { o.cost_incl += d; o.landed = o.cost_incl; o.saving_mt = isN(o.local_incl) ? o.local_incl - o.cost_incl : null; o.potential = isN(o.saving_mt) ? o.saving_mt * o.unconsumed_mt : null; }
+    o.discharge = A; o.clearance = 0; o.port_avg = true;
+    const fac = FACT[o.base];
+    if (fac && isN(o.premium) && o.fx && !flatC(o.pricing_class)) {
+      o.be_cbot_excl = isN(o.local_excl) ? (o.local_excl - A) / o.fx / fac - o.premium : null;
+      o.be_cbot_incl = isN(o.local_incl) && isN(o.freight) ? (o.local_incl - A - o.freight) / o.fx / fac - o.premium : null;
+      ["excl", "incl"].forEach(k => { o["headroom_" + k] = isN(o["be_cbot_" + k]) && isN(o.ref_cbot) ? o["be_cbot_" + k] - o.ref_cbot : null; });
+      o.local_eq_premium = isN(o.local_excl) && isN(o.ref_cbot) ? (o.local_excl - A) / o.fx / fac - o.ref_cbot : null;
+      o.premium_gap_now = isN(o.local_eq_premium) ? o.local_eq_premium - o.premium : null;
+    }
+  });
+  $("pcBanner").style.display = "block";
+  $("pcBanner").innerHTML = `<b>Port costs: one average of ${f2(A)} EGP/MT (discharge + clearance) applied to every contract</b> instead of the values stored on each contract — a what-if for every tab, including the local-equivalent premium and break-even CBOT; the app's data is unchanged. <button class="btn" id="pcBack">Back to actual per contract</button>`;
+}
 function manualFor(c) {
   if (isN(MAN.per[c.id])) return [MAN.per[c.id], "Manual (this contract)"];
   if (isN(MAN.avg) && (MAN.scope === "all" || !isN(c.freight_egp_mt))) return [MAN.avg, MAN.scope === "all" ? "Manual average (all contracts)" : "Manual average (no route freight)"];
   return [null, ""];
 }
 function applyManual() {
+  M.savings.forEach(r => Object.assign(r, r._f0));
+  M.open.forEach(o => Object.assign(o, o._f0));
+  applyPort();
   let n = 0;
   C.forEach(c => { const [f] = manualFor(c); c._man = isN(f) ? f : null; if (isN(f)) n++; });
-  M.savings.forEach(r => { const c = CI[r.contract_id] || {}; Object.assign(r, r._f0); r.man = false;
+  M.savings.forEach(r => { const c = CI[r.contract_id] || {}; r.man = false;
     if (isN(c._man) && isN(r.cost_excl)) { r.freight = c._man; r.cost = r.cost_excl + c._man; r.saving_mt = r.local - r.cost; r.saving = r.saving_mt * r.mt; r.man = true; } });
-  M.open.forEach(o => { const c = CI[o.contract_id] || {}; Object.assign(o, o._f0); o.man = false;
+  M.open.forEach(o => { const c = CI[o.contract_id] || {}; o.man = false;
     if (isN(c._man) && isN(o.cost_excl)) { o.freight = c._man; o.cost_incl = o.cost_excl + c._man; o.landed = o.cost_incl; o.man = true;
       if (isN(o.local_incl)) { o.saving_mt = o.local_incl - o.cost_incl; o.potential = o.saving_mt * o.unconsumed_mt; }
       const fac = FACT[o.base];
@@ -1494,6 +1560,45 @@ function renderActions() {
     FX_.map(x => `<tr class="row" ${x.contract_id ? `data-goto="${esc(x.contract_id)}"` : ""}><td><span class="tag ${x.severity === "High" ? "bad" : x.severity === "Medium" ? "pot" : ""}">${esc(x.severity)}</span></td><td>${esc(x.category)}</td><td>${x.contract ? `<b>${esc(x.contract)}</b>` : "—"}</td><td>${esc(x.base)}</td>${td(x.mt)}<td>${esc(x.detail)}</td><td class="note">${esc(x.action)}</td></tr>`).join("") + "</tbody>"
     : '<tbody><tr><td class="note">Nothing to fix.</td></tr></tbody>';
 }
+// Pinned horizontal scrollbars: one per wide scroll container, synced both ways.
+function hbars() {
+  document.querySelectorAll("main .tw, main .detwrap").forEach(el => {
+    let bar = el.nextElementSibling && el.nextElementSibling.classList.contains("hbar") ? el.nextElementSibling : null;
+    const wide = el.offsetParent !== null && el.scrollWidth > el.clientWidth + 2 && getComputedStyle(el).overflowX !== "visible";
+    if (!wide) { if (bar) bar.remove(); el.classList.remove("hasbar"); return; }
+    if (!bar) {
+      bar = document.createElement("div"); bar.className = "hbar"; bar.innerHTML = "<div></div>";
+      el.after(bar);
+      let lock = false;
+      bar.addEventListener("scroll", () => { if (lock) { lock = false; return; } lock = true; el.scrollLeft = bar.scrollLeft; });
+      el.addEventListener("scroll", () => { if (lock) { lock = false; return; } lock = true; bar.scrollLeft = el.scrollLeft; });
+    }
+    const inner = !!el.parentElement.closest(".tw");
+    bar.classList.toggle("inner", inner);
+    bar.style.width = el.clientWidth + "px";
+    bar.firstChild.style.width = el.scrollWidth + "px";
+    bar.scrollLeft = el.scrollLeft;
+    // A day table inside a scrolling table keeps its own scrollbar and gets a screen-pinned copy while that one is off-screen.
+    el.classList.toggle("hasbar", !inner);
+  });
+  placeInnerBars();
+}
+function placeInnerBars() {
+  const H = window.innerHeight;
+  document.querySelectorAll(".hbar.inner").forEach(bar => {
+    const el = bar.previousElementSibling, r = el && el.getBoundingClientRect();
+    const show = r && r.top < H - 60 && r.bottom > H - 18;
+    bar.style.display = show ? "block" : "none";
+    if (show) { bar.style.left = Math.max(r.left, 0) + "px"; bar.style.width = Math.min(r.width, window.innerWidth - Math.max(r.left, 0)) + "px"; bar.scrollLeft = el.scrollLeft; }
+  });
+}
+window.addEventListener("scroll", () => requestAnimationFrame(placeInnerBars), {passive: true});
+let _hbT = 0;
+const hbarsSoon = () => { cancelAnimationFrame(_hbT); _hbT = requestAnimationFrame(hbars); };
+new MutationObserver(muts => { if (muts.some(m => !(m.target.classList && m.target.classList.contains("hbar")))) hbarsSoon(); })
+  .observe(document.querySelector("main"), {childList: true, subtree: true});
+window.addEventListener("resize", hbarsSoon);
+document.addEventListener("click", e => { if (e.target.closest(".tab")) hbarsSoon(); });
 function render() {
   applyManual();
   const v = view(), K = kpis(v);
@@ -1523,6 +1628,12 @@ $("fOrder").addEventListener("change", () => { S.sort = {}; render(); });
 const TXN = {side: "Side-by-side: including transport = inland transport on both sides; excluding = without it. Ocean freight stays in CIF.",
   incl: "Including transportation: landed cost with inland freight vs local quote + local transport.", excl: "Excluding transportation: landed cost without inland freight vs the local quote itself."};
 $("txNote").textContent = TXN.side;
+function pcSave() { try { localStorage.setItem("pp_port_costs_v1", JSON.stringify(PC)); } catch (e) { /* per-viewer convenience only */ } }
+function pcSync() { document.querySelectorAll("#pcSeg button").forEach(x => x.classList.toggle("on", x.dataset.pc === PC.mode)); $("pcAvg").value = PC.avg; }
+$("pcSeg").addEventListener("click", e => { const b = e.target.closest("button[data-pc]"); if (!b) return; PC.mode = b.dataset.pc; pcSave(); pcSync(); S.sort = {}; render(); });
+$("pcAvg").addEventListener("change", () => { const v = parseFloat($("pcAvg").value); if (isFinite(v) && v >= 0 && v !== PC.avg) { PC.avg = v; PC.mode = "avg"; pcSave(); pcSync(); render(); } });
+document.addEventListener("click", e => { if (e.target.id === "pcBack") { PC.mode = "actual"; pcSave(); pcSync(); render(); } });
+pcSync();
 $("txSeg").addEventListener("click", e => { const b = e.target.closest("button[data-tx]"); if (!b) return;
   S.tx = b.dataset.tx; S.sort = {}; document.querySelectorAll("#txSeg button").forEach(x => x.classList.toggle("on", x === b)); $("txNote").textContent = TXN[S.tx]; render(); });
 $("fQ").addEventListener("input", render);
