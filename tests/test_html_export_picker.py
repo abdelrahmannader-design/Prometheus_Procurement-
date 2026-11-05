@@ -29,5 +29,23 @@ class ExportPickerTests(unittest.TestCase):
         self.assertIn(".slice(0, 31)", T)
 
 
+class SavingsDayTableTests(unittest.TestCase):
+    """Savings vs local daily rows: excl. block, then freight + local transport, then incl. block."""
+
+    def test_column_order(self):
+        i = T.index("const SV_DAY_TH")
+        th = T[i:T.index(";", T.index("Savings incl. EGP</th>", i))]
+        order = ["= Landed excl. transport", "Local excl. (that day)", "Savings excl. EGP/MT", "Savings excl. EGP",
+                 "+ Inland freight", "= Landed incl. transport", "+ Local transport", "Local incl. (that day)",
+                 "Savings incl. EGP/MT", "Savings incl. EGP"]
+        pos = [th.index(x) for x in order]
+        self.assertEqual(pos, sorted(pos))
+        self.assertIn("${SV_DAY_TH}", T)
+        self.assertIn("svDayTot(c)", T)
+
+    def test_export_sheet_follows_the_same_order(self):
+        self.assertIn("[...grp(SCN.excl), ...tr, ...grp(SCN.incl)]", T)
+
+
 if __name__ == "__main__":
     unittest.main()

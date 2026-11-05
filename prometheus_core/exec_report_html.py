@@ -153,6 +153,7 @@ tr.rd>td{background:var(--bad-bg)}tr.rx>td{color:var(--ink2)}
 @media(max-width:640px){.detwrap{width:calc(100vw - 64px)}}
 #cbSel{max-width:100%}label.note:has(#cbSel){display:block;max-width:100%}
 .wf{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:8px}
+th.sx{background:rgba(42,120,214,.10)}th.si{background:rgba(235,104,52,.10)}
 .xdlg{position:fixed;inset:0;background:rgba(0,0,0,.38);display:flex;align-items:center;justify-content:center;z-index:60;padding:16px}
 .xdlg[hidden]{display:none}
 .xbox{background:var(--surface);color:var(--ink);border:1px solid var(--line);border-radius:12px;padding:18px 20px;width:440px;max-width:100%;max-height:88vh;overflow:auto;box-shadow:0 12px 40px rgba(0,0,0,.25)}
@@ -429,18 +430,39 @@ const BD_TH = `<th class="n">CIF $/MT</th><th class="n">× FX</th><th class="n">
 const BD_TH_NOCIF = BD_TH.replace('<th class="n">CIF $/MT</th>', "");
 function bdTds(s, noCif) {
   if (!s || !s.date) return `<td class="na" colspan="${noCif ? 7 : 8}">No Savings vs local row for this day</td>`;
+  return bdParts(s, noCif).join("");
+}
+// [CIF … = landed excl. transport, + inland freight, = landed incl. transport]
+function bdParts(s, noCif) {
   const fee = (v, b, m) => m ? `<td class="n stale" title="Not recorded — cost excludes it">0.00 <span class="note">not recorded</span></td>` : `<td class="n" title="${esc(b || "")}">${f2(v)}</td>`;
   const frB = s.man ? manualFor(CI[s.contract_id] || {})[1] : s.freight_basis;
   const pa = s.port_avg;
-  return `${noCif ? "" : td(s.cif_used, f2)}${td(s.fx_used, x => fx(x, 4))}${td(s.cif_egp, f2)}${fee(s.discharge, pa ? "Average discharge + clearance (what-if)" : s.disc_basis, pa ? false : s.disc_missing)}` +
+  return [`${noCif ? "" : td(s.cif_used, f2)}${td(s.fx_used, x => fx(x, 4))}${td(s.cif_egp, f2)}${fee(s.discharge, pa ? "Average discharge + clearance (what-if)" : s.disc_basis, pa ? false : s.disc_missing)}` +
     `${fee(s.clearance, pa ? "included in the average" : s.clr_basis, pa ? false : s.clr_missing)}` +
-    `<td class="n"><b>${isN(s.cost_excl) ? f2(s.cost_excl) : "N/A"}</b></td>` +
-    (isN(s.freight) ? `<td class="n" title="${esc(frB || "")}">${f2(s.freight)}${s.man ? ' <span class="tag pot">manual</span>' : ""}</td>` : '<td class="n na" title="No route in the freight table — add it manually">N/A</td>') +
-    `<td class="n"><b>${isN(s.cost) ? f2(s.cost) : "N/A"}</b></td>`;
+    `<td class="n"><b>${isN(s.cost_excl) ? f2(s.cost_excl) : "N/A"}</b></td>`,
+    (isN(s.freight) ? `<td class="n" title="${esc(frB || "")}">${f2(s.freight)}${s.man ? ' <span class="tag pot">manual</span>' : ""}</td>` : '<td class="n na" title="No route in the freight table — add it manually">N/A</td>'),
+    `<td class="n"><b>${isN(s.cost) ? f2(s.cost) : "N/A"}</b></td>`];
 }
-function bdTot(rows, noCif) {
+function bdTot(rows, noCif) { return bdTotParts(rows, noCif).join(""); }
+function bdTotParts(rows, noCif) {
   const w = (k, rs) => { const x = rs.filter(r => isN(r[k])), m = sum(x, r => r.mt); return m ? sum(x, r => r[k] * r.mt) / m : null; };
-  return `${noCif ? "" : td(w("cif_used", rows), f2)}${td(w("fx_used", rows), x => fx(x, 4))}${td(w("cif_egp", rows), f2)}${td(w("discharge", rows), f2)}${td(w("clearance", rows), f2)}${td(w("cost_excl", rows), f2)}${td(w("freight", rows), f2)}${td(w("cost", rows), f2)}`;
+  return [`${noCif ? "" : td(w("cif_used", rows), f2)}${td(w("fx_used", rows), x => fx(x, 4))}${td(w("cif_egp", rows), f2)}${td(w("discharge", rows), f2)}${td(w("clearance", rows), f2)}<td class="n"><b>${f2(w("cost_excl", rows))}</b></td>`,
+    td(w("freight", rows), f2), `<td class="n"><b>${f2(w("cost", rows))}</b></td>`];
+}
+// Savings vs local, one consumption day: excl. transport first (as on the CBOT tab), then
+// inland freight + local transport, then incl. transport.
+const SV_DAY_TH = `<th class="n">CIF $/MT</th><th class="n">× FX</th><th class="n">= CIF EGP/MT</th><th class="n">+ Discharge</th><th class="n">+ Clearance</th>` +
+  `<th class="n sx">= Landed excl. transport</th><th class="n sx">Local excl. (that day)</th><th class="n sx">Savings excl. EGP/MT</th><th class="n sx">Savings excl. EGP</th>` +
+  `<th class="n">+ Inland freight</th><th class="n si">= Landed incl. transport</th><th class="n">+ Local transport</th><th class="n si">Local incl. (that day)</th><th class="n si">Savings incl. EGP/MT</th><th class="n si">Savings incl. EGP</th>`;
+function svDayTds(r) {
+  const [pre, fr, inc] = bdParts(r);
+  return pre + td(r.local_excl, f2) + td(r.saving_excl_mt, f2, 1) + td(r.saving_excl, f0, 1) +
+    fr + inc + td(r.local_transport, f2) + td(r.local, f2) + td(r.saving_mt, f2, 1) + td(r.saving, f0, 1);
+}
+function svDayTot(c) {
+  const [pre, fr, inc] = bdTotParts(c.z.rows), X = c.z.excl, I = c.z.incl;
+  const lt = (rs => { const x = rs.filter(r => isN(r.local_transport)), m = sum(x, r => r.mt); return m ? sum(x, r => r.local_transport * r.mt) / m : null; })(c.z.rows);
+  return pre + td(X.local, f2) + td(X.per, f2, 1) + td(X.sav, f0, 1) + fr + inc + td(lt, f2) + td(I.local, f2) + td(I.per, f2, 1) + td(I.sav, f0, 1);
 }
 const STALE_IDS = new Set(M.savings.filter(r => r.local_stale).map(r => r.contract_id).concat(M.open.filter(r => r.local_stale).map(r => r.contract_id)));
 // Order filter: newest or oldest first by date; empty = each table's own default (by value).
@@ -1286,12 +1308,14 @@ function exportXlsx(bases, perSheet) {
         flatC(c.pricing_class) ? "flat price" : nv(c.premium), c.fix.unit || c.premium_label, futCode(c), c.fix.fixed ? c.fix.value : (flatC(c.pricing_class) ? "flat price" : "Not fixed"),
         c.fix.type === "Implied" ? "Implied CBOT Fixing" : c.fix.type === "Recorded" ? "Recorded fixing (lots)" : c.fix.type, nv(c.cif_usd_mt), c.cif_final ? "Final CIF" : "Provisional CIF",
         pdate(c) || "Not recorded", c.pricing_class, nv(c.fx), c.fx_basis, c.form4_date || "", c.x.avg, c.x.amt ? c.x.usd : null, c.x.maxAge, c.x.staleMt, (c.flags || []).join("; "), c.assessment])]],
-    ["Savings vs Local", [["Date", "Contract", "Contract ID", "Commodity", "MT", "Storage Start",
-        ...L_.flatMap(sc => [`Landed EGP/MT ${sc.h}`, `Local EGP/MT ${sc.h}`, `Savings EGP/MT ${sc.h}`, `Savings EGP ${sc.h}`]),
-        "Import Inland Transport EGP/MT", "Local Transport EGP/MT", "Local date", "Quote age (days)", "Local Price Age Status", "Data quality", "Local record"],
+    // excl. transport first, then the two transports, then incl. transport (same order as the dashboard)
+    ["Savings vs Local", (() => { const both = L_.length === 2, grp = sc => [`Landed EGP/MT ${sc.h}`, `Local EGP/MT ${sc.h}`, `Savings EGP/MT ${sc.h}`, `Savings EGP ${sc.h}`],
+        val = (sc, r) => [nv(sc.cost(r)), nv(sc.local(r)), nv(sc.per(r)), nv(sc.sav(r))], tr = ["Import Inland Transport EGP/MT", "Local Transport EGP/MT"];
+      return [["Date", "Contract", "Contract ID", "Commodity", "MT", "Storage Start",
+        ...(both ? [...grp(SCN.excl), ...tr, ...grp(SCN.incl)] : [...grp(L_[0]), ...tr]), "Local date", "Quote age (days)", "Local Price Age Status", "Data quality", "Local record"],
       ...v.sav.map(r => [r.date, r.contract, r.contract_id, r.commodity, r.mt, r.storage_start || "Not recorded",
-        ...L_.flatMap(sc => [nv(sc.cost(r)), nv(sc.local(r)), nv(sc.per(r)), nv(sc.sav(r))]),
-        nv(r.freight), nv(r.local_transport), r.local_date, r.local_age, ageTxt(r.local_age), r.quality, r.local_source])]],
+        ...(both ? [...val(SCN.excl, r), nv(r.freight), nv(r.local_transport), ...val(SCN.incl, r)] : [...val(L_[0], r), nv(r.freight), nv(r.local_transport)]),
+        r.local_date, r.local_age, ageTxt(r.local_age), r.quality, r.local_source])]; })()],
     ["CBOT vs Consumption", [["Date", "Contract", "Contract ID", "MT", "CBOT fixed", "CBOT that day", "Price date", "Benchmark status", "Difference", "USD/MT", "USD", "EGP", "Result"],
       ...v.cb.map(r => [r.date, r.contract, r.contract_id, r.mt, r.fix, r.cbot, r.cbot_date, r.benchmark, r.diff, r.usd_mt, r.usd, r.egp, r.result])]],
     ["Open vs Local", [["Contract", "Contract ID", "Supplier", "Commodity", "Origin", "Qty MT", "Available MT", "Outstanding MT", "Remaining MT", "Storage Start", "Receipt Status",
@@ -1423,9 +1447,9 @@ function renderSavings(v) {
   rows.forEach(c => {
     h += `<tr class="row" data-sv="${esc(c.id)}" id="sv-${esc(c.id)}">` + cols.map(col => cell(col, c)).join("") + "</tr>";
     // The daily consumption table keeps its original layout (including transport, age in days).
-    if (S.svOpen && S.svOpen.has(c.id)) h += `<tr class="det"><td colspan="${cols.length}"><div class="detwrap" style="overflow-x:auto"><table><thead><tr><th>Date</th><th class="n">MT</th>${BD_TH}<th class="n">Contract FX</th><th class="n">Local EGP/MT</th><th>Local quote of</th><th class="n">Age (days)</th><th class="n">Saving EGP/MT</th><th class="n">Saving EGP</th><th class="n">CBOT that day</th><th class="n">FX that day</th><th class="n">Local equiv. premium</th><th class="n">Contract premium</th><th class="n">Premium gap</th><th class="n">Local equiv. CBOT</th><th class="n">Local equiv. CBOT − fixed</th><th>Local record</th><th>Data quality</th></tr></thead><tbody>` +
-      dayOrder(c.z.rows).map(r => `<tr><td>${esc(r.date)}</td>${td(r.mt)}${bdTds(r)}<td class="n">${fxCell(c)}</td>${td(r.local, f2)}<td>${esc(r.local_date)} <span class="note">${esc(r.local_key)}</span></td>${td(r.local_age)}${td(r.saving_mt, f2, 1)}${td(r.saving, f0, 1)}${premCells(r)}${eqcTds(r)}<td>${esc(r.local_source)}</td><td class="note">${esc(r.quality)}</td></tr>`).join("") +
-      `<tr class="tot"><td>Total</td>${td(c.z.incl.mt)}${bdTot(c.z.rows)}<td></td>${td(c.z.incl.local, f2)}<td></td><td></td>${td(c.z.incl.per, f2, 1)}${td(c.z.incl.sav, f0, 1)}${premAvg(c.z.rows)}${(e => td(e.eqc, f2) + td(e.eqd, f2, 1))(eqAvg(c.z.rows))}<td></td><td></td></tr></tbody></table></div></td></tr>`;
+    if (S.svOpen && S.svOpen.has(c.id)) h += `<tr class="det"><td colspan="${cols.length}"><div class="detwrap" style="overflow-x:auto"><table><thead><tr><th>Date</th><th class="n">MT</th>${SV_DAY_TH}<th class="n">Contract FX</th><th>Local quote of</th><th class="n">Age (days)</th><th class="n">CBOT that day</th><th class="n">FX that day</th><th class="n">Local equiv. premium</th><th class="n">Contract premium</th><th class="n">Premium gap</th><th class="n">Local equiv. CBOT</th><th class="n">Local equiv. CBOT − fixed</th><th>Local record</th><th>Data quality</th></tr></thead><tbody>` +
+      dayOrder(c.z.rows).map(r => `<tr><td>${esc(r.date)}</td>${td(r.mt)}${svDayTds(r)}<td class="n">${fxCell(c)}</td><td>${esc(r.local_date)} <span class="note">${esc(r.local_key)}</span></td>${td(r.local_age)}${premCells(r)}${eqcTds(r)}<td>${esc(r.local_source)}</td><td class="note">${esc(r.quality)}</td></tr>`).join("") +
+      `<tr class="tot"><td>Total</td>${td(sum(c.z.rows, r => r.mt))}${svDayTot(c)}<td></td><td></td><td></td>${premAvg(c.z.rows)}${(e => td(e.eqc, f2) + td(e.eqd, f2, 1))(eqAvg(c.z.rows))}<td></td><td></td></tr></tbody></table></div></td></tr>`;
   });
   h += totRow(cols, rows, `Total · ${rows.length} contracts`) + "</tbody>";
   $("svT").innerHTML = h;
@@ -1758,6 +1782,7 @@ const HEAD_HELP = [
   [/^= Landed incl|^= Imported cost (now )?incl|^Landed incl/, "Landed excl. transport + inland freight = cost per tonne delivered to the plant."],
   [/^Local price excl|^Local excl|^Wtd avg local excl/, "Local market price EGP/MT without transport (the quote in force that day; tonne-weighted where averaged)."],
   [/^Local price incl|^Local incl|^Wtd avg local incl|^Avg local price incl|^Local EGP\/MT/, "Local price + the transport on its quote = delivered local cost per tonne."],
+  [/^\+ Local transport/, "Transport recorded on the local quote (default when none was entered): local excl. + local transport = local incl. — the local side's equivalent of the inland freight."],
   [/^Local quote of|^Local date|^Age|^Oldest local quote/, "Date of the local quote in force and its age in days (a quote stays in force until a new one is entered; > 5 days is flagged STALE)."],
   [/^MT on quotes > 5/, "Tonnes compared against a local quote older than 5 days."],
   [/^Local quotes/, "Share of tonnes compared with a same-day quote, a recent one (≤ 5 days) or a stale one."],
