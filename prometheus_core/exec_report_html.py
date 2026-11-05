@@ -153,7 +153,16 @@ tr.rd>td{background:var(--bad-bg)}tr.rx>td{color:var(--ink2)}
 @media(max-width:640px){.detwrap{width:calc(100vw - 64px)}}
 #cbSel{max-width:100%}label.note:has(#cbSel){display:block;max-width:100%}
 .wf{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:8px}
+.xdlg{position:fixed;inset:0;background:rgba(0,0,0,.38);display:flex;align-items:center;justify-content:center;z-index:60;padding:16px}
+.xdlg[hidden]{display:none}
+.xbox{background:var(--surface);color:var(--ink);border:1px solid var(--line);border-radius:12px;padding:18px 20px;width:440px;max-width:100%;max-height:88vh;overflow:auto;box-shadow:0 12px 40px rgba(0,0,0,.25)}
+.xbox h3{margin:0 0 6px;font-size:17px}
+.xbox .xlist{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:2px 12px;margin:10px 0;border:1px solid var(--line);border-radius:8px;padding:8px 10px}
+.xbox .xlist label{display:flex;align-items:center;gap:8px;padding:4px 0;cursor:pointer}
+.xbox .xrow{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px}
+.xbox .xopt{display:flex;gap:8px;align-items:flex-start;margin-top:8px;cursor:pointer}
 @media print{
+ .xdlg{display:none!important}
  body{background:#fff}nav,.filters,.btn,.noprint{display:none!important}
  .panel{display:block!important}.tech-print-hide{display:none!important}
  .card,.kpi{break-inside:avoid;border-color:#ccc}
@@ -317,6 +326,17 @@ tr.rd>td{background:var(--bad-bg)}tr.rx>td{color:var(--ink2)}
 </main>
 <div class="tip" id="tip"></div>
 <script id="data" type="application/json">__DATA__</script>
+<div id="xDlg" class="xdlg" hidden>
+ <div class="xbox" role="dialog" aria-modal="true" aria-labelledby="xT">
+  <h3 id="xT">Export to Excel</h3>
+  <div class="note">Choose the commodities to include. The other filters on the page (dates, supplier, status, data quality, transport basis, port costs) still apply.</div>
+  <div class="xlist" id="xList"></div>
+  <div class="xrow"><button class="btn" id="xAll" type="button">Select all</button><button class="btn" id="xNone" type="button">Clear</button><span class="note" id="xCount"></span></div>
+  <label class="xopt"><input type="checkbox" id="xPer" checked> <span>One sheet per commodity, linked from the Summary sheet</span></label>
+  <div class="note" style="margin-top:6px">Every table sheet opens with a frozen header and filter arrows, so you can also pick commodities, suppliers or contracts inside Excel.</div>
+  <div class="xrow"><button class="btn tech" id="xGo" type="button">Export</button><button class="btn" id="xCancel" type="button">Cancel</button></div>
+ </div>
+</div>
 <script>
 "use strict";
 const M = JSON.parse(document.getElementById("data").textContent);
@@ -431,13 +451,19 @@ function byOrder(rows, key) {
     if (!x && !y) return 0; if (!x) return 1; if (!y) return -1; return (x < y ? -1 : x > y ? 1 : 0) * d; });
 }
 const dayOrder = rows => rows.slice().sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0) * (ORD() === "new" ? -1 : 1));
-function view() {
-  const f = F(), ids = new Set(C.filter(c => contractOk(c, f) && (f.age !== "stale-c" || STALE_IDS.has(c.id))).map(c => c.id));
+function view(over) {
+  const f = Object.assign(F(), over || {}), ids = new Set(C.filter(c => contractOk(c, f) && (f.age !== "stale-c" || STALE_IDS.has(c.id))).map(c => c.id));
   const sav = M.savings.filter(r => ids.has(r.contract_id) && inDates(r.date, f) && dqOk(r, f) && ageOk(r, f));
   const cb = M.cbot.filter(r => ids.has(r.contract_id) && inDates(r.date, f));
   const cu = (M.cbot_unfixed || []).filter(r => ids.has(r.contract_id) && inDates(r.date, f));
   const op = M.open.filter(r => ids.has(r.contract_id) && ageOk(r, f));
   return {f, ids, sav, cb, cu, op, contracts: C.filter(c => ids.has(c.id)), filtered: Object.entries(f).some(([k, x]) => k !== "order" && x)};
+}
+// The view for a set of commodities (the commodity filter replaced by the chosen list).
+function viewFor(bases) {
+  const v = view({base: ""}), keep = new Set(v.contracts.filter(c => bases.includes(c.base)).map(c => c.id)), k = r => keep.has(r.contract_id);
+  return Object.assign({}, v, {ids: keep, sav: v.sav.filter(k), cb: v.cb.filter(k), cu: v.cu.filter(k), op: v.op.filter(k),
+    contracts: v.contracts.filter(c => keep.has(c.id)), f: Object.assign({}, v.f, {base: bases.join(", ")})});
 }
 // Transport scenarios: each side uses its own recorded transport; a row without the
 // input a scenario needs is left out of that scenario's totals (never counted as zero).
@@ -1130,13 +1156,28 @@ function zip(files) {
   const end = new Uint8Array([...u32(0x06054b50), ...u16(0), ...u16(0), ...u16(files.length), ...u16(files.length), ...u32(dlen), ...u32(off), ...u16(0)]);
   return new Blob([...parts, ...dir, end], {type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"});
 }
-function sheetXml(rows) {
-  const x = s => String(s).replace(/[&<>"]/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[ch]));
-  const colL = i => { let s = ""; i++; while (i) { const m = (i - 1) % 26; s = String.fromCharCode(65 + m) + s; i = Math.floor((i - 1) / 26); } return s; };
-  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>` +
-    rows.map((r, ri) => `<row r="${ri + 1}">` + r.map((v, ci) => { const ref = colL(ci) + (ri + 1);
-      if (isN(v)) return `<c r="${ref}"><v>${v}</v></c>`; if (v == null || v === "") return "";
-      return `<c r="${ref}" t="inlineStr"${ri === 0 ? ' s="1"' : ""}><is><t>${x(v)}</t></is></c>`; }).join("") + "</row>").join("") + "</sheetData></worksheet>";
+const xEsc = s => String(s).replace(/[&<>"]/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[ch]));
+const colL = i => { let s = ""; i++; while (i) { const m = (i - 1) % 26; s = String.fromCharCode(65 + m) + s; i = Math.floor((i - 1) / 26); } return s; };
+// o: hdr = header row index (bold + filter arrows), end = last row of that table, freeze = frozen rows,
+// bold = extra bold row indexes, title = row index of the sheet title, links = [{r, c, to}] to other sheets.
+function sheetXml(rows, o) {
+  o = o || {}; const hdr = o.hdr == null ? 0 : o.hdr, bold = new Set(o.bold || []), ncol = Math.max(1, ...rows.map(r => r.length));
+  const link = {}; (o.links || []).forEach(l => link[l.r + ":" + l.c] = l.to);
+  const w = Array.from({length: ncol}, (_, ci) => Math.min(ci === 0 ? 64 : 48, Math.max(9, ...rows.slice(0, 400).map((r, ri) =>
+    ri === o.title || (o.wide || []).includes(ri) ? 0 : r[ci] == null ? 0 : isN(r[ci]) ? (Math.abs(r[ci]) >= 1000 ? 14 : 11) : String(r[ci]).length + 2))));
+  const cell = (v, ri, ci) => { const ref = colL(ci) + (ri + 1);
+    if (isN(v)) { const st = Math.abs(v) >= 1000 ? (Number.isInteger(v) ? 3 : 2) : 0; return `<c r="${ref}"${st ? ` s="${st}"` : ""}><v>${v}</v></c>`; }
+    if (v == null || v === "") return "";
+    const st = link[ri + ":" + ci] ? 4 : ri === o.title ? 5 : (ri === hdr || bold.has(ri)) ? 1 : 0;
+    return `<c r="${ref}" t="inlineStr"${st ? ` s="${st}"` : ""}><is><t>${xEsc(v)}</t></is></c>`; };
+  const fr = o.freeze || 0, last = colL(Math.max(1, (rows[hdr] || []).length) - 1), end = o.end == null ? rows.length : o.end;
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">` +
+    `<sheetViews><sheetView workbookViewId="0"${o.active ? ' tabSelected="1"' : ""}>` + (fr ? `<pane ySplit="${fr}" topLeftCell="A${fr + 1}" activePane="bottomLeft" state="frozen"/>` : "") + `</sheetView></sheetViews>` +
+    `<cols>${w.map((x, i) => `<col min="${i + 1}" max="${i + 1}" width="${x}" customWidth="1"/>`).join("")}</cols><sheetData>` +
+    rows.map((r, ri) => `<row r="${ri + 1}">` + r.map((v, ci) => cell(v, ri, ci)).join("") + "</row>").join("") + "</sheetData>" +
+    (hdr >= 0 && end > hdr + 1 ? `<autoFilter ref="A${hdr + 1}:${last}${end}"/>` : "") +
+    (Object.keys(link).length ? "<hyperlinks>" + (o.links || []).map(l => `<hyperlink ref="${colL(l.c)}${l.r + 1}" location="'${xEsc(l.to)}'!A1" display="${xEsc(rows[l.r][l.c])}"/>`).join("") + "</hyperlinks>" : "") +
+    "</worksheet>";
 }
 // Readable summary for the exported view: what each figure is, and what its sign means.
 const KLAB = {
@@ -1179,11 +1220,63 @@ function summaryRows(K, F_) {
     ["Measure", "Value", "Result", "Field"],
     ...Object.entries(K).map(([k, x]) => [(KLAB[k] || [k])[0], x, res((KLAB[k] || [])[1], x), k])];
 }
-function exportXlsx() {
-  const v = view(), K = kpis(v), F_ = v.f, L_ = scs(), NA = "N/A — Missing Source Data", nv = x => isN(x) ? x : NA;
-  const ageTxt = a => !isN(a) ? "No local quote — missing data" : a > CD() ? `Local Market Price — ${a} Days Old — STALE` : a === 0 ? "Same day" : a + " days old";
+const XNA = "N/A — Missing Source Data", xnv = x => isN(x) ? x : XNA;
+const ageTxt = a => !isN(a) ? "No local quote — missing data" : a > CD() ? `Local Market Price — ${a} Days Old — STALE` : a === 0 ? "Same day" : a + " days old";
+const sheetName = n => String(n).replace(/[\[\]:*?\/\\']/g, " ").slice(0, 31) || "Sheet";
+// One commodity's sheet: its headline figures, its contracts and its open position.
+function commoditySheet(b, vb) {
+  const K = kpis(vb), L_ = scs(), nv = xnv, rows = [[`${b} — savings vs local, CBOT benchmark and open position`], ["← Back to Summary"], [],
+    ["Measure", "Value", "Result"]];
+  const res = (kind, x) => !isN(x) || !kind ? "" : kind === "local" ? (x >= 0 ? "Saving vs local" : "Extra cost vs local")
+    : kind === "pot" ? (x >= 0 ? "Potential saving vs today's local" : "Potential extra cost vs today's local") : (x >= 0 ? "Advantage" : "Missed opportunity");
+  ["historical_saving_egp", "historical_saving_excl_egp", "historical_saving_egp_mt", "historical_saving_excl_egp_mt", "historical_mt",
+   "open_fixed_potential_egp", "open_fixed_potential_excl_egp", "open_indicative_potential_egp", "open_indicative_potential_excl_egp",
+   "open_available_mt", "cbot_net_usd", "cbot_win_net_usd", "stale_rows", "stale_mt"].forEach(k => { if (k in K) rows.push([(KLAB[k] || [k])[0], K[k], res((KLAB[k] || [])[1], K[k])]); });
+  rows.push([]); const t1 = rows.length;
+  rows.push(["Contracts consumed", ...[]]);
+  const hdr = rows.length;
+  rows.push(["Contract", "Supplier", "Origin", "Status", "Storage Start", "Consumed MT",
+    ...L_.flatMap(sc => [`Compared MT ${sc.h}`, `Savings EGP ${sc.h}`, `Savings EGP/MT ${sc.h}`]),
+    "Final CIF USD/MT", "CIF Basis", "FX", "FX Basis", "CBOT Fixing", "Avg CBOT consumption days", "CBOT net USD", "Oldest Local Quote (days)", "MT on Quotes > 5 Days", "Assessment"]);
+  const cr = contractRows(vb);
+  cr.forEach(c => rows.push([c.contract, c.supplier, c.origin, c.status, c.storage_start || "Not recorded", c.consumed_mt,
+    ...L_.flatMap(sc => [c.x[sc.k].mt, nv(c.x[sc.k].sav), nv(c.x[sc.k].per)]),
+    nv(c.cif_usd_mt), c.cif_final ? "Final CIF" : "Provisional CIF", nv(c.fx), c.fx_basis,
+    c.fix.fixed ? c.fix.value : (flatC(c.pricing_class) ? "flat price" : "Not fixed"), c.x.avg, c.x.amt ? c.x.usd : null, c.x.maxAge, c.x.staleMt, c.assessment]));
+  const end = rows.length;
+  if (cr.length) rows.push(["TOTAL", "", "", "", "", sum(cr, c => c.consumed_mt),
+    ...L_.flatMap(sc => { const mt = sum(cr, c => c.x[sc.k].mt), sv = sum(cr.filter(c => isN(c.x[sc.k].sav)), c => c.x[sc.k].sav); return [mt, sv, mt ? sv / mt : null]; })]);
+  const bold = [3, t1, cr.length ? rows.length - 1 : -1];
+  if (vb.op.length) {
+    rows.push([], ["Open contracts vs today's local"]); bold.push(rows.length - 1);
+    rows.push(["Contract", "Supplier", "Remaining MT", "CIF USD/MT", "CIF Basis", "FX", "FX Basis",
+      ...L_.flatMap(sc => [`Imported Cost ${sc.h}`, `Local ${sc.h}`, `Savings/MT ${sc.h}`, `Total Potential ${sc.h}`]), "Valuation Class", "Totals Bucket"]);
+    bold.push(rows.length - 1);
+    vb.op.forEach(r => rows.push([r.contract, r.supplier, r.unconsumed_mt, nv(r.cif), r.cif_basis, nv(r.fx), r.fx_basis,
+      ...L_.flatMap(sc => [nv(sc.ocost(r)), nv(sc.olocal(r)), nv(sc.oper(r)), nv(sc.pot(r))]), r.class,
+      {c: "Confirmed", i: "Indicative / provisional", x: "Excluded — missing source data"}[obucket(r)]]));
+  }
+  return [sheetName(b), rows, {hdr, end, title: 0, bold, wide: [t1], links: [{r: 1, c: 0, to: "Summary"}]}];
+}
+function exportXlsx(bases, perSheet) {
+  const all = [...new Set(C.map(c => c.base))].sort();
+  bases = (bases && bases.length ? bases : ($("fBase").value ? [$("fBase").value] : all)).filter(b => all.includes(b));
+  if (perSheet == null) perSheet = true;
+  const v = viewFor(bases), K = kpis(v), F_ = v.f, L_ = scs(), NA = XNA, nv = xnv;
+  // Summary: the readable measures, then one line per commodity with a link to its sheet.
+  const sumR = summaryRows(K, F_), sumBold = [sumR.findIndex(r => r[0] === "Measure")];
+  sumR.push([], ["By commodity" + (perSheet ? " — click a name to open its sheet" : "")]); sumBold.push(sumR.length - 1);
+  sumR.push(["Commodity", "Contracts", "Compared MT", "Savings incl. transport EGP", "EGP/MT incl.", "Savings excl. transport EGP", "EGP/MT excl.",
+    "Open confirmed potential incl. EGP", "Open indicative potential incl. EGP", "CBOT benchmark ① net USD", "Day rows on quotes > 5 days"]); sumBold.push(sumR.length - 1);
+  const links = [], per = bases.map(b => { const vb = viewFor([b]); return [b, vb, kpis(vb)]; });
+  per.forEach(([b, vb, k]) => { if (perSheet) links.push({r: sumR.length, c: 0, to: sheetName(b)});
+    sumR.push([b, vb.contracts.length, k.historical_mt, k.historical_saving_egp, k.historical_saving_egp_mt, k.historical_saving_excl_egp, k.historical_saving_excl_egp_mt,
+      k.open_fixed_potential_egp, k.open_indicative_potential_egp, k.cbot_net_usd, k.stale_rows]); });
+  sumR.push(["TOTAL", v.contracts.length, K.historical_mt, K.historical_saving_egp, K.historical_saving_egp_mt, K.historical_saving_excl_egp, K.historical_saving_excl_egp_mt,
+    K.open_fixed_potential_egp, K.open_indicative_potential_egp, K.cbot_net_usd, K.stale_rows]); sumBold.push(sumR.length - 1);
   const sheets = [
-    ["Summary", summaryRows(K, F_)],
+    ["Summary", sumR, {hdr: -1, title: 0, bold: sumBold, links, active: 1, wide: [8, sumR.length - per.length - 3]}],
+    ...(perSheet ? per.map(([b, vb]) => commoditySheet(b, vb)) : []),
     ["Contracts", [["Contract ID", "Contract", "Supplier", "Commodity", "Origin", "Status", "Storage Start", "Receipt Status", "Consumed MT",
         ...L_.flatMap(sc => [`Compared MT ${sc.h}`, `Savings EGP ${sc.h}`, `Savings EGP/MT ${sc.h}`]),
         "Premium", "Premium Unit", "Futures Month", "CBOT Fixing", "Fixing Type", "Final CIF USD/MT", "CIF Basis", "Pricing / Fixing Date", "Pricing Status",
@@ -1212,22 +1305,52 @@ function exportXlsx() {
         r.disc_missing ? "Not recorded" : r.discharge, r.clr_missing ? "Not recorded" : r.clearance, nv(r.freight), ...L_.flatMap(sc => [nv(sc.ocost(r)), nv(sc.olocal(r))]), r.local_date || NA, r.local_age, ageTxt(r.local_age),
         ...L_.flatMap(sc => [nv(sc.oper(r)), nv(sc.pot(r))]), r.pricing_class, r.class,
         {c: "Confirmed", i: "Indicative / provisional", x: "Excluded — missing source data"}[obucket(r)], (r.issues || []).concat(r.notes || []).join("; "),
-        nv(r.cif_egp), r.disc_basis || "", r.clr_basis || "", gOpen(r).frB || ""])]]];
+        nv(r.cif_egp), r.disc_basis || "", r.clr_basis || "", gOpen(r).frB || ""])]]].map(sh => sh.length === 3 ? sh : [sh[0], sh[1], {hdr: 0, freeze: 1}]);
   const files = [["[Content_Types].xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>` +
       sheets.map((_, i) => `<Override PartName="/xl/worksheets/sheet${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join("") + "</Types>"],
     ["_rels/.rels", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`],
-    ["xl/workbook.xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>` +
-      sheets.map(([n], i) => `<sheet name="${n}" sheetId="${i + 1}" r:id="rId${i + 1}"/>`).join("") + "</sheets></workbook>"],
+    ["xl/workbook.xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><bookViews><workbookView activeTab="0"/></bookViews><sheets>` +
+      sheets.map(([n], i) => `<sheet name="${xEsc(n)}" sheetId="${i + 1}" r:id="rId${i + 1}"/>`).join("") + "</sheets>" +
+      (() => { const d = sheets.map(([n, rows, o], i) => { const h = o.hdr == null ? 0 : o.hdr, end = o.end == null ? rows.length : o.end;
+          if (h < 0 || end <= h + 1) return ""; const nc = Math.max(1, (rows[h] || []).length);
+          return `<definedName name="_xlnm._FilterDatabase" localSheetId="${i}" hidden="1">'${xEsc(n)}'!$A$${h + 1}:$${colL(nc - 1)}$${end}</definedName>`; }).join("");
+        return d ? `<definedNames>${d}</definedNames>` : ""; })() + "</workbook>"],
     ["xl/_rels/workbook.xml.rels", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
       sheets.map((_, i) => `<Relationship Id="rId${i + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${i + 1}.xml"/>`).join("") +
       `<Relationship Id="rId${sheets.length + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`],
-    ["xl/styles.xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>`],
-    ...sheets.map(([, rows], i) => [`xl/worksheets/sheet${i + 1}.xml`, sheetXml(rows)])];
+    ["xl/styles.xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="4"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font><font><u/><sz val="11"/><color rgb="FF0563C1"/><name val="Calibri"/></font><font><b/><sz val="14"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="6"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/><xf numFmtId="4" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/><xf numFmtId="3" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/><xf numFmtId="0" fontId="2" fillId="0" borderId="0" xfId="0" applyFont="1"/><xf numFmtId="0" fontId="3" fillId="0" borderId="0" xfId="0" applyFont="1"/></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>`],
+    ...sheets.map(([, rows, o], i) => [`xl/worksheets/sheet${i + 1}.xml`, sheetXml(rows, o)])];
   const blob = zip(files), a = document.createElement("a");
-  a.href = URL.createObjectURL(blob); a.download = `Procurement_Savings_view_${M.as_of}.xlsx`; document.body.appendChild(a); a.click();
+  const tag = bases.length === all.length ? "all" : bases.join("-");
+  a.href = URL.createObjectURL(blob); a.download = `Procurement_Savings_view_${tag}_${M.as_of}.xlsx`; document.body.appendChild(a); a.click();
   setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
   window.__lastExport = files.map(f => f[0]);
+  window.__lastExportSheets = sheets.map(sh => sh[0]);
+  window.__lastExportBlob = blob;
 }
+// ── commodity picker for the Excel export ──
+const XKEY = "pp_xlsx_bases_v1";
+function openXlsxDlg() {
+  const all = [...new Set(C.map(c => c.base))].sort(), v = view({base: ""}), n = b => v.contracts.filter(c => c.base === b).length;
+  let pick = $("fBase").value ? [$("fBase").value] : null;
+  if (!pick) { try { pick = JSON.parse(localStorage.getItem(XKEY) || "null"); } catch (e) { pick = null; } }
+  if (!Array.isArray(pick) || !pick.some(b => all.includes(b))) pick = all;
+  $("xList").innerHTML = all.map(b => `<label><input type="checkbox" value="${esc(b)}"${pick.includes(b) ? " checked" : ""}> <span>${esc(b)} <span class="note">· ${n(b)} contract${n(b) === 1 ? "" : "s"}</span></span></label>`).join("");
+  const count = () => { const k = $("xList").querySelectorAll("input:checked").length; $("xCount").textContent = `${k} of ${all.length} selected`; $("xGo").disabled = !k; };
+  $("xList").onchange = count; count();
+  $("xDlg").hidden = false; const first = $("xList").querySelector("input"); if (first) first.focus();
+}
+function closeXlsxDlg() { $("xDlg").hidden = true; $("bXlsx").focus(); }
+$("xAll").addEventListener("click", () => { $("xList").querySelectorAll("input").forEach(i => i.checked = true); $("xList").onchange(); });
+$("xNone").addEventListener("click", () => { $("xList").querySelectorAll("input").forEach(i => i.checked = false); $("xList").onchange(); });
+$("xCancel").addEventListener("click", closeXlsxDlg);
+$("xDlg").addEventListener("click", e => { if (e.target === $("xDlg")) closeXlsxDlg(); });
+document.addEventListener("keydown", e => { if (e.key === "Escape" && !$("xDlg").hidden) closeXlsxDlg(); });
+$("xGo").addEventListener("click", () => {
+  const bases = [...$("xList").querySelectorAll("input:checked")].map(i => i.value); if (!bases.length) return;
+  try { localStorage.setItem(XKEY, JSON.stringify(bases)); } catch (e) { /* private window */ }
+  closeXlsxDlg(); exportXlsx(bases, $("xPer").checked);
+});
 
 // ── savings vs local tab ────────────────────────────────────────────
 function svcols() {
@@ -1768,7 +1891,7 @@ $("bMgmt").addEventListener("click", () => { const on = document.body.classList.
   if (on) { $("bReset").click(); showTab("overview"); } });
 $("bTheme").addEventListener("click", () => { const r = document.documentElement, dark = r.getAttribute("data-theme") === "dark" ||
   (!r.getAttribute("data-theme") && matchMedia("(prefers-color-scheme: dark)").matches); r.setAttribute("data-theme", dark ? "light" : "dark"); });
-$("bXlsx").addEventListener("click", exportXlsx);
+$("bXlsx").addEventListener("click", openXlsxDlg);
 ["tmComm", "tmDest", "tmVat"].forEach(id => $(id).addEventListener("change", () => renderTransport(view())));
 $("manApply").addEventListener("click", () => { const x = parseFloat($("manAvg").value); MAN.avg = isFinite(x) && x >= 0 ? x : null; MAN.scope = $("manScope").value; saveMan(); render(); });
 $("manClear").addEventListener("click", () => { MAN.avg = null; MAN.per = {}; $("manAvg").value = ""; saveMan(); render(); });
