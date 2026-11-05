@@ -1138,14 +1138,52 @@ function sheetXml(rows) {
       if (isN(v)) return `<c r="${ref}"><v>${v}</v></c>`; if (v == null || v === "") return "";
       return `<c r="${ref}" t="inlineStr"${ri === 0 ? ' s="1"' : ""}><is><t>${x(v)}</t></is></c>`; }).join("") + "</row>").join("") + "</sheetData></worksheet>";
 }
+// Readable summary for the exported view: what each figure is, and what its sign means.
+const KLAB = {
+  historical_saving_egp: ["Historical result vs local — incl. transport (EGP)", "local"],
+  historical_saving_excl_egp: ["Historical result vs local — excl. transport (EGP)", "local"],
+  historical_saving_egp_mt: ["Historical result vs local per MT — incl. transport", "local"],
+  historical_saving_excl_egp_mt: ["Historical result vs local per MT — excl. transport", "local"],
+  historical_final_egp: ["  of which contracts with final CIF — incl. transport", "local"],
+  historical_provisional_egp: ["  of which contracts with provisional CIF — incl. transport", "local"],
+  historical_final_excl_egp: ["  of which contracts with final CIF — excl. transport", "local"],
+  historical_provisional_excl_egp: ["  of which contracts with provisional CIF — excl. transport", "local"],
+  historical_mt: ["Tonnes compared vs local — incl. transport", ""], historical_mt_excl: ["Tonnes compared vs local — excl. transport", ""],
+  open_fixed_potential_egp: ["Open contracts, confirmed (fixed price + Form 4) — incl. transport (EGP)", "pot"],
+  open_fixed_potential_excl_egp: ["Open contracts, confirmed — excl. transport (EGP)", "pot"],
+  open_indicative_potential_egp: ["Open contracts, indicative / provisional — incl. transport (EGP)", "pot"],
+  open_indicative_potential_excl_egp: ["Open contracts, indicative / provisional — excl. transport (EGP)", "pot"],
+  open_fixed_mt: ["Open tonnes, confirmed", ""], open_indicative_mt: ["Open tonnes, indicative", ""],
+  open_not_received_mt: ["Open tonnes not received yet", ""], open_outstanding_mt: ["Outstanding tonnes on open contracts", ""],
+  open_available_mt: ["Stock on open contracts (MT)", ""], open_contracts: ["Open contracts", ""], contracts: ["Contracts in the view", ""],
+  cbot_net_usd: ["CBOT benchmark ① (consumption days) — net USD", "cbot"], cbot_net_egp: ["CBOT benchmark ① — net EGP", "cbot"],
+  cbot_advantage_usd: ["CBOT benchmark ① — advantage days USD", "cbot"], cbot_missed_usd: ["CBOT benchmark ① — missed days USD", "cbot"],
+  cbot_win_net_usd: ["CBOT benchmark ② (storage → last consumption average) — net USD", "cbot"], cbot_win_net_egp: ["CBOT benchmark ② — net EGP", "cbot"],
+  cbot_win_advantage_usd: ["CBOT benchmark ② — advantage USD", "cbot"], cbot_win_missed_usd: ["CBOT benchmark ② — missed USD", "cbot"],
+  cbot_assessed_mt: ["Tonnes assessed against CBOT ①", ""], cbot_fixed_consumed_mt: ["Fixed tonnes consumed", ""], cbot_win_mt: ["Tonnes assessed against CBOT ②", ""],
+  cbot_coverage: ["Share of fixed consumed tonnes with a CBOT price that day", ""],
+  stale_rows: ["Day rows on local quotes older than 5 days", ""], stale_mt: ["Tonnes on local quotes older than 5 days", ""]};
+const FLAB = {base: "Commodity", origin: "Origin", supplier: "Supplier", region: "Loading region", place: "Loading place", q: "Contract", from: "From",
+  to: "To", open: "Status", fix: "CBOT fixing", dq: "Data quality", age: "Local quote age"};
+function summaryRows(K, F_) {
+  const res = (kind, x) => !isN(x) || !kind ? "" : kind === "local" ? (x >= 0 ? "Saving vs local" : "Extra cost vs local (imports dearer than local)")
+    : kind === "pot" ? (x >= 0 ? "Potential saving vs today's local price" : "Potential extra cost vs today's local price")
+    : (x >= 0 ? "Advantage (fixed below the CBOT when consumed)" : "Missed opportunity (fixed above the CBOT when consumed)");
+  const man = C.filter(c => isN(c._man)).length;
+  return [["Procurement savings — filtered view"], ["Data as of", M.as_of], ["Checksum (unfiltered model)", M.checksum],
+    ["Filters", Object.entries(F_).filter(([, x]) => x).map(([k, x]) => (FLAB[k] || k) + " = " + x).join("; ") || "none (all data)"],
+    ["Transport basis", S.tx === "side" ? "Side-by-side (including and excluding transport)" : SCN[S.tx].l],
+    ["Port costs basis", pcOn() ? `WHAT-IF: one average of ${PC.avg} EGP/MT (discharge + clearance) for every contract — not the stored values` : "Actual discharge + clearance stored on each contract"],
+    ["Manual freight", man ? `WHAT-IF: manual freight on ${man} contract(s)` : "none — route freight from the app"], [],
+    ["How to read", "Results vs local = local price that day − imported landed cost (positive = imports cheaper). The CBOT benchmark is separate (fixing vs the CBOT when consumed) and is never added to the savings."], [],
+    ["Measure", "Value", "Result", "Field"],
+    ...Object.entries(K).map(([k, x]) => [(KLAB[k] || [k])[0], x, res((KLAB[k] || [])[1], x), k])];
+}
 function exportXlsx() {
   const v = view(), K = kpis(v), F_ = v.f, L_ = scs(), NA = "N/A — Missing Source Data", nv = x => isN(x) ? x : NA;
   const ageTxt = a => !isN(a) ? "No local quote — missing data" : a > CD() ? `Local Market Price — ${a} Days Old — STALE` : a === 0 ? "Same day" : a + " days old";
   const sheets = [
-    ["Summary", [["Procurement savings — filtered view"], ["Data as of", M.as_of], ["Checksum (unfiltered model)", M.checksum],
-      ["Filters", Object.entries(F_).filter(([, x]) => x).map(([k, x]) => k + "=" + x).join("; ") || "none"],
-      ["Transport scenario", S.tx === "side" ? "Side-by-side (including and excluding transport)" : SCN[S.tx].l], [],
-      ["Measure", "Value"], ...Object.entries(K).map(([k, x]) => [k, x])]],
+    ["Summary", summaryRows(K, F_)],
     ["Contracts", [["Contract ID", "Contract", "Supplier", "Commodity", "Origin", "Status", "Storage Start", "Receipt Status", "Consumed MT",
         ...L_.flatMap(sc => [`Compared MT ${sc.h}`, `Savings EGP ${sc.h}`, `Savings EGP/MT ${sc.h}`]),
         "Premium", "Premium Unit", "Futures Month", "CBOT Fixing", "Fixing Type", "Final CIF USD/MT", "CIF Basis", "Pricing / Fixing Date", "Pricing Status",
