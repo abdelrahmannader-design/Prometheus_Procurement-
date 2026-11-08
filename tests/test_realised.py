@@ -271,9 +271,10 @@ class TransportViewTests(unittest.TestCase):
         app = self.module.App.__new__(self.module.App)
         app.state_obj = {"ui": {}}
         for n in ("hd_kpi_prev", "hd_kpi_realized_mt", "hd_kpi_saving", "hd_kpi_prev_x",
-                  "hd_kpi_realized_mt_x", "hd_kpi_transport_eff", "hd_kpi_saving_x", "hd_kpi_scope_var"):
+                  "hd_kpi_realized_mt_x", "hd_kpi_transport_eff", "hd_kpi_saving_x", "hd_kpi_scope_var",
+                  "hd_kpi_open_edge"):
             setattr(app, n, _Var())
-        caps = ("Realised Savings", "Saving / MT", "MTD Realised") + app._HD_XROW
+        caps = ("Realised Savings", "Saving / MT", "MTD Realised", "Indicative Open") + app._HD_XROW
         app._hd_tiles = {k: (_Tile(), _Var(k)) for k in caps}
         app._hd_tile_hints = {k: _Var() for k in caps}
         app._hd_mtd = (100000.0, 150000.0)
@@ -281,7 +282,29 @@ class TransportViewTests(unittest.TestCase):
         return app
 
     METRICS = {"realized_saving": -8600000.0, "realized_saving_excl": 413843.0,
-               "realized_per_mt": -108.0, "realized_per_mt_excl": 5.0, "method": "consumption"}
+               "realized_per_mt": -108.0, "realized_per_mt_excl": 5.0, "method": "consumption",
+               "open_count": 8, "open_position": 18415802.0, "open_position_excl": 20023899.0}
+
+    def test_indicative_open_follows_the_view(self):
+        app = self._app()
+        app.state_obj["ui"]["realised_transport_view"] = "excl"
+        app._hd_apply_transport_view(self.METRICS, "CORN")
+        self.assertEqual(app.hd_kpi_open_edge.get(), "+20,023,899")
+        self.assertEqual(app._hd_tiles["Indicative Open"][1].get(), "Indicative Open · excl.")
+        self.assertIn("incl. transport +18,415,802", app._hd_tile_hints["Indicative Open"].get())
+        app.state_obj["ui"]["realised_transport_view"] = "both"
+        app._hd_apply_transport_view(self.METRICS, "CORN")
+        self.assertEqual(app.hd_kpi_open_edge.get(), "+18,415,802")
+        self.assertIn("excl. transport +20,023,899", app._hd_tile_hints["Indicative Open"].get())
+
+    def test_local_transport_of_the_quote_used(self):
+        app = self._app()
+        app.state_obj = {"ui": {}, "local_prices": [
+            {"date": "2026-11-01", "commodity": "CORN-BRZ", "price_egp_mt": 15200, "transport_egp_mt": 396.88},
+            {"date": "2026-11-01", "commodity": "SBM", "price_egp_mt": 27000}]}
+        self.assertEqual(app._local_transport_on("CORN-BRZ", "2026-11-01"), 396.88)
+        self.assertIsNone(app._local_transport_on("CORN-BRZ", "2026-10-31"))
+        self.assertIsNotNone(app._local_transport_on("SBM", "2026-11-01"))   # default transport
 
     def test_default_is_both(self):
         app = self._app()
