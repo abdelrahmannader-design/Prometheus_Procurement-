@@ -79,5 +79,25 @@ class RunTests(unittest.TestCase):
         self.assertTrue(any("Adverse" in line for line in ost.summary(res)))
 
 
+class CbotLevelTests(unittest.TestCase):
+    def test_levels_and_book_break_even(self):
+        ps = [pos(), pos(id="C2", qty=2000.0, unpriced_mt=2000.0, local=14200.0)]
+        self.assertEqual(ost.spots(ps), {"CORN": 450.0})
+        self.assertAlmostEqual(ost.cbot_levels(ps, 0.10)["CORN"], 495.0)
+        self.assertEqual(ost.level_text(ps, 0.05), "CORN 472.50")
+        be = ost.book_break_even(ps)
+        self.assertAlmostEqual(ost.scenario_total(ps, be)["tot1"], 0, places=4)
+        # a dearer FX or cheaper local brings the break-even CBOT down
+        self.assertLess(ost.book_break_even(ps, dfx=0.03), be)
+        self.assertLess(ost.book_break_even(ps, dloc=-0.03), be)
+        self.assertIsNone(ost.book_break_even([pos(cif_basis="saved")]))
+
+    def test_run_carries_levels_and_break_evens(self):
+        res = ost.run([pos()], cbot=[0.05], fx=[0.03], local=[-0.03])
+        self.assertEqual(res["spots"], {"CORN": 450.0})
+        self.assertEqual(set(res["be_book"]), {(f, l) for f in (0.0, 0.03) for l in (-0.03, 0.0)})
+        self.assertTrue(any(line.startswith("Break-even CBOT") for line in ost.summary(res)))
+
+
 if __name__ == "__main__":
     unittest.main()

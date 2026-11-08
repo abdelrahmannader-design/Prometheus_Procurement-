@@ -133,6 +133,45 @@ def scenario_total(positions, dc=0.0, dfx=0.0, dloc=0.0, excl=False, dc_by_base=
     return t
 
 
+def spots(positions):
+    """{base commodity: the live CBOT the positions are valued at}."""
+    out = {}
+    for p in positions:
+        if _n(p.get("cbot")) and p.get("base") not in out:
+            out[p.get("base")] = _n(p.get("cbot"))
+    return out
+
+
+def cbot_levels(positions, dc):
+    """{base: CBOT level} that a shock ``dc`` means (live CBOT × (1 + dc))."""
+    return {b: v * (1.0 + (dc or 0.0)) for b, v in spots(positions).items()}
+
+
+def level_text(positions, dc, by_base=None):
+    """'CORN 463.58' (or 'CORN 463.58 · SBM 336.00') for a shock."""
+    sp = spots(positions)
+    parts = []
+    for b in sorted(sp):
+        d = (by_base or {}).get(b, dc) if by_base is not None else dc
+        parts.append(f"{b} {sp[b] * (1.0 + (d or 0.0)):,.2f}")
+    return " · ".join(parts)
+
+
+def book_break_even(positions, dfx=0.0, dloc=0.0, excl=False):
+    """The CBOT shock at which the open book's saving vs local is zero.
+
+    The total is linear in the CBOT shock, so two points give it exactly.
+    Returns None when CBOT does not move the book (nothing unpriced).
+    Below this shock (and below its CBOT levels) the open book beats local.
+    """
+    t0 = scenario_total(positions, 0.0, dfx, dloc, excl)["tot1"]
+    t1 = scenario_total(positions, 0.01, dfx, dloc, excl)["tot1"]
+    slope = (t1 - t0) / 0.01
+    if slope >= -1e-9:
+        return None
+    return -t0 / slope
+
+
 def clean(shocks, default):
     vals = sorted({round(float(x), 6) for x in (shocks or default) if _n(x) is not None and float(x) > -1.0} | {0.0})
     return tuple(vals)
@@ -161,7 +200,9 @@ def run(positions, cbot=None, fx=None, local=None, excl=False, history=None):
             t = scenario_total(positions, dc, dfx, dloc, excl)
             grid[(dc, dfx, dloc)] = {k: t[k] for k in ("tot1", "chg", "loss_n", "loss_mt", "flips")}
     worst = min(grid.items(), key=lambda kv: kv[1]["tot1"]) if grid else None
+    be = {(dfx, dloc): book_break_even(positions, dfx, dloc, excl) for dloc in local for dfx in fx}
     return {"excl": excl, "cbot": cbot, "fx": fx, "local": local, "scenarios": scen, "grid": grid,
+            "spots": spots(positions), "be_book": be,
             "worst": {"dc": worst[0][0], "dfx": worst[0][1], "dloc": worst[0][2], **worst[1]} if worst else None,
             "positions": len(positions),
             "cbot_exposed_mt": sum(exposure(p)[0] * (_n(p.get("qty")) or 0.0) for p in positions),
@@ -188,6 +229,14 @@ def summary(res, money=lambda v: f"EGP {v:,.0f}"):
     basis = "excl. transport" if res["excl"] else "incl. transport"
     lines = [f"Open book today: {money(b['tot0'])} vs local ({basis}) on {b['qty']:,.0f} MT "
              f"— {res['cbot_exposed_mt']:,.0f} MT still move with CBOT, {res['fx_exposed_mt']:,.0f} MT have no Form 4."]
+    sp = res.get("spots") or {}
+    lv = lambda d: " · ".join(f"{k} {v * (1 + d):,.2f}" for k, v in sorted(sp.items()))
+    be0 = (res.get("be_book") or {}).get((0.0, 0.0))
+    if sp:
+        lines.append("CBOT now: " + lv(0.0) + " (¢/bu; SBM $/short ton).")
+    if be0 is not None:
+        lines.append(f"Break-even CBOT at today's FX and local: {pct(be0)} = {lv(be0)} — below this CBOT the open "
+                     f"book still beats local; above it, buying locally would be cheaper.")
     lines.append(f"Adverse ({describe(a)}): {money(a['tot1'])} ({money(a['chg'])}) — CBOT {money(a['from_cbot'])}, "
                  f"FX {money(a['from_fx'])}, local {money(a['from_local'])}; {a['loss_n']} contract(s) below local "
                  f"({a['loss_mt']:,.0f} MT), {a['flips']} flip from saving to loss.")
