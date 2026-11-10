@@ -93,47 +93,53 @@ def reconstruct_day(day, history, contracts, cbot_on, fx_on, local_on, captured_
             continue
         if cid not in nxt and not (closed and closed > day):
             continue
-        t = prev.get(cid) or nxt.get(cid)
-        base = t.get("base_commodity") or (t.get("commodity") or "").split("-")[0]
-        conv, prem = _n(t.get("cbot_conversion")), _n(t.get("premium_quote"))
-        cif_t, cbot_t = _n(t.get("cif_usd_mt")), _n(t.get("cbot_price"))
-        # Treat the contract as the app did around that day (not as it is today): its CIF followed the
-        # CBOT if the nearest record's CIF equals (CBOT + premium) × factor.
-        floating = None not in (conv, prem, cif_t, cbot_t) and abs(cif_t - (cbot_t + prem) * conv) < 0.01
-        cb, cb_date = cbot_on(base, day) if base in ("CORN", "SOYBEAN", "WHEAT", "SBM") else (None, None)
-        cif = ((cb + prem) * conv) if (floating and cb is not None) else cif_t
-        f4, fx_t = _n(c.get("form4_fx")), _n(t.get("fx"))
-        if f4 and fx_t is not None and abs(fx_t - f4) < 0.0005:
-            fx, fx_date, fx_src = f4, str(c.get("form4_date") or "")[:10], "Form 4"
-        else:
-            fx, fx_date = fx_on(day)
-            fx_src = "FX history"
-        loc, loc_date = local_on(c or t, day)
-        disc, clr, fr = _n(t.get("discharge_egp_mt")) or 0.0, _n(t.get("clearance_egp_mt")) or 0.0, _n(t.get("freight_egp_mt")) or 0.0
-        own_t = _n(t.get("own_after_egp_mt"))
-        other_fee = (own_t - (cif_t * _n(t.get("fx")) + disc + clr + fr)) if None not in (own_t, cif_t, _n(t.get("fx"))) else 0.0
-        own = (cif * fx + disc + clr + fr + other_fee) if None not in (cif, fx) else None
-        sav = (loc - own) if None not in (loc, own) else None
-        qty = _n(t.get("qty_mt"))
-        rec = dict(t)
-        rec.update({
-            "date": day, "captured_at": captured_at, "capture_reason": "backfill", "mode": "RECONSTRUCTED",
-            "cbot_price": round(cb, 6) if cb is not None else None,
-            "cbot_source": "CBOT close (history)" if cb is not None else "",
-            "cbot_as_of": cb_date or "",
-            "cif_usd_mt": round(cif, 6) if cif is not None else None, "fx": round(fx, 6) if fx is not None else None,
-            "fx_source": fx_src, "fx_as_of": fx_date or "", "local_egp_mt": round(loc, 4) if loc is not None else None,
-            "local_price_date": loc_date or "", "own_after_egp_mt": round(own, 4) if own is not None else None,
-            "saving_egp_mt": round(sav, 4) if sav is not None else None,
-            "total_saving_egp": round(sav * qty, 2) if None not in (sav, qty) else None,
-            "reconstructed_from": (f"CBOT close {cb_date or '—'}, {fx_src} {fx_date or '—'}, local {loc_date or '—'}; "
-                                   f"fees and tonnes from the record of {t.get('date')}"),
-            "stale_quotes": [],
-        })
-        if floating and cb is None:
-            rec["stale_quotes"] = ["no CBOT close on or before this day"]
-        rows.append(rec)
+        rows.append(rebuild_row(day, prev.get(cid) or nxt.get(cid), c, cbot_on, fx_on, local_on, captured_at))
     return rows
+
+
+def rebuild_row(day, t, c, cbot_on, fx_on, local_on, captured_at=""):
+    """One contract's record for ``day`` rebuilt from template record ``t`` (fees, premium, tonnes) and
+    the CBOT close, FX and local price of that day. ``c`` is the contract (for Form 4 and the local lookup)."""
+    c = c or {}
+    base = t.get("base_commodity") or (t.get("commodity") or "").split("-")[0]
+    conv, prem = _n(t.get("cbot_conversion")), _n(t.get("premium_quote"))
+    cif_t, cbot_t = _n(t.get("cif_usd_mt")), _n(t.get("cbot_price"))
+    # Treat the contract as the app did around that day (not as it is today): its CIF followed the
+    # CBOT if the nearest record's CIF equals (CBOT + premium) × factor.
+    floating = None not in (conv, prem, cif_t, cbot_t) and abs(cif_t - (cbot_t + prem) * conv) < 0.01
+    cb, cb_date = cbot_on(base, day) if base in ("CORN", "SOYBEAN", "WHEAT", "SBM") else (None, None)
+    cif = ((cb + prem) * conv) if (floating and cb is not None) else cif_t
+    f4, fx_t = _n(c.get("form4_fx")), _n(t.get("fx"))
+    if f4 and fx_t is not None and abs(fx_t - f4) < 0.0005:
+        fx, fx_date, fx_src = f4, str(c.get("form4_date") or "")[:10], "Form 4"
+    else:
+        fx, fx_date = fx_on(day)
+        fx_src = "FX history"
+    loc, loc_date = local_on(c or t, day)
+    disc, clr, fr = _n(t.get("discharge_egp_mt")) or 0.0, _n(t.get("clearance_egp_mt")) or 0.0, _n(t.get("freight_egp_mt")) or 0.0
+    own_t = _n(t.get("own_after_egp_mt"))
+    other_fee = (own_t - (cif_t * _n(t.get("fx")) + disc + clr + fr)) if None not in (own_t, cif_t, _n(t.get("fx"))) else 0.0
+    own = (cif * fx + disc + clr + fr + other_fee) if None not in (cif, fx) else None
+    sav = (loc - own) if None not in (loc, own) else None
+    qty = _n(t.get("qty_mt"))
+    rec = dict(t)
+    rec.update({
+        "date": day, "captured_at": captured_at, "capture_reason": "backfill", "mode": "RECONSTRUCTED",
+        "cbot_price": round(cb, 6) if cb is not None else None,
+        "cbot_source": "CBOT close (history)" if cb is not None else "",
+        "cbot_as_of": cb_date or "",
+        "cif_usd_mt": round(cif, 6) if cif is not None else None, "fx": round(fx, 6) if fx is not None else None,
+        "fx_source": fx_src, "fx_as_of": fx_date or "", "local_egp_mt": round(loc, 4) if loc is not None else None,
+        "local_price_date": loc_date or "", "own_after_egp_mt": round(own, 4) if own is not None else None,
+        "saving_egp_mt": round(sav, 4) if sav is not None else None,
+        "total_saving_egp": round(sav * qty, 2) if None not in (sav, qty) else None,
+        "reconstructed_from": (f"CBOT close {cb_date or '—'}, {fx_src} {fx_date or '—'}, local {loc_date or '—'}; "
+                               f"fees and tonnes from the record of {t.get('date')}"),
+        "stale_quotes": [],
+    })
+    if floating and cb is None:
+        rec["stale_quotes"] = ["no CBOT close on or before this day"]
+    return rec
 
 
 def backfill(history, contracts, trading_days, today, cbot_on, fx_on, local_on, captured_at=""):
