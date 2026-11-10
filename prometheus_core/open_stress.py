@@ -172,16 +172,53 @@ def book_break_even(positions, dfx=0.0, dloc=0.0, excl=False):
     return -t0 / slope
 
 
+def period_range(series, months, today=None):
+    """CBOT low / average / high (with dates) over the last ``months`` months.
+
+    ``series`` = [(iso date, close)]. ``months`` = 0 or None means the whole
+    history. Returns None when the window holds no prices.
+    """
+    import datetime as _dt
+    pts = []
+    for d, v in series or []:
+        fv = _n(v)
+        if not d or fv is None or fv <= 0:
+            continue
+        try:
+            pts.append((_dt.date.fromisoformat(str(d)[:10]), fv))
+        except ValueError:
+            continue
+    if not pts:
+        return None
+    pts.sort()
+    end = today or pts[-1][0]
+    start = end - _dt.timedelta(days=round(30.44 * months)) if months else pts[0][0]
+    win = [(d, v) for d, v in pts if start <= d <= end]
+    if not win:
+        return None
+    lo, hi = min(win, key=lambda t: t[1]), max(win, key=lambda t: t[1])
+    return {"from": win[0][0].isoformat(), "to": win[-1][0].isoformat(), "points": len(win),
+            "low": lo[1], "low_date": lo[0].isoformat(), "high": hi[1], "high_date": hi[0].isoformat(),
+            "avg": sum(v for _d, v in win) / len(win), "series": [(d.isoformat(), v) for d, v in win]}
+
+
+def period_label(months):
+    return "over the whole history" if not months else f"in the last {months} month{'s' if months != 1 else ''}"
+
+
 def clean(shocks, default):
     vals = sorted({round(float(x), 6) for x in (shocks or default) if _n(x) is not None and float(x) > -1.0} | {0.0})
     return tuple(vals)
 
 
-def run(positions, cbot=None, fx=None, local=None, excl=False, history=None):
+def run(positions, cbot=None, fx=None, local=None, excl=False, history=None, period=None):
     """The full test: base, best, adverse, an optional history case, and the
     CBOT × FX grid for every local shock.
 
-    ``history`` = {base commodity: CBOT shock} (e.g. the worst 30-day rise seen).
+    ``history`` = {base commodity: CBOT shock} (e.g. the 95th-percentile 30-day rise).
+    ``period``  = the CBOT range of a chosen history window (see ``period_range``).
+    Adds a "Period high" case (each commodity's CBOT at the period high, FX and
+    local unchanged) and the open book at the period's low / average / high.
     """
     cbot, fx, local = clean(cbot, DEFAULT_CBOT), clean(fx, DEFAULT_FX), clean(local, DEFAULT_LOCAL)
     named = [("Base", 0.0, 0.0, 0.0, None),
@@ -189,6 +226,10 @@ def run(positions, cbot=None, fx=None, local=None, excl=False, history=None):
              ("Adverse", max(cbot), max(fx), min(local), None)]
     if history:
         named.append(("History", None, max(fx), min(local), dict(history)))
+    sp = spots(positions)
+    pb = {k: v for k, v in ((period or {}).get("by_base") or {}).items() if k in sp and v.get("high")}
+    if pb:
+        named.append(("Period high", None, 0.0, 0.0, {k: v["high"] / sp[k] - 1.0 for k, v in pb.items()}))
     scen = []
     for name, dc, dfx, dloc, by in named:
         t = scenario_total(positions, dc or 0.0, dfx, dloc, excl, by)
@@ -201,8 +242,14 @@ def run(positions, cbot=None, fx=None, local=None, excl=False, history=None):
             grid[(dc, dfx, dloc)] = {k: t[k] for k in ("tot1", "chg", "loss_n", "loss_mt", "flips")}
     worst = min(grid.items(), key=lambda kv: kv[1]["tot1"]) if grid else None
     be = {(dfx, dloc): book_break_even(positions, dfx, dloc, excl) for dloc in local for dfx in fx}
+    if pb:
+        # the open book at the period's low / average / high CBOT (FX and local as today)
+        period = dict(period)
+        period["book"] = {key: scenario_total(positions, 0.0, 0.0, 0.0, excl,
+                                              {k: v[key] / sp[k] - 1.0 for k, v in pb.items()})["tot1"]
+                          for key in ("low", "avg", "high")}
     return {"excl": excl, "cbot": cbot, "fx": fx, "local": local, "scenarios": scen, "grid": grid,
-            "spots": spots(positions), "be_book": be,
+            "spots": spots(positions), "be_book": be, "period": period if pb else None,
             "worst": {"dc": worst[0][0], "dfx": worst[0][1], "dloc": worst[0][2], **worst[1]} if worst else None,
             "positions": len(positions),
             "cbot_exposed_mt": sum(exposure(p)[0] * (_n(p.get("qty")) or 0.0) for p in positions),
@@ -243,6 +290,26 @@ def summary(res, money=lambda v: f"EGP {v:,.0f}"):
     if "History" in sc:
         h = sc["History"]
         lines.append(f"History case ({describe(h)}): {money(h['tot1'])} ({money(h['chg'])}); {h['loss_n']} contract(s) below local.")
+    per = res.get("period") or {}
+    for k, v in sorted((per.get("by_base") or {}).items()):
+        if v.get("high"):
+            lines.append(f"{k} CBOT {per.get('label', 'in the period')} ({v['from']} → {v['to']}): low {v['low']:,.2f} "
+                         f"({v['low_date']}), average {v['avg']:,.2f}, high {v['high']:,.2f} ({v['high_date']}).")
+    if per.get("book"):
+        bk = per["book"]
+        lines.append(f"Open book at those CBOT levels (today's FX and local): period low {money(bk['low'])}, "
+                     f"average {money(bk['avg'])}, period high {money(bk['high'])}.")
+        if be0 is not None:
+            for k, v in sorted((per.get("by_base") or {}).items()):
+                if not v.get("high") or k not in sp:
+                    continue
+                lvl = sp[k] * (1 + be0)
+                if lvl > v["high"]:
+                    lines.append(f"{k}: break-even CBOT {lvl:,.2f} is above the period high {v['high']:,.2f} — at every "
+                                 f"CBOT seen {per.get('label', 'in the period')} the open book would beat local.")
+                else:
+                    lines.append(f"{k}: break-even CBOT {lvl:,.2f} is inside the period range (high {v['high']:,.2f}) — "
+                                 f"CBOT traded above it {per.get('label', 'in the period')}, when local would have been cheaper.")
     w = res.get("worst")
     if w:
         lines.append(f"Worst point of the grid: CBOT {pct(w['dc'])}, FX {pct(w['dfx'])}, local {pct(w['dloc'])} → {money(w['tot1'])}.")

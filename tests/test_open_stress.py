@@ -99,5 +99,36 @@ class CbotLevelTests(unittest.TestCase):
         self.assertTrue(any(line.startswith("Break-even CBOT") for line in ost.summary(res)))
 
 
+class PeriodTests(unittest.TestCase):
+    SERIES = [("2026-06-01", 400.0), ("2026-08-10", 470.0), ("2026-09-15", 430.0),
+              ("2026-10-20", 455.0), ("2026-11-06", 450.0)]
+
+    def test_period_range_window(self):
+        r = ost.period_range(self.SERIES, 3)
+        self.assertEqual((r["from"], r["to"], r["points"]), ("2026-08-10", "2026-11-06", 4))
+        self.assertEqual((r["low"], r["low_date"], r["high"], r["high_date"]), (430.0, "2026-09-15", 470.0, "2026-08-10"))
+        self.assertAlmostEqual(r["avg"], (470 + 430 + 455 + 450) / 4)
+        self.assertEqual(ost.period_range(self.SERIES, 0)["points"], 5)        # whole history
+        self.assertIsNone(ost.period_range([], 3))
+        self.assertEqual(ost.period_label(4), "in the last 4 months")
+
+    def test_period_cases_in_run(self):
+        pr = ost.period_range(self.SERIES, 3)
+        res = ost.run([pos()], period={"label": ost.period_label(3), "by_base": {"CORN": pr}})
+        ph = next(t for t in res["scenarios"] if t["name"] == "Period high")
+        self.assertAlmostEqual(ph["dc_by_base"]["CORN"], 470 / 450 - 1)
+        self.assertEqual((ph["dfx"], ph["dloc"]), (0.0, 0.0))
+        bk = res["period"]["book"]
+        self.assertGreater(bk["low"], bk["avg"])
+        self.assertGreater(bk["avg"], bk["high"])
+        self.assertAlmostEqual(bk["high"], ph["tot1"])
+        self.assertTrue(any("above the period high" in line for line in ost.summary(res)))
+
+    def test_no_period_no_extra_case(self):
+        res = ost.run([pos()])
+        self.assertNotIn("Period high", [t["name"] for t in res["scenarios"]])
+        self.assertIsNone(res["period"])
+
+
 if __name__ == "__main__":
     unittest.main()
