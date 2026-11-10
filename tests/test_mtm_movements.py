@@ -111,6 +111,52 @@ class ExtendTests(unittest.TestCase):
         self.assertEqual(day[0], one)
 
 
+class ExclTransportTests(unittest.TestCase):
+    def ledger(self):
+        h = ledger()
+        for r in h:
+            r["freight_egp_mt"] = 300.0                      # route freight inside our price
+            r["own_after_egp_mt"] += 300.0
+            r["saving_egp_mt"] -= 300.0
+            r["total_saving_egp"] = r["saving_egp_mt"] * r["qty_mt"]
+        return h
+
+    def test_both_sides_lose_their_own_transport(self):
+        h = self.ledger()
+        ex = mv.excl_transport(h, {}, lambda c, r: 400.0)
+        r0, x0 = h[0], ex[0]
+        self.assertAlmostEqual(x0["local_egp_mt"], r0["local_egp_mt"] - 400.0)
+        self.assertAlmostEqual(x0["own_after_egp_mt"], r0["own_after_egp_mt"] - 300.0)
+        self.assertAlmostEqual(x0["saving_egp_mt"], r0["saving_egp_mt"] - 100.0, places=3)
+        self.assertAlmostEqual(x0["total_saving_egp"], x0["saving_egp_mt"] * r0["qty_mt"], places=1)
+        self.assertEqual((x0["local_transport_egp_mt"], x0["freight_egp_mt"]), (400.0, 300.0))
+        self.assertAlmostEqual(x0["saving_incl_egp_mt"], r0["saving_egp_mt"])
+        self.assertNotIn("basis", h[0])                          # the ledger itself is not changed
+
+    def test_unknown_local_transport_leaves_no_saving(self):
+        ex = mv.excl_transport(self.ledger(), {}, lambda c, r: None)
+        self.assertIsNone(ex[0]["saving_egp_mt"])
+        self.assertIn("no transport found on the local quote", ex[0]["stale_quotes"])
+
+    def test_workbook_labels(self):
+        import openpyxl
+        ex = mv.excl_transport(self.ledger(), {}, lambda c, r: 400.0)
+        with tempfile.TemporaryDirectory() as tmp:
+            fp = os.path.join(tmp, "x.xlsx")
+            res = mv.write_movements_excel(ex, {"C1": {"status": "Open"}, "C3": {"status": "Open"}}, fp, basis="excl")
+            self.assertEqual(res["basis"], "excl")
+            wb = openpyxl.load_workbook(fp, data_only=True)
+            dm = wb["Daily Movement"]
+            heads = [c.value for c in dm[4]]
+            for h in ("Sav/MT Today (excl tr.)", "Local excl tr. Today", "Our price excl tr.", "Our freight", "Local transport"):
+                self.assertIn(h, heads)
+            self.assertIn("EXCL TRANSPORT", dm["A2"].value)
+            row = next(r for r in dm.iter_rows(min_row=5, values_only=True) if r[2] == "Contract")
+            self.assertEqual((row[heads.index("Our freight")], row[heads.index("Local transport")]), (300.0, 400.0))
+            bb = wb["Book by Day"]
+            self.assertIn("Open MTM edge excl transport", bb.cell(6, bb.max_column).value)
+
+
 class WorkbookTests(unittest.TestCase):
     def test_workbook(self):
         import openpyxl

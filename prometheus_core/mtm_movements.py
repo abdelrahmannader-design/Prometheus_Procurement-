@@ -92,6 +92,36 @@ def extend_to_storage(history, contracts, trading_days, cbot_on, fx_on, local_on
     return out
 
 
+def excl_transport(history, contracts, local_transport_on):
+    """Copies of the records on the excluding-transport basis, the way Home computes it.
+
+    Our price loses the contract's route freight; the local price loses the transport recorded on
+    its quote (``local_transport_on(contract, record)`` → EGP/MT, None when unknown). Saving and
+    total follow. The including-transport values are kept as ``*_incl`` and the two transport
+    amounts as ``freight_egp_mt`` / ``local_transport_egp_mt``.
+    """
+    out = []
+    for r in history or []:
+        if not isinstance(r, dict):
+            continue
+        x = dict(r)
+        loc, own, q = _n(r.get("local_egp_mt")), _n(r.get("own_after_egp_mt")), _n(r.get("qty_mt"))
+        fr = _n(r.get("freight_egp_mt")) or 0.0
+        lt = local_transport_on((contracts or {}).get(r.get("contract_id")) or r, r) if loc is not None else None
+        lt = _n(lt)
+        le = round(loc - lt, 4) if None not in (loc, lt) else None
+        oe = round(own - fr, 4) if own is not None else None
+        se = round(le - oe, 4) if None not in (le, oe) else None
+        x.update({"local_incl_egp_mt": loc, "own_incl_egp_mt": own, "saving_incl_egp_mt": _n(r.get("saving_egp_mt")),
+                  "total_incl_egp": _n(r.get("total_saving_egp")), "local_transport_egp_mt": lt,
+                  "local_egp_mt": le, "own_after_egp_mt": oe, "saving_egp_mt": se,
+                  "total_saving_egp": round(se * q, 2) if None not in (se, q) else None, "basis": "excl"})
+        if loc is not None and lt is None:
+            x["stale_quotes"] = list(r.get("stale_quotes") or []) + ["no transport found on the local quote"]
+        out.append(x)
+    return out
+
+
 def contract_trails(history, ids=None):
     """{contract_id: [rows in date order]}; each row against the contract's own previous day."""
     by = {}
@@ -165,6 +195,7 @@ def day_blocks(history, ids=None):
                 "cif": g(c, "cif_usd_mt"), "cif_prior": g(p, "cif_usd_mt"), "fx": g(c, "fx"), "fx_prior": g(p, "fx"),
                 "fx_source": (c or {}).get("fx_source", ""), "local": g(c, "local_egp_mt"), "local_prior": g(p, "local_egp_mt"),
                 "local_date": (c or {}).get("local_price_date", ""), "own": g(c, "own_after_egp_mt"),
+                "freight": g(c, "freight_egp_mt"), "local_transport": g(c, "local_transport_egp_mt"),
                 "mode": "Rebuilt" if (c or {}).get("mode") == "RECONSTRUCTED" else ("Live" if c else ""),
                 "stale": "; ".join((c or {}).get("stale_quotes") or []), "note": (c or {}).get("reconstructed_from", ""),
             })
@@ -192,6 +223,7 @@ def day_blocks(history, ids=None):
             "prior_mode": _mode({r.get("mode") for r in prv.values()}) if prv else "",
             "stale": "; ".join(sorted({s for r in cur.values() for s in (r.get("stale_quotes") or [])})),
         }
+        book["excl"] = any(r.get("basis") == "excl" for r in cur.values())
         book["text"] = headline(day, prior_date, book)
         out.append({"date": day, "prior_date": prior_date, "rows": rows, "book": book})
         prior_date = day
@@ -213,7 +245,7 @@ def headline(day, prior_date, b):
     if not prior_date:
         return f"{day} · first stored day · {b['contracts']} contracts, {b['mt']:,.0f} MT, Open MTM edge {money(b['total'])}"
     bits = [f"{prior_date} → {day}",
-            f"Open MTM edge {money(b['total_prior'])} → {money(b['total'])} (Δ {_sg(b['d_total'])})",
+            f"Open MTM edge{' excl transport' if b.get('excl') else ''} {money(b['total_prior'])} → {money(b['total'])} (Δ {_sg(b['d_total'])})",
             f"Weighted Saving/MT Δ {_sg(b['d_sav'])}"]
     for base, (t, p) in b["cbot"].items():
         if t is not None and p is not None:
@@ -246,13 +278,28 @@ def sheet_name(ref, used):
 
 
 def write_movements_excel(history, contracts, path, as_of=None, ids=None, scope_label="All contracts",
-                          extension=None, ledger_start=None):
+                          extension=None, ledger_start=None, basis="incl"):
     """Write the workbook; ``history`` should already include ``extension`` rows if they are wanted.
 
     ``ids``: limit to these contract ids (None = every contract in the ledger). ``extension``: the rows
-    ``extend_to_storage`` returned (only used to count and to mark them). Returns a dict with the
-    counts written.
+    ``extend_to_storage`` returned (only used to count and to mark them). ``basis``: "excl" when the
+    records went through ``excl_transport`` (labels and notes say so). Returns a dict with the counts.
     """
+    excl = basis == "excl"
+    tag = " (excl tr.)" if excl else ""
+
+    def lab(h):
+        if h in ("Own cost", "Our price"):
+            return "Our price excl tr." if excl else "Our price"
+        if not excl:
+            return h
+        if h in ("Local", "Local Today", "Local Prior"):
+            return h.replace("Local", "Local excl tr.")
+        if h.startswith(("Sav/MT", "Total", "Open MTM")) and h != "Total EGP":
+            return h + tag
+        if h == "Total EGP":
+            return "Total EGP excl tr."
+        return h
     from openpyxl import Workbook
     from openpyxl.chart import LineChart, Reference
     from openpyxl.formatting.rule import CellIsRule
@@ -298,7 +345,7 @@ def write_movements_excel(history, contracts, path, as_of=None, ids=None, scope_
 
     def table(ws, name, heads, widths, n, hr=4, style="TableStyleMedium2"):
         for i, h in enumerate(heads, start=1):
-            c = ws.cell(hr, i, h)
+            c = ws.cell(hr, i, lab(h))
             c.alignment = Alignment(wrap_text=True, vertical="center")
             ws.column_dimensions[L(i)].width = widths[i - 1]
         ws.row_dimensions[hr].height = 32
@@ -312,13 +359,13 @@ def write_movements_excel(history, contracts, path, as_of=None, ids=None, scope_
 
     n_ext = len(extension or [])
     period = f"{blocks[0]['date']} → {last_day}" if blocks else "—"
-    sub = (f"{scope_label} · {period} · as of {as_of} · ledger started {ledger_start or '—'}"
+    sub = (("PRICES EXCL TRANSPORT · " if excl else "Prices incl transport · ") + f"{scope_label} · {period} · as of {as_of} · ledger started {ledger_start or '—'}"
            + (f" · {n_ext} contract-days before entry rebuilt back to the storage start" if n_ext else ""))
 
     # ── Summary ──
     ws = wb.active
     ws.title = "Summary"
-    title(ws, "Open MTM — every daily movement since storage", sub)
+    title(ws, "Open MTM — every daily movement since storage" + (" (excl transport)" if excl else ""), sub)
     notes = [
         "How to read it: each day is compared with the previous stored day, exactly like the Home table "
         "\"Daily Open MTM Movement\". Δ Sav/MT is split into four parts that add up to it (EGP/MT):",
@@ -328,13 +375,16 @@ def write_movements_excel(history, contracts, path, as_of=None, ids=None, scope_
         "in the app; rebuilt from the stored CBOT close, FX history and local price, with the fees and tonnes of the "
         "nearest stored record. Live = recorded by the app that day.",
         "Book totals before the ledger started only hold the contracts entered later, so they are partial.",
+        ("Excluding transport: our price = CIF × FX + discharge + clearance (+ fees), without the route freight; local = the "
+         "local quote without the transport recorded on it; saving = local − our price. Both transports are listed."
+         if excl else "Including transport, as on Home: our price includes the route freight and local includes its transport."),
     ]
     for i, t in enumerate(notes):
         put(ws, 3 + i, 1, t, italic=True, color=GREY)
     heads = ["Ref", "Contract ID", "Commodity", "Supplier", "Status", "Storage start", "Entered app", "First day",
              "Last day", "Days", "Rebuilt days", "MT", "CBOT first", "CBOT last", "Δ CBOT", "Sav/MT first", "Sav/MT last",
              "Δ Sav/MT", "from CBOT", "from FX", "from Local", "Other", "Total first", "Total last", "Δ Total", "Sheet"]
-    hr = 8
+    hr = 9
     order = sorted(trails, key=lambda k: (k not in open_now, _base(trails[k][-1]["rec"]), trails[k][0]["rec"]["date"],
                                           trails[k][-1]["rec"].get("contract_ref") or k))
     used = {"summary", "book by day", "daily movement", "contract trail"}
@@ -407,7 +457,7 @@ def write_movements_excel(history, contracts, path, as_of=None, ids=None, scope_
         last = 4 + len(blocks)
         signs(wsb, f"J5:J{last}"); signs(wsb, f"M5:R{last}")
         ch = LineChart()
-        ch.title, ch.height, ch.width = "Open MTM edge (EGP)", 8, 26
+        ch.title, ch.height, ch.width = "Open MTM edge (EGP)" + tag, 8, 26
         ch.add_data(Reference(wsb, min_col=9, min_row=4, max_row=last), titles_from_data=True)
         ch.set_categories(Reference(wsb, min_col=1, min_row=5, max_row=last))
         ch.y_axis.numFmt = "#,##0"
@@ -417,12 +467,13 @@ def write_movements_excel(history, contracts, path, as_of=None, ids=None, scope_
 
     # ── Daily Movement ──
     wsd = wb.create_sheet("Daily Movement")
-    title(wsd, "Daily Open MTM Movement — every day, as on Home",
+    title(wsd, "Daily Open MTM Movement — every day" + (" · excl transport" if excl else ", as on Home"),
           sub + " · newest day first · TOTAL rows are the open book of that day (Row = TOTAL to filter them)")
     heads = ["Date", "Prior date", "Row", "Ref", "Commodity", "Supplier", "Flag", "MT", "CBOT Today", "CBOT Prior", "Δ CBOT",
              "Sav/MT Today", "Sav/MT Prior", "Δ Sav/MT", "from CBOT", "from FX", "from Local", "Other", "Total Today",
              "Total Prior", "Δ Total", "CIF Today", "CIF Prior", "FX Today", "FX Prior", "FX source", "Local Today",
-             "Local Prior", "Local date", "Own cost", "Record", "Old quotes", "How it was rebuilt"]
+             "Local Prior", "Local date", "Own cost", "Our freight", "Local transport", "Record", "Old quotes",
+             "How it was rebuilt"]
     lines = []
     for blk in reversed(blocks):
         b = blk["book"]
@@ -430,9 +481,9 @@ def write_movements_excel(history, contracts, path, as_of=None, ids=None, scope_
             lines.append(("row", x))
         lines.append(("total", blk))
     table(wsd, "DailyMovement", heads, [11, 11, 7, 18, 10, 14, 7, 9, 9, 9, 8, 10, 10, 9, 9, 8, 9, 8, 13, 13, 12, 9, 9,
-                                        8, 8, 16, 10, 10, 11, 10, 8, 22, 60], len(lines))
+                                        8, 8, 16, 10, 10, 11, 10, 9, 9, 8, 22, 60], len(lines))
     fm = [None] * 7 + [F0, F2, F2, S2, F0, F0, S0, S0, S0, S0, S0, F0, F0, S0, F2, F2, F4, F4, None, F0, F0, None, F0,
-                       None, None, None]
+                       F0, F0, None, None, None]
     for i, (kind, x) in enumerate(lines):
         r = 5 + i
         if kind == "row":
@@ -440,11 +491,11 @@ def write_movements_excel(history, contracts, path, as_of=None, ids=None, scope_
                     x["cbot"], x["cbot_prior"], x["d_cbot"], x["sav"], x["sav_prior"], x["d_sav"],
                     *[x[k] for k in PARTS], x["total"], x["total_prior"], x["d_total"], x["cif"], x["cif_prior"],
                     x["fx"], x["fx_prior"], x["fx_source"], x["local"], x["local_prior"], x["local_date"], x["own"],
-                    x["mode"], x["stale"], x["note"]]
+                    x["freight"], x["local_transport"], x["mode"], x["stale"], x["note"]]
             for j, v in enumerate(vals, start=1):
                 put(wsd, r, j, v, fm[j - 1])
             if x["mode"] == "Rebuilt":
-                wsd.cell(r, 31).fill = PatternFill("solid", fgColor=REBUILT_FILL)
+                wsd.cell(r, 33).fill = PatternFill("solid", fgColor=REBUILT_FILL)
             if x["flag"]:
                 wsd.cell(r, 7).fill = PatternFill("solid", fgColor=NEW_FILL)
         else:
@@ -452,7 +503,7 @@ def write_movements_excel(history, contracts, path, as_of=None, ids=None, scope_
             vals = [blk["date"], blk["prior_date"], "TOTAL",
                     f"TOTAL OPEN BOOK ({b['contracts']} today / {b['contracts_prior']} prior)", "", "", "", b["mt"],
                     None, None, None, b["sav"], b["sav_prior"], b["d_sav"], *[b[k] for k in PARTS],
-                    b["total"], b["total_prior"], b["d_total"]] + [None] * 9 + [b["mode"], b["stale"], b["text"]]
+                    b["total"], b["total_prior"], b["d_total"]] + [None] * 11 + [b["mode"], b["stale"], b["text"]]
             for j, v in enumerate(vals, start=1):
                 put(wsd, r, j, v, fm[j - 1], bold=True, fill=TOTAL_FILL)
     if lines:
@@ -464,11 +515,12 @@ def write_movements_excel(history, contracts, path, as_of=None, ids=None, scope_
     title(wst, "Contract trail — each contract against its own previous day", sub)
     heads = ["Ref", "Contract ID", "Commodity", "Date", "Prior date", "Record", "MT", "CBOT", "Δ CBOT", "CIF $/MT", "FX",
              "Local", "Local date", "Own cost", "Sav/MT", "Δ Sav/MT", "from CBOT", "from FX", "from Local", "Other",
-             "Total EGP", "Δ Total", "Cumulative Δ Sav/MT", "Old quotes", "How it was rebuilt"]
+             "Total EGP", "Δ Total", "Cumulative Δ Sav/MT", "Our freight", "Local transport", "Old quotes",
+             "How it was rebuilt"]
     tl = [(cid, x) for cid in order for x in trails[cid]]
     table(wst, "ContractTrail", heads, [16, 10, 10, 11, 11, 8, 9, 9, 8, 9, 8, 10, 11, 10, 10, 9, 9, 8, 9, 8, 13, 12, 11,
-                                        22, 60], len(tl))
-    fm = [None] * 6 + [F0, F2, S2, F2, F4, F0, None, F0, F0, S0, S0, S0, S0, S0, F0, S0, S0, None, None]
+                                        9, 9, 22, 60], len(tl))
+    fm = [None] * 6 + [F0, F2, S2, F2, F4, F0, None, F0, F0, S0, S0, S0, S0, S0, F0, S0, S0, F0, F0, None, None]
     first_sav = {}
     for i, (cid, x) in enumerate(tl):
         r, rec, p = 5 + i, x["rec"], x["prior"]
@@ -479,7 +531,8 @@ def write_movements_excel(history, contracts, path, as_of=None, ids=None, scope_
                 _n(rec.get("local_egp_mt")), rec.get("local_price_date", ""), _n(rec.get("own_after_egp_mt")),
                 _n(rec.get("saving_egp_mt")), x["why"].get("change"), *[x["why"].get(k) for k in PARTS],
                 _n(rec.get("total_saving_egp")), _sub(_n(rec.get("total_saving_egp")), _n((p or {}).get("total_saving_egp"))),
-                _sub(_n(rec.get("saving_egp_mt")), first_sav[cid]), "; ".join(rec.get("stale_quotes") or []),
+                _sub(_n(rec.get("saving_egp_mt")), first_sav[cid]), _n(rec.get("freight_egp_mt")),
+                _n(rec.get("local_transport_egp_mt")), "; ".join(rec.get("stale_quotes") or []),
                 rec.get("reconstructed_from", "")]
         for j, v in enumerate(vals, start=1):
             put(wst, r, j, v, fm[j - 1])
@@ -497,12 +550,12 @@ def write_movements_excel(history, contracts, path, as_of=None, ids=None, scope_
         w = wb.create_sheet(name)
         title(w, f"{last_rec.get('contract_ref') or cid} · {_base(last_rec)} · {last_rec.get('supplier') or c.get('supplier') or ''}",
               f"Contract {cid} · storage start {storage_start(c) or '—'} · entered {str(c.get('created_ts') or '')[:10] or '—'}"
-              f" · {len(tr)} days · movement columns are formulas over the row above (EGP/MT unless EGP)")
+              f" · {len(tr)} days · {'prices EXCL transport · ' if excl else ''}movement columns are formulas over the row above (EGP/MT unless EGP)")
         heads = ["Date", "Prior date", "Record", "MT", "CBOT", "Δ CBOT", "CIF $/MT", "FX", "Local", "Local date", "Own cost",
                  "Sav/MT", "Δ Sav/MT", "from CBOT", "from FX", "from Local", "Other", "Total EGP", "Δ Total EGP",
-                 "Cumulative Δ Sav/MT", "Old quotes", "How it was rebuilt"]
+                 "Cumulative Δ Sav/MT", "Our freight", "Local transport", "Old quotes", "How it was rebuilt"]
         table(w, "T_" + re.sub(r"\W", "_", cid), heads, [11, 11, 8, 9, 9, 8, 9, 8, 10, 11, 10, 10, 9, 9, 8, 9, 8, 13, 12,
-                                                        11, 22, 60], len(tr))
+                                                        11, 9, 9, 22, 60], len(tr))
         s0 = _n(tr[0]["rec"].get("saving_egp_mt"))
         for i, x in enumerate(tr):
             r, rec, p, a = 5 + i, x["rec"], x["prior"], x["why"]
@@ -513,7 +566,8 @@ def write_movements_excel(history, contracts, path, as_of=None, ids=None, scope_
             put(w, r, 4, g("qty_mt"), F0); put(w, r, 5, g("cbot_price"), F2); put(w, r, 7, g("cif_usd_mt"), F2)
             put(w, r, 8, g("fx"), F4); put(w, r, 9, g("local_egp_mt"), F0); put(w, r, 10, rec.get("local_price_date", ""))
             put(w, r, 11, g("own_after_egp_mt"), F0); put(w, r, 12, g("saving_egp_mt"), F0); put(w, r, 18, g("total_saving_egp"), F0)
-            put(w, r, 21, "; ".join(rec.get("stale_quotes") or [])); put(w, r, 22, rec.get("reconstructed_from", ""))
+            put(w, r, 21, g("freight_egp_mt"), F0); put(w, r, 22, g("local_transport_egp_mt"), F0)
+            put(w, r, 23, "; ".join(rec.get("stale_quotes") or [])); put(w, r, 24, rec.get("reconstructed_from", ""))
             if i == 0:
                 for col in (6, 13, 14, 15, 16, 17, 19):
                     put(w, r, col, None)
@@ -549,7 +603,7 @@ def write_movements_excel(history, contracts, path, as_of=None, ids=None, scope_
         w.freeze_panes = "B5"
         if len(tr) > 1:
             ch = LineChart()
-            ch.title, ch.height, ch.width = "Sav/MT (EGP)", 7, 22
+            ch.title, ch.height, ch.width = "Sav/MT (EGP)" + tag, 7, 22
             ch.add_data(Reference(w, min_col=12, min_row=4, max_row=last), titles_from_data=True)
             ch.set_categories(Reference(w, min_col=1, min_row=5, max_row=last))
             ch.legend = None
@@ -565,4 +619,4 @@ def write_movements_excel(history, contracts, path, as_of=None, ids=None, scope_
     wb.save(path)
     store_formula_results(path, cache)
     return {"days": len(blocks), "contracts": len(trails), "open_sheets": len(sheets), "movement_rows": len(lines),
-            "rebuilt_before_entry": n_ext, "first_day": blocks[0]["date"] if blocks else "", "last_day": last_day}
+            "rebuilt_before_entry": n_ext, "basis": "excl" if excl else "incl", "first_day": blocks[0]["date"] if blocks else "", "last_day": last_day}
