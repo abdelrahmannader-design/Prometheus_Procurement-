@@ -92,6 +92,159 @@ class Book:
         ws.conditional_formatting.add(ref, CellIsRule(operator="greaterThan", formula=["0"], font=Font(color=GREEN)))
 
 
+PERIOD_SHEET = "Period Overview"
+
+
+def _period_overview(b, m):
+    """First sheet of a period report: the period's totals, month by month,
+    market ranges, local prices, contract activity, local purchases and the
+    open book now. Month totals are SUM formulas over the month rows."""
+    P, PS = m["period"], m["period_summary"]
+    ws = b.wb.create_sheet(PERIOD_SHEET, 0)
+    b.wb.active = 0
+    for other in b.wb.worksheets[1:]:
+        other.sheet_view.tabSelected = False
+    b.cache[PERIOD_SHEET] = {}
+    T = PS["totals"]
+    b.title(ws, f"Period overview — {P['from']} → {P['to']} ({P['days']} days)",
+            "Consumption, savings vs local and the CBOT benchmark cover only this window; stock and the open "
+            "book are today's. The other sheets of this workbook hold the same period's detail.")
+    H, HF = Font(bold=True, color="FFFFFF"), PatternFill("solid", fgColor=NAVY)
+
+    def head(r, cols):
+        for i, h in enumerate(cols, 1):
+            c = ws.cell(r, i, h)
+            c.font, c.fill = H, HF
+            c.alignment = Alignment(wrap_text=True, vertical="center")
+        ws.row_dimensions[r].height = 30
+
+    r = 4
+    b.put(ws, r, 1, "Headline", bold=True, size=12, color=NAVY)
+    rows = [("Savings vs local — incl. transport (EGP)", T["saving_incl"], M0),
+            ("Savings vs local — excl. transport (EGP)", T["saving_excl"], M0),
+            ("Saving per MT — incl. transport", T["saving_incl_mt"], M0),
+            ("Saving per MT — excl. transport", T["saving_excl_mt"], M0),
+            ("Tonnes compared vs local", T["mt_incl"], M0),
+            ("Consumption in the period (MT)", T["consumed_mt"], M0),
+            ("  of which imports (MT)", T["import_mt"], M0),
+            ("  of which local purchases (MT)", T["local_purchase_mt"], M0),
+            ("  of which without a source record (MT)", T["excluded_mt"], M0),
+            ("Import contracts consumed", T["contracts_consumed"], M0),
+            ("CBOT benchmark ① net (USD) — separate, never added", T["cbot_net_usd"], M0),
+            ("  advantage days (USD)", T["cbot_advantage_usd"], M0),
+            ("  missed days (USD)", T["cbot_missed_usd"], M0),
+            ("CBOT benchmark ② storage → last consumption (USD)", T["cbot_win_net_usd"], M0),
+            ("Day rows on local quotes older than 5 days", T["stale_rows"], M0)]
+    for lab, v, fmt in rows:
+        r += 1
+        b.put(ws, r, 1, lab)
+        b.put(ws, r, 2, blank(v), fmt)
+    b.signs(ws, "B5:B8")
+    b.signs(ws, f"B15:B18")
+    r += 2
+    b.put(ws, r, 1, "Month by month", bold=True, size=12, color=NAVY)
+    r += 1
+    head(r, ["Month", "Import MT", "Local purchase MT", "Savings incl. EGP", "EGP/MT incl.", "Savings excl. EGP",
+             "EGP/MT excl.", "CBOT benchmark USD"])
+    m0 = r + 1
+    for mo in PS["by_month"]:
+        r += 1
+        vals = [mo["month"], mo["mt"], mo["local_mt"], mo["saving_incl"], None, mo["saving_excl"], None,
+                mo["cbot_usd"] if mo["cbot_mt"] else None]
+        for j, v in enumerate(vals, 1):
+            b.put(ws, r, j, blank(v), M0 if j > 1 else None)
+        b.f(ws, r, 5, f'=IF({mo["mt_incl"] or 0}=0,"",D{r}/{mo["mt_incl"] or 0})',
+            (mo["saving_incl"] / mo["mt_incl"]) if mo["mt_incl"] else "", M0)
+        b.f(ws, r, 7, f'=IF({mo["mt_excl"] or 0}=0,"",F{r}/{mo["mt_excl"] or 0})',
+            (mo["saving_excl"] / mo["mt_excl"]) if mo["mt_excl"] else "", M0)
+    m1 = r
+    r += 1
+    b.put(ws, r, 1, "Total", bold=True)
+    for j, key in ((2, "mt"), (3, "local_mt"), (4, "saving_incl"), (6, "saving_excl"), (8, "cbot_usd")):
+        L = get_column_letter(j)
+        b.f(ws, r, j, f"=SUM({L}{m0}:{L}{m1})", sum(x[key] for x in PS["by_month"]
+                                                   if key != "cbot_usd" or x["cbot_mt"]), M0, bold=True)
+    b.signs(ws, f"D{m0}:H{r}")
+    if PS["by_month"]:
+        ch = BarChart()
+        ch.type, ch.title, ch.height, ch.width = "col", "Savings vs local by month (EGP)", 7.5, 16
+        ch.add_data(Reference(ws, min_col=4, min_row=m0 - 1, max_row=m1), titles_from_data=True)
+        ch.add_data(Reference(ws, min_col=6, min_row=m0 - 1, max_row=m1), titles_from_data=True)
+        ch.set_categories(Reference(ws, min_col=1, min_row=m0, max_row=m1))
+        ws.add_chart(ch, "J4")
+
+    def market(title, items, dp):
+        nonlocal r
+        r += 2
+        b.put(ws, r, 1, title, bold=True, size=12, color=NAVY)
+        r += 1
+        head(r, ["", "First", "First date", "Last", "Last date", "Change", "Low", "Low date", "Average", "High",
+                 "High date"])
+        fmt = "#,##0" if dp == 0 else ("#,##0.00" if dp == 2 else "#,##0.000")
+        for name, x in items:
+            if not x:
+                continue
+            r += 1
+            vals = [name, x["first"], x["first_date"], x["last"], x["last_date"], x["change_pct"], x["low"],
+                    x["low_date"], x["avg"], x["high"], x["high_date"]]
+            for j, v in enumerate(vals, 1):
+                b.put(ws, r, j, blank(v), "+0.0%;-0.0%;0.0%" if j == 6 else (fmt if j in (2, 4, 7, 9, 10) else None),
+                      bold=(j == 1))
+
+    mk = PS["market"]
+    market("Market in the period — CBOT (¢/bu; SBM $/short ton) and USD/EGP",
+           [(f"CBOT {k}", v) for k, v in sorted((mk.get("cbot") or {}).items())] + [("USD/EGP", mk.get("fx"))], 2)
+    market("Local market prices in the period — EGP/MT excl. transport",
+           sorted((mk.get("local") or {}).items()), 0)
+    r += 2
+    b.put(ws, r, 1, "Contract activity in the period (savings = the period's consumption only)", bold=True, size=12, color=NAVY)
+    r += 1
+    head(r, ["Contract", "Supplier", "Commodity", "Status", "Qty MT", "Consumed in period MT", "Savings incl. EGP",
+             "EGP/MT incl.", "Savings excl. EGP", "EGP/MT excl.", "CBOT USD", "In the period"])
+    a0 = r + 1
+    for a in sorted(PS["activity"], key=lambda x: -(x.get("consumed_mt") or 0)):
+        r += 1
+        vals = [a["contract"], a["supplier"], a["base"], a["status"], a["qty_mt"], a["consumed_mt"], a["saving_incl"],
+                a["saving_incl_mt"], a["saving_excl"], a["saving_excl_mt"], a["cbot_usd"], a["events"]]
+        for j, v in enumerate(vals, 1):
+            b.put(ws, r, j, blank(v), M0 if 5 <= j <= 11 else None)
+    a1 = r
+    if PS["activity"]:
+        r += 1
+        b.put(ws, r, 1, "Total", bold=True)
+        for j, key in ((6, "consumed_mt"), (7, "saving_incl"), (9, "saving_excl"), (11, "cbot_usd")):
+            L = get_column_letter(j)
+            b.f(ws, r, j, f"=SUM({L}{a0}:{L}{a1})", sum(x.get(key) or 0 for x in PS["activity"]), M0, bold=True)
+        b.signs(ws, f"G{a0}:K{r}")
+    if PS["local_purchases"]:
+        r += 2
+        b.put(ws, r, 1, "Local purchases in the period", bold=True, size=12, color=NAVY)
+        r += 1
+        head(r, ["Purchase", "Supplier", "Commodity", "Date", "Qty MT", "Cost EGP/MT"])
+        for x in PS["local_purchases"]:
+            r += 1
+            for j, v in enumerate([x["ref"], x["supplier"], x["commodity"], x["date"], x["qty_mt"], x["cost_egp_mt"]], 1):
+                b.put(ws, r, j, blank(v), M0 if j >= 5 else None)
+    O = PS["open_book"]
+    r += 2
+    b.put(ws, r, 1, "Open book now (today's position — not limited to the period)", bold=True, size=12, color=NAVY)
+    for lab, v in (("Open contracts", O.get("contracts")),
+                   ("Confirmed potential (fixed price + Form 4) — incl. transport EGP", O.get("fixed_potential_incl")),
+                   ("Confirmed potential — excl. transport EGP", O.get("fixed_potential_excl")),
+                   ("Confirmed tonnes", O.get("fixed_mt")),
+                   ("Indicative / provisional potential — incl. transport EGP", O.get("indicative_potential_incl")),
+                   ("Indicative / provisional potential — excl. transport EGP", O.get("indicative_potential_excl")),
+                   ("Indicative tonnes", O.get("indicative_mt"))):
+        r += 1
+        b.put(ws, r, 1, lab)
+        b.put(ws, r, 2, blank(v), M0)
+    ws.column_dimensions["A"].width = 52
+    for j in range(2, 13):
+        ws.column_dimensions[get_column_letter(j)].width = 15
+    ws.column_dimensions["L"].width = 48
+    ws.freeze_panes = "A4"
+
+
 def place(b, name, after):
     """Put sheet ``name`` straight after sheet ``after`` in the workbook."""
     names = b.wb.sheetnames
@@ -135,12 +288,14 @@ def build_workbook(model, path):
     _since_last(b, model)
     _validation(b, model, last)
     _summary(b, model, last)
+    if model.get("period") and model.get("period_summary"):
+        _period_overview(b, model)
     for ws in b.wb.worksheets:
         ws.page_setup.orientation = "landscape"
         ws.page_setup.paperSize = ws.PAPERSIZE_A4
         ws.sheet_properties.pageSetUpPr.fitToPage = True
         ws.page_setup.fitToWidth, ws.page_setup.fitToHeight = 1, 0
-        if ws.title != SHEETS[0]:
+        if ws.title not in (SHEETS[0], PERIOD_SHEET):
             ws.print_title_rows = "4:4"
         ws.oddFooter.center.text = "&A · page &P of &N"
     b.wb.calculation.fullCalcOnLoad = True
@@ -1009,7 +1164,8 @@ def _summary(b, m, last):
     k, qd = m["kpis"], m["quality"]
     ready = m["management_ready"]
     b.title(ws, "Procurement Savings — Management Summary",
-            f"Data as of {m['as_of']} · generated {m['generated']} · checksum {m['checksum']} · {k['contracts']} contracts")
+            (f"PERIOD {m['period']['from']} → {m['period']['to']} · " if m.get("period") else "")
+            + f"Data as of {m['as_of']} · generated {m['generated']} · checksum {m['checksum']} · {k['contracts']} contracts")
     failed = [v["check"] for v in m["validation"] if not v["passed"]]
     b.put(ws, 3, 2, ("Management-ready: all validation checks passed" if ready else
                      "NOT management-ready — failed: " + "; ".join(failed)),

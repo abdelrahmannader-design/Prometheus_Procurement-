@@ -330,6 +330,13 @@ def build(inp, **overrides):
     ``inp`` keys: as_of, generated, app, contracts, local_purchases, draws,
     local_obs, cbot ({base: [(date, price)]}), spike_pct, ignored_entries,
     stock_checks, dropped, look_alikes, rates, walk_mode.
+
+    Optional ``inp["period"]`` = {"from": ISO date, "to": ISO date}: the model
+    then covers only what happened in that window — consumption, savings vs
+    local, the CBOT benchmark, exclusions and every total built from them —
+    while the FIFO walk (stock, remaining tonnes), the storage → last
+    consumption CBOT average and the open-contract valuation (today) still use
+    the full history. A ``period_summary`` section is added for the overview.
     """
     opts = dict(DEFAULTS, **overrides)
     as_of = _d(inp["as_of"])
@@ -456,6 +463,23 @@ def build(inp, **overrides):
             run += r["mt"]
             r["remaining_mt"] = start - run
 
+    # ── a chosen period: keep what happened between its dates ────────────
+    # The walk above ran on the full history, so remaining tonnes and stock stay right.
+    all_allocations = list(allocations)
+    full_by_contract = by_contract
+    period = period_window(inp.get("period"))
+    if period:
+        p0, p1 = period
+        allocations = [r for r in allocations if p0 <= _d(r["date"]) <= p1]
+        by_contract = defaultdict(list)
+        for r in allocations:
+            by_contract[r["contract_id"]].append(r)
+        excluded[:] = [e for e in excluded if not e.get("date") or p0 <= _d(e["date"]) <= p1]
+        consumed_total = defaultdict(float)
+        for d in inp.get("draws") or []:
+            if p0 <= _d(d["date"]) <= p1:
+                consumed_total[d.get("base") or ""] += _n(d["mt"]) or 0.0
+
     # ── savings vs local, one row per import allocation ──────────────────
     savings_rows = []
     for r in allocations:
@@ -530,7 +554,7 @@ def build(inp, **overrides):
 
     # ── second benchmark: average CBOT from storage date to last consumption ──
     cons_days = defaultdict(list)
-    for r in allocations:
+    for r in all_allocations:          # the whole storage → last consumption window, even in a period
         if r["type"] == "Import":
             cons_days[r["contract_id"]].append(_d(r["date"]))
 
@@ -655,6 +679,10 @@ def build(inp, **overrides):
     for c in sorted(contracts.values(), key=lambda x: (x.get("delivery_date") or "", x["id"])):
         rows = by_contract.get(c["id"], [])
         consumed = _s(rows, lambda r: r["mt"])
+        # Delivery and reconciliation are facts about the whole history, so a
+        # period report reads them from every consumption day, not the window.
+        rows_all = full_by_contract.get(c["id"], [])
+        consumed_all = _s(rows_all, lambda r: r["mt"])
         qty = _n(c.get("qty_mt")) or 0.0
         dl = _d(c.get("delivery_date"))
         storage = _d(c.get("storage_start"))
@@ -674,15 +702,15 @@ def build(inp, **overrides):
             delivered, delivery, verified = 0.0, "No delivery date — reconcile", False
         elif received:
             delivered, delivery, verified = qty, f"Delivered — {receipt.lower()}", True
-        elif consumed > 1e-6:
+        elif consumed_all > 1e-6:
             # Consumption estimated for a contract with no storage start or receipt:
             # kept as recorded history, flagged, never silently reclassified.
             delivered, delivery, verified = qty, "Delivery not verified — reconcile", False
             flags.append("Consumption allocated but no storage start or receipt recorded — reconcile")
         else:
             delivered, delivery, verified = 0.0, receipt, False
-        if storage is not None and rows and _d(rows[0]["date"]) < storage:
-            flags.append(f"FIFO consumption starts {rows[0]['date']}, before the storage start {storage.isoformat()}")
+        if storage is not None and rows_all and _d(rows_all[0]["date"]) < storage:
+            flags.append(f"FIFO consumption starts {rows_all[0]['date']}, before the storage start {storage.isoformat()}")
         if c.get("disc_missing"):
             flags.append("Discharge not recorded on the contract")
         if c.get("clr_missing"):
@@ -707,7 +735,9 @@ def build(inp, **overrides):
             "receipt_status": receipt, "received": bool(received),
             "storage_status": storage.isoformat() if storage else "Not recorded",
             "flags": flags,
-            "unreconciled_mt": round(delivered - consumed - avail, 6) if delivered else round(-consumed - avail, 6),
+            "unreconciled_mt": (round(delivered - consumed_all - avail, 6) if delivered
+                                else round(-consumed_all - avail, 6)),
+            "consumed_all_mt": consumed_all,
             "first_date": rows[0]["date"] if rows else "", "last_date": rows[-1]["date"] if rows else "",
             "hist": {"priced_mt": smt, "saving": sv if sri else None,
                      "saving_mt": (sv / smt) if smt else None,
@@ -902,13 +932,148 @@ def build(inp, **overrides):
         "fx_series": [[str(r[0])[:10], r[1]] for r in (inp.get("fx_series") or [])
                       if str(r[0])[:10] >= (as_of - dt.timedelta(days=400)).isoformat()],
     }
+    if period:
+        p0, p1 = period
+        model["period"] = {"from": p0.isoformat(), "to": p1.isoformat(),
+                           "label": period_label(p0, p1), "days": (p1 - p0).days + 1}
+        model["title"] = f"Procurement Savings — Period Overview {p0.isoformat()} → {p1.isoformat()}"
+        model["period_summary"] = period_summary(model, inp, series, spikes, consumed_total)
+        model["local_obs"] = [o for o in model["local_obs"] if p0.isoformat() <= str(o.get("date"))[:10] <= p1.isoformat()]
+        model["fx_series"] = [r for r in (inp.get("fx_series") or []) if p0.isoformat() <= str(r[0])[:10] <= p1.isoformat()]
+        model["fx_series"] = [[str(r[0])[:10], r[1]] for r in model["fx_series"]]
+        model["cbot_series"] = {b: [x for x in v if p0.isoformat() <= x[0] <= p1.isoformat()]
+                                for b, v in model["cbot_series"].items()}
     model["validation"] = validate(model)
     model["management_ready"] = all(v["passed"] for v in model["validation"])
     model["checksum"] = checksum(model)
     # Decision and housekeeping sections: alerts, exposure, changes since last report, data to fix.
+    # A period report is not compared with the last full report ("since last" would mislead).
     from .mgmt_actions import add_sections
-    add_sections(model, inp)
+    add_sections(model, dict(inp, report_history=[]) if period else inp)
     return model
+
+
+def period_window(p):
+    """(from, to) dates of ``{"from": ..., "to": ...}``, or None."""
+    if not p:
+        return None
+    a, b = _d((p or {}).get("from")), _d((p or {}).get("to"))
+    if a is None or b is None:
+        return None
+    return (a, b) if a <= b else (b, a)
+
+
+def period_label(p0, p1):
+    return f"{p0.strftime('%d %b %Y')} → {p1.strftime('%d %b %Y')} ({(p1 - p0).days + 1} days)"
+
+
+def _rng(pairs):
+    """first / last / low / high / average of [(iso date, value)] (sorted)."""
+    pairs = [(d, v) for d, v in pairs if v is not None]
+    if not pairs:
+        return None
+    pairs.sort()
+    lo, hi = min(pairs, key=lambda t: t[1]), max(pairs, key=lambda t: t[1])
+    first, last = pairs[0], pairs[-1]
+    return {"first": first[1], "first_date": first[0], "last": last[1], "last_date": last[0],
+            "low": lo[1], "low_date": lo[0], "high": hi[1], "high_date": hi[0],
+            "avg": sum(v for _d_, v in pairs) / len(pairs), "points": len(pairs),
+            "change_pct": (last[1] / first[1] - 1.0) if first[1] else None}
+
+
+def period_summary(model, inp, series, spikes, consumed_total):
+    """Everything the period overview shows: headline totals, month by month,
+    market ranges (CBOT, FX, local), contract activity and the open book now."""
+    p = model["period"]
+    a, b = p["from"], p["to"]
+    inside = lambda d: bool(d) and a <= str(d)[:10] <= b
+    sav, cb, alloc = model["savings"], model["cbot"], model["allocations"]
+    k = model["kpis"]
+    imp_mt = _s([r for r in alloc if r["type"] == "Import"], lambda r: r["mt"])
+    loc_mt = _s([r for r in alloc if r["type"] != "Import"], lambda r: r["mt"])
+    totals = {
+        "consumed_mt": sum(consumed_total.values()), "import_mt": imp_mt, "local_purchase_mt": loc_mt,
+        "excluded_mt": _s(model.get("audit") or [], lambda x: x["excluded_mt"]),
+        "saving_incl": k.get("historical_saving_egp"), "mt_incl": k.get("historical_mt"),
+        "saving_incl_mt": k.get("historical_saving_egp_mt"),
+        "saving_excl": k.get("historical_saving_excl_egp"), "mt_excl": k.get("historical_mt_excl"),
+        "saving_excl_mt": k.get("historical_saving_excl_egp_mt"),
+        "cbot_net_usd": k.get("cbot_net_usd"), "cbot_net_egp": k.get("cbot_net_egp"),
+        "cbot_advantage_usd": k.get("cbot_advantage_usd"), "cbot_missed_usd": k.get("cbot_missed_usd"),
+        "cbot_win_net_usd": k.get("cbot_win_net_usd"),
+        "stale_rows": sum(1 for r in sav if r.get("local_stale")),
+        "contracts_consumed": len({r["contract_id"] for r in alloc if r["type"] == "Import"}),
+    }
+    months = defaultdict(lambda: {"mt": 0.0, "saving_incl": 0.0, "mt_incl": 0.0, "saving_excl": 0.0,
+                                  "mt_excl": 0.0, "cbot_usd": 0.0, "cbot_mt": 0.0, "local_mt": 0.0})
+    for r in alloc:
+        m = months[r["date"][:7]]
+        if r["type"] == "Import":
+            m["mt"] += r["mt"]
+        else:
+            m["local_mt"] += r["mt"]
+    for r in sav:
+        m = months[r["date"][:7]]
+        if r.get("saving") is not None:
+            m["saving_incl"] += r["saving"]
+            m["mt_incl"] += r["mt"]
+        if r.get("saving_excl") is not None:
+            m["saving_excl"] += r["saving_excl"]
+            m["mt_excl"] += r["mt"]
+    for r in cb:
+        if r.get("assessable") and r.get("usd") is not None:
+            m = months[r["date"][:7]]
+            m["cbot_usd"] += r["usd"]
+            m["cbot_mt"] += r["mt"]
+    by_month = [dict(month=mo, **v) for mo, v in sorted(months.items())]
+    market = {"cbot": {}, "fx": None, "local": {}}
+    for base, hist in series.items():
+        spk = spikes.get(base, set())
+        r_ = _rng([(d.isoformat(), v) for d, v in zip(hist.dates, hist.values) if d not in spk and inside(d.isoformat())])
+        if r_:
+            market["cbot"][base] = r_
+    market["fx"] = _rng([(str(r[0])[:10], _n(r[1])) for r in inp.get("fx_series") or [] if inside(r[0])])
+    keys = defaultdict(list)
+    for o in model["local_obs"]:
+        if inside(o.get("date")) and _n(o.get("price")) is not None:
+            keys[o.get("key") or ""].append((str(o["date"])[:10], _n(o["price"])))
+    market["local"] = {kk: _rng(v) for kk, v in sorted(keys.items()) if v}
+    acts = []
+    for c in model["contracts"]:
+        ev = []
+        if inside(c.get("storage_start")):
+            ev.append(("Stored", c["storage_start"]))
+        elif inside(c.get("delivery_date")):
+            ev.append(("Delivery date", c["delivery_date"]))
+        if inside(c.get("pricing_date")):
+            ev.append(("Priced", c["pricing_date"]))
+        for lot in c.get("lots") or []:
+            if inside(lot.get("date")):
+                ev.append(("Lot priced", lot["date"]))
+        if inside(c.get("form4_date")):
+            ev.append(("Form 4", c["form4_date"]))
+        if c.get("consumed_mt"):
+            ev.append(("Consumed", f"{c.get('first_date')} → {c.get('last_date')}"))
+        if ev:
+            h = c.get("hist") or {}
+            acts.append({"contract_id": c["id"], "contract": c["contract"], "supplier": c.get("supplier", ""),
+                         "base": c["base"], "status": "Open" if c.get("is_open") else (c.get("status") or ""),
+                         "qty_mt": _n(c.get("qty_mt")), "consumed_mt": c.get("consumed_mt") or 0.0,
+                         "saving_incl": h.get("saving"), "saving_excl": h.get("saving_excl"),
+                         "saving_incl_mt": h.get("saving_mt"), "saving_excl_mt": h.get("saving_excl_mt"),
+                         "cbot_usd": (c.get("cbot") or {}).get("usd"),
+                         "events": "; ".join(f"{e} {d}" for e, d in ev)})
+    lps = [x for x in inp.get("local_purchases") or [] if inside(x.get("date"))]
+    open_book = {"contracts": k.get("open_contracts"), "fixed_potential_incl": k.get("open_fixed_potential_egp"),
+                 "fixed_potential_excl": k.get("open_fixed_potential_excl_egp"),
+                 "indicative_potential_incl": k.get("open_indicative_potential_egp"),
+                 "indicative_potential_excl": k.get("open_indicative_potential_excl_egp"),
+                 "fixed_mt": k.get("open_fixed_mt"), "indicative_mt": k.get("open_indicative_mt")}
+    return {"totals": totals, "by_month": by_month, "market": market, "activity": acts,
+            "local_purchases": [{"ref": x.get("ref"), "supplier": x.get("supplier"), "commodity": x.get("commodity"),
+                                 "date": x.get("date"), "qty_mt": _n(x.get("qty_mt")),
+                                 "cost_egp_mt": _n(x.get("cost_egp_mt"))} for x in lps],
+            "open_book": open_book}
 
 
 def cost_parts(c):

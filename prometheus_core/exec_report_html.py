@@ -154,6 +154,8 @@ tr.rd>td{background:var(--bad-bg)}tr.rx>td{color:var(--ink2)}
 #cbSel{max-width:100%}label.note:has(#cbSel){display:block;max-width:100%}
 .wf{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:8px}
 th.sx{background:rgba(42,120,214,.10)}th.si{background:rgba(235,104,52,.10)}
+.periodbar{border-left:4px solid var(--s1);display:flex;flex-wrap:wrap;gap:6px 18px;align-items:baseline}
+.periodbar b{font-size:16px}
 .xdlg{position:fixed;inset:0;background:rgba(0,0,0,.38);display:flex;align-items:center;justify-content:center;z-index:60;padding:16px}
 .xdlg[hidden]{display:none}
 .xbox{background:var(--surface);color:var(--ink);border:1px solid var(--line);border-radius:12px;padding:18px 20px;width:440px;max-width:100%;max-height:88vh;overflow:auto;box-shadow:0 12px 40px rgba(0,0,0,.25)}
@@ -169,7 +171,7 @@ th.sx{background:rgba(42,120,214,.10)}th.si{background:rgba(235,104,52,.10)}
  .card,.kpi{break-inside:avoid;border-color:#ccc}
  main{max-width:none;padding:0}header{padding:0 0 6px}
  *{-webkit-print-color-adjust:exact;print-color-adjust:exact}
- body.mgmt .panel:not(#p-overview):not(#p-savings):not(#p-open):not(#p-trends){display:none!important}
+ body.mgmt .panel:not(#p-period):not(#p-overview):not(#p-savings):not(#p-open):not(#p-trends){display:none!important}
 }
 </style>
 </head>
@@ -180,6 +182,7 @@ th.sx{background:rgba(42,120,214,.10)}th.si{background:rgba(235,104,52,.10)}
  <div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:8px;align-items:center" id="badges"></div>
 </header>
 <nav>
+ <button class="tab" data-p="period" id="tabPeriod" hidden>Period overview</button>
  <button class="tab on" data-p="overview">Overview</button>
  <button class="tab" data-p="savings">Savings vs local</button>
  <button class="tab" data-p="contracts">Contracts</button>
@@ -223,6 +226,20 @@ th.sx{background:rgba(42,120,214,.10)}th.si{background:rgba(235,104,52,.10)}
 <main>
 <div class="card warnbox" id="manBanner" style="display:none;margin-top:10px"></div>
 <div class="card warnbox" id="pcBanner" style="display:none;margin-top:10px"></div>
+<section class="panel" id="p-period">
+ <div class="card periodbar" id="perHead"></div>
+ <div class="kpis" id="perKpis"></div>
+ <div class="grid2">
+  <div class="card"><h2>Savings vs local, month by month</h2><p class="sub">Imported tonnes consumed in each month, against the local price that day · EGP · incl. and excl. transport</p><div id="perChart"></div></div>
+  <div class="card"><h2>Open book now</h2><p class="sub">Today's position — not limited to the period</p><div id="perOpen"></div></div>
+ </div>
+ <div class="card"><h2>Market in the period</h2><p class="sub">CBOT (¢/bu; SBM $/short ton) and USD/EGP: first and last price of the period, its range and average</p><div class="tw"><table id="perMarket"></table></div></div>
+ <div class="card"><h2>Month by month</h2><p class="sub">Consumption, savings vs local and the CBOT benchmark (separate, never added)</p><div class="tw"><table id="perMonths"></table></div></div>
+ <div class="card"><h2>Local market prices in the period</h2><p class="sub">EGP/MT excl. transport, by local price key</p><div class="tw"><table id="perLocal"></table></div></div>
+ <div class="card"><h2>Contract activity in the period</h2><p class="sub">Stored, priced, Form 4 or consumed between the period dates · savings are the period's consumption only · click a row to open the contract</p><div class="tw"><table id="perAct"></table></div></div>
+ <div class="card" id="perLpCard"><h2>Local purchases in the period</h2><div class="tw"><table id="perLp"></table></div></div>
+</section>
+
 <section class="panel on" id="p-overview">
  <div class="kpis" id="kpis"></div>
  <div class="card mgmt-only" id="mgmtNote"></div>
@@ -1864,10 +1881,57 @@ new MutationObserver(muts => { if (muts.some(m => !(m.target.classList && m.targ
   .observe(document.querySelector("main"), {childList: true, subtree: true});
 window.addEventListener("resize", hbarsSoon);
 document.addEventListener("click", e => { if (e.target.closest(".tab")) hbarsSoon(); });
+// ── period overview (only in a period report) ─────────────────────────
+function renderPeriod() {
+  const P = M.period, PS = M.period_summary;
+  if (!P || !PS) return;
+  const T = PS.totals, pct = x => isN(x) ? (x >= 0 ? "+" : "−") + Math.abs(x * 100).toFixed(1) + "%" : "—";
+  $("perHead").innerHTML = `<b>Period ${esc(P.from)} → ${esc(P.to)}</b><span class="note">${esc(P.days)} days · consumption, savings and the CBOT benchmark cover only this window; the open book is today's</span>`;
+  $("perKpis").innerHTML = [
+    `<div class="kpi"><div class="l"><span>Savings vs local</span><span class="tag act">Actual · FIFO estimated</span></div><div class="v2">` +
+      `<div><small>Incl. transport</small><span class="${sg(T.saving_incl)}">${money("EGP", T.saving_incl)}</span></div>` +
+      `<div><small>Excl. transport</small><span class="${sg(T.saving_excl)}">${money("EGP", T.saving_excl)}</span></div></div>` +
+      `<div class="s">${f0(T.mt_incl)} MT compared · ${isN(T.saving_incl_mt) ? f0(T.saving_incl_mt) : "—"} / ${isN(T.saving_excl_mt) ? f0(T.saving_excl_mt) : "—"} EGP/MT incl. / excl.</div></div>`,
+    kcard("Consumption", null, `${f0(T.consumed_mt)} MT`, '<span class="tag">Tonnes</span>',
+      `${f0(T.import_mt)} MT imports (${f0(T.contracts_consumed)} contracts) · ${f0(T.local_purchase_mt)} MT local purchases · ${f0(T.excluded_mt)} MT without a source`),
+    kcard("CBOT benchmark", T.cbot_net_usd, money("USD", T.cbot_net_usd), '<span class="tag ben">Benchmark</span>',
+      `advantage ${money("USD", T.cbot_advantage_usd)} · missed ${money("USD", T.cbot_missed_usd)} · ≈ ${money("EGP", T.cbot_net_egp)} · storage → last-consumption average ${money("USD", T.cbot_win_net_usd)}`),
+    kcard("CBOT move in the period", null, Object.entries(PS.market.cbot || {}).map(([b, r]) => `${esc(b)} ${pct(r.change_pct)}`).join(" · ") || "—", '<span class="tag">Market</span>',
+      Object.entries(PS.market.cbot || {}).map(([b, r]) => `${esc(b)} ${f2(r.first)} → ${f2(r.last)} (range ${f2(r.low)}–${f2(r.high)})`).join(" · ")),
+    kcard("USD/EGP in the period", null, PS.market.fx ? `${fx(PS.market.fx.first, 2)} → ${fx(PS.market.fx.last, 2)}` : "—", '<span class="tag">Market</span>',
+      PS.market.fx ? `${pct(PS.market.fx.change_pct)} · low ${fx(PS.market.fx.low, 2)} (${esc(PS.market.fx.low_date)}) · high ${fx(PS.market.fx.high, 2)} (${esc(PS.market.fx.high_date)}) · average ${fx(PS.market.fx.avg, 2)}` : "no FX stored in the period"),
+    kcard("Data quality in the period", null, `${f0(T.stale_rows)} stale day-rows`, '<span class="stale">STALE</span>',
+      `consumption days valued on a local quote more than ${CD()} days old`)].join("");
+  const mo = PS.by_month || [];
+  $("perChart").innerHTML = vbars(mo.map(m => ({label: m.month, value: m.saving_incl, value2: m.saving_excl,
+    tip: `<b>${esc(m.month)}</b><br>incl. ${money("EGP", m.saving_incl)} · excl. ${money("EGP", m.saving_excl)}<br>${f0(m.mt)} MT imports`})), {aria: "Savings by month"});
+  $("perMonths").innerHTML = `<thead><tr><th>Month</th><th class="n">Import MT</th><th class="n">Local purchase MT</th><th class="n">Savings incl. EGP</th><th class="n">EGP/MT incl.</th><th class="n">Savings excl. EGP</th><th class="n">EGP/MT excl.</th><th class="n">CBOT benchmark USD</th></tr></thead><tbody>` +
+    mo.map(m => `<tr><td>${esc(m.month)}</td>${td(m.mt)}${td(m.local_mt)}${td(m.saving_incl, f0, 1)}${td(m.mt_incl ? m.saving_incl / m.mt_incl : null, f0, 1)}${td(m.saving_excl, f0, 1)}${td(m.mt_excl ? m.saving_excl / m.mt_excl : null, f0, 1)}${td(m.cbot_mt ? m.cbot_usd : null, f0, 1)}</tr>`).join("") +
+    `<tr class="tot"><td>Total</td>${td(sum(mo, m => m.mt))}${td(sum(mo, m => m.local_mt))}${td(T.saving_incl, f0, 1)}${td(T.saving_incl_mt, f0, 1)}${td(T.saving_excl, f0, 1)}${td(T.saving_excl_mt, f0, 1)}${td(T.cbot_net_usd, f0, 1)}</tr></tbody>`;
+  const mrow = (name, r, dp) => r ? `<tr><td><b>${esc(name)}</b></td>${td(r.first, x => fx(x, dp))}<td class="note">${esc(r.first_date)}</td>${td(r.last, x => fx(x, dp))}<td class="note">${esc(r.last_date)}</td><td class="n ${sg(r.change_pct)}">${pct(r.change_pct)}</td>${td(r.low, x => fx(x, dp))}<td class="note">${esc(r.low_date)}</td>${td(r.avg, x => fx(x, dp))}${td(r.high, x => fx(x, dp))}<td class="note">${esc(r.high_date)}</td></tr>` : "";
+  const mhead = `<thead><tr><th></th><th class="n">First</th><th></th><th class="n">Last</th><th></th><th class="n">Change</th><th class="n">Low</th><th></th><th class="n">Average</th><th class="n">High</th><th></th></tr></thead>`;
+  $("perMarket").innerHTML = mhead + "<tbody>" + Object.entries(PS.market.cbot || {}).map(([b, r]) => mrow(`CBOT ${b}`, r, 2)).join("") + mrow("USD/EGP", PS.market.fx, 3) + "</tbody>";
+  $("perLocal").innerHTML = mhead + "<tbody>" + Object.entries(PS.market.local || {}).map(([k, r]) => mrow(k, r, 0)).join("") + "</tbody>";
+  const acts = (PS.activity || []).slice().sort((a, b) => (b.consumed_mt || 0) - (a.consumed_mt || 0));
+  $("perAct").innerHTML = `<thead><tr><th>Contract</th><th>Supplier</th><th>Commodity</th><th>Status</th><th class="n">Qty MT</th><th class="n">Consumed in period MT</th><th class="n">Savings incl. EGP</th><th class="n">EGP/MT incl.</th><th class="n">Savings excl. EGP</th><th class="n">EGP/MT excl.</th><th class="n">CBOT USD</th><th>In the period</th></tr></thead><tbody>` +
+    acts.map(a => `<tr class="row" data-goto="${esc(a.contract_id)}"><td><b>${esc(a.contract)}</b></td><td>${esc(a.supplier)}</td><td>${esc(a.base)}</td><td>${esc(a.status)}</td>${td(a.qty_mt)}${td(a.consumed_mt)}${td(a.saving_incl, f0, 1)}${td(a.saving_incl_mt, f0, 1)}${td(a.saving_excl, f0, 1)}${td(a.saving_excl_mt, f0, 1)}${td(a.cbot_usd, f0, 1)}<td class="note">${esc(a.events)}</td></tr>`).join("") +
+    `<tr class="tot"><td>Total · ${acts.length} contracts</td><td></td><td></td><td></td><td></td>${td(sum(acts, a => a.consumed_mt))}${td(sum(acts, a => a.saving_incl), f0, 1)}<td></td>${td(sum(acts, a => a.saving_excl), f0, 1)}<td></td>${td(sum(acts, a => a.cbot_usd), f0, 1)}<td></td></tr></tbody>`;
+  const lps = PS.local_purchases || [];
+  $("perLpCard").hidden = !lps.length;
+  $("perLp").innerHTML = `<thead><tr><th>Purchase</th><th>Supplier</th><th>Commodity</th><th>Date</th><th class="n">Qty MT</th><th class="n">Cost EGP/MT</th></tr></thead><tbody>` +
+    lps.map(x => `<tr><td>${esc(x.ref)}</td><td>${esc(x.supplier)}</td><td>${esc(x.commodity)}</td><td>${esc(x.date)}</td>${td(x.qty_mt)}${td(x.cost_egp_mt)}</tr>`).join("") +
+    `<tr class="tot"><td>Total</td><td></td><td></td><td></td>${td(sum(lps, x => x.qty_mt))}${td(sum(lps, x => x.qty_mt) ? sum(lps, x => (x.cost_egp_mt || 0) * (x.qty_mt || 0)) / sum(lps, x => x.qty_mt) : null)}</tr></tbody>`;
+  const O = PS.open_book || {};
+  $("perOpen").innerHTML = `<table><thead><tr><th>${f0(O.contracts)} open contracts</th><th class="n">MT</th><th class="n">Incl. transport</th><th class="n">Excl. transport</th></tr></thead><tbody>` +
+    `<tr><td>Confirmed (fixed price + Form 4)</td>${td(O.fixed_mt)}${td(O.fixed_potential_incl, f0, 1)}${td(O.fixed_potential_excl, f0, 1)}</tr>` +
+    `<tr><td>Indicative / provisional</td>${td(O.indicative_mt)}${td(O.indicative_potential_incl, f0, 1)}${td(O.indicative_potential_excl, f0, 1)}</tr></tbody></table>` +
+    `<p class="note">Potential saving vs today's local price on tonnes not yet consumed (EGP). Details in the Open contracts tab; stress them with the app's open-contracts stress test.</p>`;
+}
 function render() {
   applyManual();
   const v = view(), K = kpis(v);
   renderOverview(v, K); renderSavings(v); renderSvOpen(v); renderTransport(v); renderContracts(v); renderCbot(v); renderOpen(v); renderTrends(v);
+  renderPeriod();
 }
 function showTab(p) { S.tab = p; document.querySelectorAll(".tab").forEach(t => t.classList.toggle("on", t.dataset.p === p));
   document.querySelectorAll(".panel").forEach(x => x.classList.toggle("on", x.id === "p-" + p)); }
@@ -1879,10 +1943,11 @@ function openContract(id) {
   const el = $("r-" + id); if (el) el.scrollIntoView({behavior: "smooth", block: "center"});
 }
 $("ttl").textContent = M.title;
-$("meta").textContent = `Data as of ${M.as_of} · generated ${M.generated} · ${C.length} contracts · checksum ${M.checksum}`;
+$("meta").textContent = (M.period ? `Period ${M.period.from} → ${M.period.to} · ` : "") + `Data as of ${M.as_of} · generated ${M.generated} · ${C.length} contracts · checksum ${M.checksum}`;
 $("badges").innerHTML = `<button class="badge ${M.management_ready ? "ok" : "no"}" id="bReady">${M.management_ready ? "✔ Management-ready — all " + M.validation.length + " checks passed" : "✖ Not management-ready — " + M.validation.filter(x => !x.passed).length + " check(s) failed"}</button>` +
   ((M.alerts || []).some(a => a.status === "TRIGGERED") || (M.data_to_fix || []).length ? `<button class="badge no" id="bAct">${(M.alerts || []).filter(a => a.status === "TRIGGERED").length} alert(s) · ${(M.data_to_fix || []).length} to fix</button>` : "") +
-  `<span class="tag act">Actual = consumed (FIFO estimated)</span><span class="tag pot">Potential = not yet consumed</span><span class="tag ben">Benchmark = CBOT comparison</span>`;
+  `<span class="tag act">Actual = consumed (FIFO estimated)</span><span class="tag pot">Potential = not yet consumed</span><span class="tag ben">Benchmark = CBOT comparison</span>` +
+  (M.period ? `<span class="tag act">Period ${esc(M.period.from)} → ${esc(M.period.to)} (${esc(M.period.days)} days)</span>` : "");
 $("bReady").addEventListener("click", () => { if (!document.body.classList.contains("mgmt")) showTab("quality"); });
 if ($("bAct")) $("bAct").addEventListener("click", () => showTab("actions"));
 renderActions();
@@ -1940,6 +2005,7 @@ document.addEventListener("click", e => {
 });
 renderQuality();
 render();
+if (M.period) { $("tabPeriod").hidden = false; showTab("period"); }
 </script>
 </body>
 </html>
