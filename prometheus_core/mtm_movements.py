@@ -262,7 +262,7 @@ def headline(day, prior_date, b):
 
 NAVY, GREEN, RED, GREY, AMBER = "1F3A5F", "1A7A1A", "B3261E", "6B7280", "9A6B00"
 F0, F2, F4 = "#,##0;-#,##0", "#,##0.00;-#,##0.00", "0.0000"
-S0, S2 = "+#,##0;-#,##0;0", "+#,##0.00;-#,##0.00;0.00"
+S0, S2 = "[>=0.5]+#,##0;[<=-0.5]-#,##0;0", "[>=0.005]+#,##0.00;[<=-0.005]-#,##0.00;0.00"
 REBUILT_FILL, TOTAL_FILL, NEW_FILL = "F3F0FF", "E8EEF6", "FFF7E0"
 
 
@@ -277,29 +277,108 @@ def sheet_name(ref, used):
     return name
 
 
+INPUT_FILL = "FFFBEA"     # light yellow: an input value; every other number is a formula
+EPOCH = dt.date(1899, 12, 30)
+
+
+def _date(v):
+    try:
+        return dt.date.fromisoformat(str(v)[:10])
+    except (TypeError, ValueError):
+        return None
+
+
+def _serial(d):
+    return (d - EPOCH).days if d else None
+
+
+def incl_view(r):
+    """A record put through ``excl_transport`` back on the including-transport basis."""
+    if r.get("basis") != "excl":
+        return r
+    x = dict(r)
+    x.update({"local_egp_mt": r.get("local_incl_egp_mt"), "own_after_egp_mt": r.get("own_incl_egp_mt"),
+              "saving_egp_mt": r.get("saving_incl_egp_mt"), "total_saving_egp": r.get("total_incl_egp"), "basis": "incl"})
+    return x
+
+
+def row_inputs(r):
+    """The input values one formula row is built from (incl-transport local and our price)."""
+    excl = r.get("basis") == "excl"
+    cbot, prem, conv, cif = (_n(r.get(k)) for k in ("cbot_price", "premium_quote", "cbot_conversion", "cif_usd_mt"))
+    floating = None not in (cbot, prem, conv, cif) and abs(cif - (cbot + prem) * conv) < 0.01
+    fixed = None if floating else cif
+    calc_cif = (cbot + prem) * conv if floating else cif
+    fx, disc, clr, fr = _n(r.get("fx")), _n(r.get("discharge_egp_mt")), _n(r.get("clearance_egp_mt")), _n(r.get("freight_egp_mt"))
+    own = _n(r.get("own_incl_egp_mt") if excl else r.get("own_after_egp_mt"))
+    other = (own - (calc_cif * fx + (disc or 0) + (clr or 0) + (fr or 0))) if None not in (own, calc_cif, fx) else None
+    return {"cid": r["contract_id"], "ref": r.get("contract_ref") or r["contract_id"], "base": _base(r),
+            "date": _date(r["date"]), "mode": "Rebuilt" if r.get("mode") == "RECONSTRUCTED" else "Live",
+            "mt": _n(r.get("qty_mt")), "cbot": cbot, "prem": prem if floating else None, "factor": conv if floating else None,
+            "fixed_cif": fixed, "fx": fx, "fx_source": r.get("fx_source", ""), "disc": disc, "clr": clr, "other_fee": other,
+            "freight": fr, "local_incl": _n(r.get("local_incl_egp_mt") if excl else r.get("local_egp_mt")),
+            "local_tr": _n(r.get("local_transport_egp_mt")), "local_date": _date(r.get("local_price_date")),
+            "stale": "; ".join(r.get("stale_quotes") or []), "note": r.get("reconstructed_from", "")}
+
+
+def chain(rows, excl):
+    """The values the trail formulas give, row by row (``rows`` from ``row_inputs``, contracts contiguous)."""
+    out, prev, first = [], None, {}
+    for x in rows:
+        same = prev is not None and prev["cid"] == x["cid"]
+        p = prev if same else None
+        y = dict(x)
+        if x["fixed_cif"] is not None:
+            cif = x["fixed_cif"]
+        elif None not in (x["cbot"], x["prem"], x["factor"]):
+            cif = (x["cbot"] + x["prem"]) * x["factor"]
+        else:
+            cif = None
+        own_i = (cif * x["fx"] + (x["disc"] or 0) + (x["clr"] or 0) + (x["other_fee"] or 0) + (x["freight"] or 0)
+                 if None not in (cif, x["fx"]) else None)
+        own_x = own_i - (x["freight"] or 0) if own_i is not None else None
+        loc_x = x["local_incl"] - x["local_tr"] if None not in (x["local_incl"], x["local_tr"]) else None
+        loc, own = (loc_x, own_x) if excl else (x["local_incl"], own_i)
+        sav = loc - own if None not in (loc, own) else None
+        tot = sav * x["mt"] if None not in (sav, x["mt"]) else None
+        y.update(prior_date=p["date"] if p else None, cif=cif, own_incl=own_i, own_excl=own_x, local_excl=loc_x,
+                 local=loc, own=own, sav=sav, total=tot,
+                 d_cbot=_sub(x["cbot"], p["cbot"]) if p else None, d_sav=_sub(sav, p["sav"]) if p else None,
+                 from_cbot=(-(cif - p["cif"]) * p["fx"]) if p and None not in (cif, p["cif"], p["fx"]) else None,
+                 from_fx=(-cif * (x["fx"] - p["fx"])) if p and None not in (cif, x["fx"], p["fx"]) else None,
+                 from_local=_sub(loc, p["local"]) if p else None, d_total=_sub(tot, p["total"]) if p else None)
+        parts = [y["d_sav"], y["from_cbot"], y["from_fx"], y["from_local"]]
+        y["other"] = parts[0] - parts[1] - parts[2] - parts[3] if None not in parts else None
+        if x["cid"] not in first:
+            first[x["cid"]] = y
+        y["cum"] = _sub(sav, first[x["cid"]]["sav"])
+        y["key"] = f"{x['cid']}|{_serial(x['date'])}"
+        out.append(y)
+        prev = y
+    return out
+
+
+# Trail columns (Contract Trail and the per-contract sheets share them).
+TR_HEADS = ["Ref", "Contract ID", "Commodity", "Date", "Prior date", "Record", "MT", "CBOT", "Δ CBOT", "Premium",
+            "Factor", "Fixed CIF $/MT", "CIF $/MT", "FX", "FX source", "Discharge", "Clearance", "Other fees", "Our freight",
+            "Our price incl tr.", "Our price excl tr.", "Local incl tr.", "Local transport", "Local excl tr.", "Local date",
+            "Sav/MT", "Δ Sav/MT", "from CBOT", "from FX", "from Local", "Other", "Total EGP", "Δ Total", "Cumulative Δ Sav/MT",
+            "Key", "Old quotes", "How it was rebuilt"]
+TR_W = [16, 10, 10, 11, 11, 8, 9, 9, 8, 8, 8, 9, 9, 8, 14, 9, 9, 8, 9, 11, 11, 10, 9, 10, 11, 10, 9, 9, 8, 9, 8, 13, 12,
+        11, 14, 22, 60]
+TC = {h: i + 1 for i, h in enumerate(TR_HEADS)}
+
+
 def write_movements_excel(history, contracts, path, as_of=None, ids=None, scope_label="All contracts",
                           extension=None, ledger_start=None, basis="incl"):
     """Write the workbook; ``history`` should already include ``extension`` rows if they are wanted.
 
-    ``ids``: limit to these contract ids (None = every contract in the ledger). ``extension``: the rows
-    ``extend_to_storage`` returned (only used to count and to mark them). ``basis``: "excl" when the
-    records went through ``excl_transport`` (labels and notes say so). Returns a dict with the counts.
+    Input prices are values (yellow); everything derived from them is a formula: CIF, our price, local
+    excluding transport, saving, total, every change and its split, the open book of every day (SUMIFS
+    over the Daily Movement rows, which look their values up in the Contract Trail) and the summary.
+    ``basis``: "excl" compares local and our price without transport (records must have gone through
+    ``excl_transport``), "incl" with it. Returns a dict with the counts written.
     """
-    excl = basis == "excl"
-    tag = " (excl tr.)" if excl else ""
-
-    def lab(h):
-        if h in ("Own cost", "Our price"):
-            return "Our price excl tr." if excl else "Our price"
-        if not excl:
-            return h
-        if h in ("Local", "Local Today", "Local Prior"):
-            return h.replace("Local", "Local excl tr.")
-        if h.startswith(("Sav/MT", "Total", "Open MTM")) and h != "Total EGP":
-            return h + tag
-        if h == "Total EGP":
-            return "Total EGP excl tr."
-        return h
     from openpyxl import Workbook
     from openpyxl.chart import LineChart, Reference
     from openpyxl.formatting.rule import CellIsRule
@@ -309,8 +388,10 @@ def write_movements_excel(history, contracts, path, as_of=None, ids=None, scope_
 
     from .xlsx_cache import store_formula_results
 
+    excl = basis == "excl"
+    tag = " (excl tr.)" if excl else " (incl tr.)"
     contracts = contracts or {}
-    rows_all = _rows(history)
+    rows_all = [r if excl else incl_view(r) for r in _rows(history)]
     if ledger_start is None:
         ledger_start = min((r["date"] for r in rows_all if r.get("capture_reason") != "before_first_record"), default="")
     blocks = day_blocks(rows_all, ids)
@@ -322,8 +403,9 @@ def write_movements_excel(history, contracts, path, as_of=None, ids=None, scope_
 
     wb = Workbook()
     cache = {}
+    fill_in = PatternFill("solid", fgColor=INPUT_FILL)
 
-    def put(ws, r, c, v, fmt=None, bold=False, color=None, fill=None, italic=False, size=None, wrap=False):
+    def put(ws, r, c, v, fmt=None, bold=False, color=None, fill=None, italic=False, size=None, inp=False):
         cell = ws.cell(r, c, v)
         if fmt:
             cell.number_format = fmt
@@ -331,128 +413,385 @@ def write_movements_excel(history, contracts, path, as_of=None, ids=None, scope_
             cell.font = Font(bold=bold, color=color, italic=italic, size=size)
         if fill:
             cell.fill = PatternFill("solid", fgColor=fill)
-        if wrap:
-            cell.alignment = Alignment(wrap_text=True, vertical="top")
+        elif inp and v is not None:
+            cell.fill = fill_in
         return cell
 
     def f(ws, r, c, formula, value, fmt=None, **kw):
         put(ws, r, c, formula, fmt, **kw)
+        if isinstance(value, dt.date):
+            value = _serial(value)
         cache.setdefault(ws.title, {})[f"{L(c)}{r}"] = "" if value is None else value
 
     def title(ws, text, sub):
         put(ws, 1, 1, text, bold=True, size=15, color=NAVY)
         put(ws, 2, 1, sub, italic=True, color=GREY)
 
-    def table(ws, name, heads, widths, n, hr=4, style="TableStyleMedium2"):
+    def table(ws, name, heads, widths, n, hr=4):
         for i, h in enumerate(heads, start=1):
-            c = ws.cell(hr, i, lab(h))
+            c = ws.cell(hr, i, h)
             c.alignment = Alignment(wrap_text=True, vertical="center")
             ws.column_dimensions[L(i)].width = widths[i - 1]
         ws.row_dimensions[hr].height = 32
         t = Table(displayName=name, ref=f"A{hr}:{L(len(heads))}{hr + max(n, 1)}")
-        t.tableStyleInfo = TableStyleInfo(name=style, showRowStripes=True)
+        t.tableStyleInfo = TableStyleInfo(name="TableStyleMedium2", showRowStripes=True)
         ws.add_table(t)
 
     def signs(ws, ref):
         ws.conditional_formatting.add(ref, CellIsRule(operator="lessThan", formula=["0"], font=Font(color=RED)))
         ws.conditional_formatting.add(ref, CellIsRule(operator="greaterThan", formula=["0"], font=Font(color=GREEN)))
 
+    def isn(*cells):
+        return "AND(" + ",".join(f"ISNUMBER({c})" for c in cells) + ")"
+
+    DF = "yyyy-mm-dd"
     n_ext = len(extension or [])
     period = f"{blocks[0]['date']} → {last_day}" if blocks else "—"
-    sub = (("PRICES EXCL TRANSPORT · " if excl else "Prices incl transport · ") + f"{scope_label} · {period} · as of {as_of} · ledger started {ledger_start or '—'}"
-           + (f" · {n_ext} contract-days before entry rebuilt back to the storage start" if n_ext else ""))
+    sub = (("PRICES EXCL TRANSPORT · " if excl else "Prices incl transport · ") + f"{scope_label} · {period} · as of {as_of}"
+           f" · ledger started {ledger_start or '—'}"
+           + (f" · {n_ext} contract-days before entry rebuilt back to the storage start" if n_ext else "")
+           + " · yellow = input, everything else is a formula")
+
+    order = sorted(trails, key=lambda k: (k not in open_now, _base(trails[k][-1]["rec"]), trails[k][0]["rec"]["date"],
+                                          trails[k][-1]["rec"].get("contract_ref") or k))
+    used = {"summary", "book by day", "daily movement", "contract trail"}
+    sheets = {cid: sheet_name(trails[cid][-1]["rec"].get("contract_ref") or cid, used) for cid in order if cid in open_now}
+
+    # ── the trail rows: inputs and the formula chain (Contract Trail and per-contract sheets) ──
+    SAV_L, OWN_L = ("X", "U") if excl else ("V", "T")
+    fm_tr = {"MT": F0, "CBOT": F2, "Δ CBOT": S2, "Premium": F2, "Factor": F4, "Fixed CIF $/MT": F2, "CIF $/MT": F2,
+             "FX": F4, "Discharge": F0, "Clearance": F0, "Other fees": F0, "Our freight": F0, "Our price incl tr.": F0,
+             "Our price excl tr.": F0, "Local incl tr.": F0, "Local transport": F0, "Local excl tr.": F0, "Sav/MT": F0,
+             "Δ Sav/MT": S0, "from CBOT": S0, "from FX": S0, "from Local": S0, "Other": S0, "Total EGP": F0,
+             "Δ Total": S0, "Cumulative Δ Sav/MT": S0, "Date": DF, "Prior date": DF, "Local date": DF}
+
+    def trail_heads():
+        return [h + tag if h in ("Sav/MT", "Total EGP") else h for h in TR_HEADS]
+
+    def write_trail(ws, start, ys):
+        """Rows from ``start``; returns the last row."""
+        firsts = {}
+        for i, y in enumerate(ys):
+            r, q = start + i, start + i - 1
+            firsts.setdefault(y["cid"], r)
+            fr0 = firsts[y["cid"]]
+            same = f"$B{r}=$B{q}"
+            col = lambda h: TC[h]
+            for h, v in (("Ref", y["ref"]), ("Contract ID", y["cid"]), ("Commodity", y["base"]), ("Date", y["date"]),
+                         ("Record", y["mode"]), ("MT", y["mt"]), ("CBOT", y["cbot"]), ("Premium", y["prem"]),
+                         ("Factor", y["factor"]), ("Fixed CIF $/MT", y["fixed_cif"]), ("FX", y["fx"]),
+                         ("FX source", y["fx_source"]), ("Discharge", y["disc"]), ("Clearance", y["clr"]),
+                         ("Other fees", y["other_fee"]), ("Our freight", y["freight"]), ("Local incl tr.", y["local_incl"]),
+                         ("Local transport", y["local_tr"]), ("Local date", y["local_date"]), ("Old quotes", y["stale"]),
+                         ("How it was rebuilt", y["note"])):
+                put(ws, r, col(h), v, fm_tr.get(h), inp=h in ("Date", "MT", "CBOT", "Premium", "Factor", "Fixed CIF $/MT",
+                                                             "FX", "Discharge", "Clearance", "Other fees", "Our freight",
+                                                             "Local incl tr.", "Local transport"))
+            if y["mode"] == "Rebuilt":
+                ws.cell(r, col("Record")).fill = PatternFill("solid", fgColor=REBUILT_FILL)
+            F = lambda h, formula, v: f(ws, r, col(h), formula, v, fm_tr.get(h))
+            F("Prior date", f'=IF({same},D{q},"")', y["prior_date"])
+            F("Δ CBOT", f'=IF(AND({same},ISNUMBER(H{r}),ISNUMBER(H{q})),H{r}-H{q},"")', y["d_cbot"])
+            F("CIF $/MT", f'=IF(ISNUMBER(L{r}),L{r},IF({isn(f"H{r}", f"J{r}", f"K{r}")},(H{r}+J{r})*K{r},""))', y["cif"])
+            F("Our price incl tr.", f'=IF({isn(f"M{r}", f"N{r}")},M{r}*N{r}+P{r}+Q{r}+R{r}+S{r},"")', y["own_incl"])
+            F("Our price excl tr.", f'=IF(ISNUMBER(T{r}),T{r}-S{r},"")', y["own_excl"])
+            F("Local excl tr.", f'=IF({isn(f"V{r}", f"W{r}")},V{r}-W{r},"")', y["local_excl"])
+            F("Sav/MT", f'=IF({isn(f"{SAV_L}{r}", f"{OWN_L}{r}")},{SAV_L}{r}-{OWN_L}{r},"")', y["sav"])
+            F("Δ Sav/MT", f'=IF(AND({same},ISNUMBER(Z{r}),ISNUMBER(Z{q})),Z{r}-Z{q},"")', y["d_sav"])
+            F("from CBOT", f'=IF(AND({same},ISNUMBER(M{r}),ISNUMBER(M{q}),ISNUMBER(N{q})),-(M{r}-M{q})*N{q},"")', y["from_cbot"])
+            F("from FX", f'=IF(AND({same},ISNUMBER(M{r}),ISNUMBER(N{r}),ISNUMBER(N{q})),-M{r}*(N{r}-N{q}),"")', y["from_fx"])
+            F("from Local", f'=IF(AND({same},ISNUMBER({SAV_L}{r}),ISNUMBER({SAV_L}{q})),{SAV_L}{r}-{SAV_L}{q},"")', y["from_local"])
+            F("Other", f'=IF({isn(f"AA{r}", f"AB{r}", f"AC{r}", f"AD{r}")},AA{r}-AB{r}-AC{r}-AD{r},"")', y["other"])
+            F("Total EGP", f'=IF({isn(f"Z{r}", f"G{r}")},Z{r}*G{r},"")', y["total"])
+            F("Δ Total", f'=IF(AND({same},ISNUMBER(AF{r}),ISNUMBER(AF{q})),AF{r}-AF{q},"")', y["d_total"])
+            F("Cumulative Δ Sav/MT", f'=IF({isn(f"Z{r}", f"$Z${fr0}")},Z{r}-$Z${fr0},"")', y["cum"])
+            F("Key", f'=$B{r}&"|"&TEXT($D{r},"0")', y["key"])
+        return start + len(ys) - 1
+
+    tr_inputs = [row_inputs(x["rec"]) for cid in order for x in trails[cid]]
+    tr_vals = chain(tr_inputs, excl)
+    by_key = {y["key"]: (i, y) for i, y in enumerate(tr_vals)}
 
     # ── Summary ──
     ws = wb.active
     ws.title = "Summary"
     title(ws, "Open MTM — every daily movement since storage" + (" (excl transport)" if excl else ""), sub)
     notes = [
-        "How to read it: each day is compared with the previous stored day, exactly like the Home table "
-        "\"Daily Open MTM Movement\". Δ Sav/MT is split into four parts that add up to it (EGP/MT):",
+        "Each day is compared with the previous stored day, exactly like the Home table \"Daily Open MTM Movement\". "
+        "Δ Sav/MT is split into four parts that add up to it (EGP/MT):",
         "from CBOT = −(CIF today − CIF prior) × FX prior · from FX = −CIF today × (FX today − FX prior), 0 under Form 4 · "
-        "from Local = local today − local prior · Other = the rest (discharge, clearance, freight, fees).",
-        "Rebuilt = a day the app was not opened, or a day between the storage start and the day the contract was entered "
-        "in the app; rebuilt from the stored CBOT close, FX history and local price, with the fees and tonnes of the "
-        "nearest stored record. Live = recorded by the app that day.",
+        "from Local = local today − local prior · Other = the rest (discharge, clearance, fees).",
+        "Contract Trail holds the inputs (yellow) and the formula chain: CIF = fixed CIF, else (CBOT + premium) × factor · "
+        "our price incl tr. = CIF × FX + discharge + clearance + other fees + our freight · our price excl tr. = that − our "
+        "freight · local excl tr. = local incl tr. − local transport · Sav/MT = local − our price · Total = Sav/MT × MT.",
+        "Daily Movement looks each contract up in the Contract Trail; Book by Day and the TOTAL rows add Daily Movement up "
+        "(SUMIFS); this sheet reads the Contract Trail. Change an input and everything follows.",
+        "Rebuilt = a day the app was not opened, or a day between the storage start and the day the contract was entered; "
+        "rebuilt from the stored CBOT close, FX history and local price with the fees and tonnes of the nearest record. "
         "Book totals before the ledger started only hold the contracts entered later, so they are partial.",
-        ("Excluding transport: our price = CIF × FX + discharge + clearance (+ fees), without the route freight; local = the "
-         "local quote without the transport recorded on it; saving = local − our price. Both transports are listed."
-         if excl else "Including transport, as on Home: our price includes the route freight and local includes its transport."),
+        ("Basis: EXCLUDING transport: Sav/MT = local excl tr. − our price excl tr." if excl
+         else "Basis: including transport, as on Home: Sav/MT = local incl tr. − our price incl tr."),
     ]
     for i, t in enumerate(notes):
         put(ws, 3 + i, 1, t, italic=True, color=GREY)
-    heads = ["Ref", "Contract ID", "Commodity", "Supplier", "Status", "Storage start", "Entered app", "First day",
-             "Last day", "Days", "Rebuilt days", "MT", "CBOT first", "CBOT last", "Δ CBOT", "Sav/MT first", "Sav/MT last",
-             "Δ Sav/MT", "from CBOT", "from FX", "from Local", "Other", "Total first", "Total last", "Δ Total", "Sheet"]
-    hr = 9
-    order = sorted(trails, key=lambda k: (k not in open_now, _base(trails[k][-1]["rec"]), trails[k][0]["rec"]["date"],
-                                          trails[k][-1]["rec"].get("contract_ref") or k))
-    used = {"summary", "book by day", "daily movement", "contract trail"}
-    sheets = {cid: sheet_name(trails[cid][-1]["rec"].get("contract_ref") or cid, used) for cid in order if cid in open_now}
-    table(ws, "ContractSummary", heads, [16, 10, 10, 16, 8, 11, 11, 11, 11, 7, 8, 9, 9, 9, 8, 10, 10, 10, 9, 9, 9, 9,
+    hr = 10
+    n_tr = len(tr_vals)
+    T0, T1 = 5, 4 + max(n_tr, 1)
+    TR = lambda h: f"'Contract Trail'!${L(TC[h])}${T0}:${L(TC[h])}${T1}"
+    heads = ["Ref", "Contract ID", "Commodity", "Supplier", "Status", "Storage start", "Entered app", "Trail row",
+             "Days", "First day", "Last day", "Rebuilt days", "MT", "CBOT first", "CBOT last", "Δ CBOT",
+             "Sav/MT first" + tag, "Sav/MT last" + tag, "Δ Sav/MT", "from CBOT", "from FX", "from Local", "Other",
+             "Total first" + tag, "Total last" + tag, "Δ Total", "Sheet"]
+    table(ws, "ContractSummary", heads, [16, 10, 10, 16, 8, 11, 11, 8, 6, 11, 11, 8, 9, 9, 9, 8, 10, 10, 10, 9, 9, 9, 9,
                                          13, 13, 13, 14], len(order), hr=hr)
+    pos = 0
     for i, cid in enumerate(order):
         r = hr + 1 + i
-        tr = trails[cid]
-        f0, f1 = tr[0]["rec"], tr[-1]["rec"]
+        ys = [y for y in tr_vals[pos:pos + len(trails[cid])]]
+        first_row, n = pos + 1, len(ys)
+        pos += n
+        y0, y1 = ys[0], ys[-1]
         c = contracts.get(cid, {})
-        parts = {k: sum(x["why"][k] for x in tr if x["why"].get(k) is not None) for k in PARTS}
-        vals = [f1.get("contract_ref") or cid, cid, _base(f1), f1.get("supplier") or c.get("supplier") or "",
-                "Open" if cid in open_now else (c.get("status") or "Closed"), storage_start(c),
-                str(c.get("created_ts") or "")[:10], f0["date"], f1["date"], len(tr),
-                sum(1 for x in tr if x["rec"].get("mode") == "RECONSTRUCTED"), _n(f1.get("qty_mt")),
-                _n(f0.get("cbot_price")), _n(f1.get("cbot_price")), _sub(_n(f1.get("cbot_price")), _n(f0.get("cbot_price"))),
-                _n(f0.get("saving_egp_mt")), _n(f1.get("saving_egp_mt")),
-                _sub(_n(f1.get("saving_egp_mt")), _n(f0.get("saving_egp_mt"))),
-                *[parts[k] for k in PARTS], _n(f0.get("total_saving_egp")), _n(f1.get("total_saving_egp")),
-                _sub(_n(f1.get("total_saving_egp")), _n(f0.get("total_saving_egp"))), sheets.get(cid, "")]
-        fmts = [None] * 11 + [F0, F2, F2, S2, F0, F0, S0, S0, S0, S0, S0, F0, F0, S0, None]
-        for j, v in enumerate(vals, start=1):
-            put(ws, r, j, v, fmts[j - 1])
+        put(ws, r, 1, y1["ref"]); put(ws, r, 2, cid, inp=True); put(ws, r, 3, y1["base"])
+        put(ws, r, 4, trails[cid][-1]["rec"].get("supplier") or c.get("supplier") or "")
+        put(ws, r, 5, "Open" if cid in open_now else (c.get("status") or "Closed"))
+        put(ws, r, 6, _date(storage_start(c)), DF); put(ws, r, 7, _date(str(c.get("created_ts") or "")[:10]), DF)
+        f(ws, r, 8, f"=MATCH(B{r},{TR('Contract ID')},0)", first_row)
+        f(ws, r, 9, f"=COUNTIF({TR('Contract ID')},B{r})", n)
+        last = f"H{r}+I{r}-1"
+        ix = lambda h, at: f'IF(ISNUMBER(INDEX({TR(h)},{at})),INDEX({TR(h)},{at}),"")'
+        f(ws, r, 10, f"=INDEX({TR('Date')},H{r})", y0["date"], DF)
+        f(ws, r, 11, f"=INDEX({TR('Date')},{last})", y1["date"], DF)
+        f(ws, r, 12, f'=COUNTIFS({TR("Contract ID")},B{r},{TR("Record")},"Rebuilt")', sum(1 for y in ys if y["mode"] == "Rebuilt"))
+        f(ws, r, 13, "=" + ix("MT", last), y1["mt"], F0)
+        f(ws, r, 14, "=" + ix("CBOT", f"H{r}"), y0["cbot"], F2)
+        f(ws, r, 15, "=" + ix("CBOT", last), y1["cbot"], F2)
+        f(ws, r, 16, f'=IF({isn(f"N{r}", f"O{r}")},O{r}-N{r},"")', _sub(y1["cbot"], y0["cbot"]), S2)
+        f(ws, r, 17, "=" + ix("Sav/MT", f"H{r}"), y0["sav"], F0)
+        f(ws, r, 18, "=" + ix("Sav/MT", last), y1["sav"], F0)
+        f(ws, r, 19, f'=IF({isn(f"Q{r}", f"R{r}")},R{r}-Q{r},"")', _sub(y1["sav"], y0["sav"]), S0)
+        for j, k in enumerate(PARTS):
+            h = ("from CBOT", "from FX", "from Local", "Other")[j]
+            f(ws, r, 20 + j, f"=SUMIFS({TR(h)},{TR('Contract ID')},B{r})", sum(y[k] or 0.0 for y in ys), S0)
+        f(ws, r, 24, "=" + ix("Total EGP", f"H{r}"), y0["total"], F0)
+        f(ws, r, 25, "=" + ix("Total EGP", last), y1["total"], F0)
+        f(ws, r, 26, f'=IF({isn(f"X{r}", f"Y{r}")},Y{r}-X{r},"")', _sub(y1["total"], y0["total"]), S0)
         if cid in sheets:
-            ws.cell(r, 26).hyperlink = f"#'{sheets[cid]}'!A1"
-            ws.cell(r, 26).font = Font(color="1F5FBF", underline="single")
+            put(ws, r, 27, sheets[cid])
+            ws.cell(r, 27).hyperlink = f"#'{sheets[cid]}'!A1"
+            ws.cell(r, 27).font = Font(color="1F5FBF", underline="single")
     if order:
-        signs(ws, f"O{hr + 1}:V{hr + len(order)}")
-        signs(ws, f"Y{hr + 1}:Y{hr + len(order)}")
+        signs(ws, f"P{hr + 1}:W{hr + len(order)}"); signs(ws, f"Z{hr + 1}:Z{hr + len(order)}")
     ws.freeze_panes = f"B{hr + 1}"
 
-    # ── Book by Day ──
     wsb = wb.create_sheet("Book by Day")
-    title(wsb, "Open book by day — the Home summary line for every day", sub)
+    wsd = wb.create_sheet("Daily Movement")
+    wst = wb.create_sheet("Contract Trail")
+
+    # ── Contract Trail ──
+    title(wst, "Contract trail — each contract against its own previous day" + (" (excl transport)" if excl else ""),
+          sub + " · rows of a contract are together, oldest first; a change is against the row above when it is the same contract")
+    table(wst, "ContractTrail", trail_heads(), TR_W, n_tr)
+    write_trail(wst, 5, tr_vals)
+    if tr_vals:
+        signs(wst, f"I5:I{T1}"); signs(wst, f"AA5:AE{T1}"); signs(wst, f"AG5:AH{T1}")
+    wst.freeze_panes = "E5"
+
+    # ── Daily Movement: every day as on Home, looked up in the Contract Trail ──
+    title(wsd, "Daily Open MTM Movement — every day" + (" · excl transport" if excl else ", as on Home"),
+          sub + " · newest day first · TOTAL rows are the open book of that day (Row = TOTAL to filter them)")
+    DH = ["Date", "Prior date", "Row", "Ref", "Contract ID", "Commodity", "Flag", "Trail row today", "Trail row prior",
+          "MT Today", "MT Prior", "CBOT Today", "CBOT Prior", "Δ CBOT", "Sav/MT Today" + tag, "Sav/MT Prior" + tag,
+          "Δ Sav/MT", "from CBOT", "from FX", "from Local", "Other", "Total Today" + tag, "Total Prior" + tag, "Δ Total",
+          "CIF Today", "CIF Prior", "FX Today", "FX Prior", "Local Today" + tag, "Local Prior" + tag, "Our price Today" + tag,
+          "Our freight", "Local transport", "Local date", "Record", "In today", "In prior", "Weight MT",
+          "w × from CBOT", "w × from FX", "w × from Local", "w × Other", "Old quotes", "How it was rebuilt"]
+    DC = {h: i + 1 for i, h in enumerate(DH)}
+    lines = []
+    for blk in reversed(blocks):
+        for x in blk["rows"]:
+            lines.append(("row", blk, x))
+        lines.append(("total", blk, None))
+    D0, D1 = 5, 4 + max(len(lines), 1)
+    table(wsd, "DailyMovement", DH, [11, 11, 7, 18, 10, 9, 7, 7, 7, 9, 9, 9, 9, 8, 10, 10, 9, 9, 8, 9, 8, 13, 13, 12, 9, 9,
+                                     8, 8, 10, 10, 10, 9, 9, 11, 8, 6, 6, 8, 9, 9, 9, 9, 22, 60], len(lines))
+    DR = lambda h: f"${L(DC[h])}${D0}:${L(DC[h])}${D1}"
+    lc = {h: L(DC[h]) for h in DH}
+    loc_h, own_h = ("Local excl tr.", "Our price excl tr.") if excl else ("Local incl tr.", "Our price incl tr.")
+    look_today = [("MT Today", "MT", "mt", F0), ("CBOT Today", "CBOT", "cbot", F2), ("Sav/MT Today" + tag, "Sav/MT", "sav", F0),
+                  ("Total Today" + tag, "Total EGP", "total", F0), ("CIF Today", "CIF $/MT", "cif", F2),
+                  ("FX Today", "FX", "fx", F4), ("Local Today" + tag, loc_h, "local", F0),
+                  ("Our price Today" + tag, own_h, "own", F0), ("Our freight", "Our freight", "freight", F0),
+                  ("Local transport", "Local transport", "local_tr", F0), ("Local date", "Local date", "local_date", DF)]
+    look_prior = [("MT Prior", "MT", "mt", F0), ("CBOT Prior", "CBOT", "cbot", F2), ("Sav/MT Prior" + tag, "Sav/MT", "sav", F0),
+                  ("Total Prior" + tag, "Total EGP", "total", F0), ("CIF Prior", "CIF $/MT", "cif", F2),
+                  ("FX Prior", "FX", "fx", F4), ("Local Prior" + tag, loc_h, "local", F0)]
+    totals_by_date = {}
+    dm_vals = []
+    for i, (kind, blk, x) in enumerate(lines):
+        r = 5 + i
+        d1, d0 = _date(blk["date"]), _date(blk["prior_date"])
+        put(wsd, r, DC["Date"], d1, DF, inp=True); put(wsd, r, DC["Prior date"], d0, DF, inp=True)
+        if kind == "row":
+            ti = by_key.get(f"{x['contract_id']}|{_serial(d1)}")
+            pi = by_key.get(f"{x['contract_id']}|{_serial(d0)}") if d0 else None
+            t, p = (ti[1] if ti else {}), (pi[1] if pi else {})
+            v = {"t": t, "p": p}
+            put(wsd, r, DC["Row"], "Contract"); put(wsd, r, DC["Ref"], x["ref"]); put(wsd, r, DC["Contract ID"], x["contract_id"])
+            put(wsd, r, DC["Commodity"], x["commodity"]); put(wsd, r, DC["Flag"], x["flag"])
+            if x["flag"]:
+                wsd.cell(r, DC["Flag"]).fill = PatternFill("solid", fgColor=NEW_FILL)
+            f(wsd, r, DC["Trail row today"], f'=IFERROR(MATCH($E{r}&"|"&TEXT($A{r},"0"),{TR("Key")},0),"")',
+              ti[0] + 1 if ti else None)
+            f(wsd, r, DC["Trail row prior"], f'=IF($B{r}="","",IFERROR(MATCH($E{r}&"|"&TEXT($B{r},"0"),{TR("Key")},0),""))',
+              pi[0] + 1 if pi else None)
+            for side, hc, spec in (("t", "H", look_today), ("p", "I", look_prior)):
+                for h, th, k, fmt in spec:
+                    val = v[side].get(k) if v[side] else None
+                    f(wsd, r, DC[h], f'=IF(ISNUMBER(${hc}{r}),IF(ISNUMBER(INDEX({TR(th)},${hc}{r})),INDEX({TR(th)},${hc}{r}),""),"")',
+                      val, fmt)
+            rec_v = t.get("mode") if t else ""
+            f(wsd, r, DC["Record"], f'=IF(ISNUMBER($H{r}),INDEX({TR("Record")},$H{r})&"","")', rec_v)
+            if rec_v == "Rebuilt":
+                wsd.cell(r, DC["Record"]).fill = PatternFill("solid", fgColor=REBUILT_FILL)
+            g = lambda side, k: (v[side] or {}).get(k)
+            d_cbot = _sub(g("t", "cbot"), g("p", "cbot"))
+            if x["flag"] == "new":
+                d_sav, d_tot = g("t", "sav"), g("t", "total")
+            elif x["flag"] == "exited":
+                d_sav = -g("p", "sav") if g("p", "sav") is not None else None
+                d_tot = -g("p", "total") if g("p", "total") is not None else None
+            else:
+                d_sav, d_tot = _sub(g("t", "sav"), g("p", "sav")), _sub(g("t", "total"), g("p", "total"))
+            c1, c0, f1, f0 = g("t", "cif"), g("p", "cif"), g("t", "fx"), g("p", "fx")
+            fc = -(c1 - c0) * f0 if None not in (c1, c0, f0) else None
+            ff = -c1 * (f1 - f0) if None not in (c1, f1, f0) else None
+            fl = _sub(g("t", "local"), g("p", "local"))
+            parts = [d_sav, fc, ff, fl]
+            oth = parts[0] - fc - ff - fl if None not in parts else None
+            S_, P_ = lc["Sav/MT Today" + tag], lc["Sav/MT Prior" + tag]
+            TT, TP = lc["Total Today" + tag], lc["Total Prior" + tag]
+            CT, CP, XT, XP = lc["CIF Today"], lc["CIF Prior"], lc["FX Today"], lc["FX Prior"]
+            LT, LP = lc["Local Today" + tag], lc["Local Prior" + tag]
+            f(wsd, r, DC["Δ CBOT"], f'=IF({isn(f"L{r}", f"M{r}")},L{r}-M{r},"")', d_cbot, S2)
+            delta = lambda a, b: (f'=IF($G{r}="new",{a}{r},IF($G{r}="exited",IF(ISNUMBER({b}{r}),-{b}{r},""),'
+                                  f'IF({isn(f"{a}{r}", f"{b}{r}")},{a}{r}-{b}{r},"")))')
+            f(wsd, r, DC["Δ Sav/MT"], delta(S_, P_), d_sav, S0)
+            f(wsd, r, DC["from CBOT"], f'=IF({isn(f"{CT}{r}", f"{CP}{r}", f"{XP}{r}")},-({CT}{r}-{CP}{r})*{XP}{r},"")', fc, S0)
+            f(wsd, r, DC["from FX"], f'=IF({isn(f"{CT}{r}", f"{XT}{r}", f"{XP}{r}")},-{CT}{r}*({XT}{r}-{XP}{r}),"")', ff, S0)
+            f(wsd, r, DC["from Local"], f'=IF({isn(f"{LT}{r}", f"{LP}{r}")},{LT}{r}-{LP}{r},"")', fl, S0)
+            f(wsd, r, DC["Other"], f'=IF({isn(f"Q{r}", f"R{r}", f"S{r}", f"T{r}")},Q{r}-R{r}-S{r}-T{r},"")', oth, S0)
+            f(wsd, r, DC["Δ Total"], delta(TT, TP), d_tot, S0)
+            in_t, in_p = (1 if ti else 0), (1 if pi else 0)
+            f(wsd, r, DC["In today"], f'=IF(ISNUMBER(H{r}),1,0)', in_t)
+            f(wsd, r, DC["In prior"], f'=IF(ISNUMBER(I{r}),1,0)', in_p)
+            wq = g("t", "mt") if (None not in (fc, ff, fl, oth) and g("t", "mt")) else 0
+            f(wsd, r, DC["Weight MT"], f'=IF(AND({isn(f"R{r}", f"S{r}", f"T{r}", f"U{r}", f"J{r}")},N(J{r})<>0),J{r},0)', wq, F0)
+            for h, src, val in (("w × from CBOT", "R", fc), ("w × from FX", "S", ff), ("w × from Local", "T", fl), ("w × Other", "U", oth)):
+                f(wsd, r, DC[h], f'=IF(AL{r}<>0,{src}{r}*AL{r},0)', (val * wq) if wq else 0, F0)
+            put(wsd, r, DC["Old quotes"], x["stale"]); put(wsd, r, DC["How it was rebuilt"], x["note"])
+            dm_vals.append({"date": blk["date"], "commodity": x["commodity"], "mt_t": g("t", "mt"), "mt_p": g("p", "mt"),
+                            "tot_t": g("t", "total"), "tot_p": g("p", "total"), "in_t": in_t, "in_p": in_p, "w": wq,
+                            "parts": [(val * wq) if wq else 0 for val in (fc, ff, fl, oth)],
+                            "cbot_t": g("t", "cbot"), "cbot_p": g("p", "cbot")})
+        else:
+            totals_by_date[blk["date"]] = r
+    # TOTAL rows: SUMIFS over the contract rows of the same day
+    agg = {}
+    for v in dm_vals:
+        a = agg.setdefault(v["date"], {"mt_t": 0.0, "mt_p": 0.0, "tot_t": 0.0, "tot_p": 0.0, "in_t": 0, "in_p": 0, "w": 0.0,
+                                       "parts": [0.0] * 4, "cbot": {}})
+        for k in ("mt_t", "mt_p", "tot_t", "tot_p", "in_t", "in_p", "w"):
+            a[k] += v[k] or 0
+        a["parts"] = [s + p for s, p in zip(a["parts"], v["parts"])]
+        for side in ("t", "p"):
+            if v["cbot_" + side] is not None:
+                a["cbot"].setdefault((v["commodity"], side), []).append(v["cbot_" + side])
+
+    def book_vals(day, prior):
+        a = agg.get(day) or {"mt_t": 0.0, "mt_p": 0.0, "tot_t": 0.0, "tot_p": 0.0, "in_t": 0, "in_p": 0, "w": 0.0,
+                             "parts": [0.0] * 4, "cbot": {}}
+        sav_t = a["tot_t"] / a["mt_t"] if a["mt_t"] else None
+        sav_p = a["tot_p"] / a["mt_p"] if (prior and a["mt_p"]) else None
+        return {**a, "sav_t": sav_t, "sav_p": sav_p, "d_sav": _sub(sav_t, sav_p),
+                "tot_p_b": a["tot_p"] if prior else None, "d_tot": (a["tot_t"] - a["tot_p"]) if prior else None,
+                "why": [(s / a["w"]) if a["w"] else None for s in a["parts"]]}
+
+    crit = lambda r: f'{DR("Date")},$A{r},{DR("Row")},"Contract"'
+    for blk in blocks:
+        r = totals_by_date[blk["date"]]
+        bv = book_vals(blk["date"], blk["prior_date"])
+        put(wsd, r, DC["Row"], "TOTAL", bold=True)
+        S = lambda h: f"SUMIFS({DR(h)},{crit(r)})"
+        f(wsd, r, DC["Ref"], f'="TOTAL OPEN BOOK ("&{S("In today")}&" today / "&{S("In prior")}&" prior)"',
+          f"TOTAL OPEN BOOK ({bv['in_t']} today / {bv['in_p']} prior)", bold=True)
+        f(wsd, r, DC["MT Today"], "=" + S("MT Today"), bv["mt_t"], F0, bold=True)
+        f(wsd, r, DC["MT Prior"], "=" + S("MT Prior"), bv["mt_p"], F0, bold=True)
+        f(wsd, r, DC["Total Today" + tag], "=" + S("Total Today" + tag), bv["tot_t"], F0, bold=True)
+        f(wsd, r, DC["Total Prior" + tag], f'=IF($B{r}="","",{S("Total Prior" + tag)})', bv["tot_p_b"], F0, bold=True)
+        J, K, V_, W_ = lc["MT Today"], lc["MT Prior"], lc["Total Today" + tag], lc["Total Prior" + tag]
+        f(wsd, r, DC["Sav/MT Today" + tag], f'=IF(N({J}{r})<>0,{V_}{r}/{J}{r},"")', bv["sav_t"], F0, bold=True)
+        f(wsd, r, DC["Sav/MT Prior" + tag], f'=IF(AND($B{r}<>"",N({K}{r})<>0),{W_}{r}/{K}{r},"")', bv["sav_p"], F0, bold=True)
+        f(wsd, r, DC["Δ Sav/MT"], f'=IF({isn(f"O{r}", f"P{r}")},O{r}-P{r},"")', bv["d_sav"], S0, bold=True)
+        for j, (h, wh) in enumerate((("from CBOT", "w × from CBOT"), ("from FX", "w × from FX"),
+                                     ("from Local", "w × from Local"), ("Other", "w × Other"))):
+            f(wsd, r, DC[h], f'=IF({S("Weight MT")}<>0,{S(wh)}/{S("Weight MT")},"")', bv["why"][j], S0, bold=True)
+        f(wsd, r, DC["Δ Total"], f'=IF($B{r}="","",{V_}{r}-{W_}{r})', bv["d_tot"], S0, bold=True)
+        put(wsd, r, DC["Record"], blk["book"]["mode"], bold=True)
+        put(wsd, r, DC["Old quotes"], blk["book"]["stale"]); put(wsd, r, DC["How it was rebuilt"], blk["book"]["text"])
+        for cidx in range(1, len(DH) + 1):
+            wsd.cell(r, cidx).fill = PatternFill("solid", fgColor=TOTAL_FILL)
+            wsd.cell(r, cidx).font = Font(bold=True)
+    if lines:
+        signs(wsd, f"N5:N{D1}"); signs(wsd, f"Q5:U{D1}"); signs(wsd, f"X5:X{D1}")
+    wsd.freeze_panes = "E5"
+
+    # ── Book by Day: SUMIFS over the Daily Movement contract rows ──
+    title(wsb, "Open book by day — the Home summary line for every day" + (" (excl transport)" if excl else ""), sub)
     bases = sorted({b for blk in blocks for b in blk["book"]["cbot"]})
-    heads = ["Date", "Prior date", "Record", "Prior record", "Contracts", "Contracts prior", "MT", "Open MTM prior",
-             "Open MTM today", "Δ Open MTM", "Sav/MT prior", "Sav/MT today", "Δ Sav/MT", "from CBOT", "from FX",
+    heads = ["Date", "Prior date", "Record", "Prior record", "Contracts", "Contracts prior", "MT", "Open MTM prior" + tag,
+             "Open MTM today" + tag, "Δ Open MTM", "Sav/MT prior", "Sav/MT today", "Δ Sav/MT", "from CBOT", "from FX",
              "from Local", "Other", "Cumulative Δ Open MTM"]
     for b in bases:
         heads += [f"{b} prior", f"{b} today", f"Δ {b}"]
     heads += ["Partial book", "Old quotes", "Summary (as on Home)"]
     table(wsb, "BookByDay", heads, [11, 11, 8, 8, 8, 8, 10, 14, 14, 13, 9, 9, 9, 9, 8, 9, 8, 14] + [9, 9, 8] * len(bases)
           + [9, 24, 120], len(blocks))
+    DMR = lambda h: f"'Daily Movement'!{DR(h)}"
+    cum = 0.0
     for i, blk in enumerate(blocks):
         r, b = 5 + i, blk["book"]
-        put(wsb, r, 1, blk["date"]); put(wsb, r, 2, blk["prior_date"]); put(wsb, r, 3, b["mode"]); put(wsb, r, 4, b["prior_mode"])
-        put(wsb, r, 5, b["contracts"]); put(wsb, r, 6, b["contracts_prior"] if blk["prior_date"] else None)
-        put(wsb, r, 7, b["mt"], F0); put(wsb, r, 8, b["total_prior"], F0); put(wsb, r, 9, b["total"], F0)
-        f(wsb, r, 10, f'=IF(AND(ISNUMBER(H{r}),ISNUMBER(I{r})),I{r}-H{r},"")', b["d_total"], S0)
-        put(wsb, r, 11, b["sav_prior"], F0); put(wsb, r, 12, b["sav"], F0)
-        f(wsb, r, 13, f'=IF(AND(ISNUMBER(K{r}),ISNUMBER(L{r})),L{r}-K{r},"")', b["d_sav"], S0)
-        for j, k in enumerate(PARTS):
-            put(wsb, r, 14 + j, b[k], S0)
-        cum = sum(x["book"]["d_total"] or 0.0 for x in blocks[:i + 1])
+        bv = book_vals(blk["date"], blk["prior_date"])
+        cr = f'{DMR("Date")},$A{r},{DMR("Row")},"Contract"'
+        S = lambda h: f"SUMIFS({DMR(h)},{cr})"
+        put(wsb, r, 1, _date(blk["date"]), DF, inp=True); put(wsb, r, 2, _date(blk["prior_date"]), DF, inp=True)
+        put(wsb, r, 3, b["mode"]); put(wsb, r, 4, b["prior_mode"])
+        if b["mode"] != "Live":
+            wsb.cell(r, 3).fill = PatternFill("solid", fgColor=REBUILT_FILL)
+        f(wsb, r, 5, "=" + S("In today"), bv["in_t"])
+        f(wsb, r, 6, f'=IF($B{r}="","",{S("In prior")})', bv["in_p"] if blk["prior_date"] else None)
+        f(wsb, r, 7, "=" + S("MT Today"), bv["mt_t"], F0)
+        f(wsb, r, 8, f'=IF($B{r}="","",{S("Total Prior" + tag)})', bv["tot_p_b"], F0)
+        f(wsb, r, 9, "=" + S("Total Today" + tag), bv["tot_t"], F0)
+        f(wsb, r, 10, f'=IF({isn(f"H{r}", f"I{r}")},I{r}-H{r},"")', bv["d_tot"], S0)
+        f(wsb, r, 11, f'=IF(AND(ISNUMBER(H{r}),{S("MT Prior")}<>0),H{r}/{S("MT Prior")},"")', bv["sav_p"], F0)
+        f(wsb, r, 12, f'=IF(G{r}<>0,I{r}/G{r},"")', bv["sav_t"], F0)
+        f(wsb, r, 13, f'=IF({isn(f"K{r}", f"L{r}")},L{r}-K{r},"")', bv["d_sav"], S0)
+        for j, wh in enumerate(("w × from CBOT", "w × from FX", "w × from Local", "w × Other")):
+            f(wsb, r, 14 + j, f'=IF({S("Weight MT")}<>0,{S(wh)}/{S("Weight MT")},"")', bv["why"][j], S0)
+        cum += bv["d_tot"] or 0.0
         f(wsb, r, 18, f"=SUM($J$5:J{r})", cum, S0)
         col = 19
         for base in bases:
-            t, p = b["cbot"].get(base, (None, None))
-            put(wsb, r, col, p, F2); put(wsb, r, col + 1, t, F2)
-            f(wsb, r, col + 2, f'=IF(AND(ISNUMBER({L(col)}{r}),ISNUMBER({L(col + 1)}{r})),{L(col + 1)}{r}-{L(col)}{r},"")',
-              _sub(t, p), S2)
+            vals = {s: bv["cbot"].get((base, s)) for s in ("p", "t")}
+            avg = {s: (sum(v) / len(v)) if v else None for s, v in vals.items()}
+            for k, (s, h) in enumerate((("p", "CBOT Prior"), ("t", "CBOT Today"))):
+                f(wsb, r, col + k, f'=IFERROR(AVERAGEIFS({DMR(h)},{cr},{DMR("Commodity")},"{base}"),"")', avg[s], F2)
+            f(wsb, r, col + 2, f'=IF({isn(f"{L(col)}{r}", f"{L(col + 1)}{r}")},{L(col + 1)}{r}-{L(col)}{r},"")',
+              _sub(avg["t"], avg["p"]), S2)
             col += 3
         put(wsb, r, col, "yes" if ledger_start and blk["date"] < ledger_start else "")
         put(wsb, r, col + 1, b["stale"]); put(wsb, r, col + 2, b["text"])
-        if b["mode"] != "Live":
-            for j in (1, 3):
-                wsb.cell(r, j).fill = PatternFill("solid", fgColor=REBUILT_FILL)
     if blocks:
         last = 4 + len(blocks)
         signs(wsb, f"J5:J{last}"); signs(wsb, f"M5:R{last}")
@@ -465,147 +804,42 @@ def write_movements_excel(history, contracts, path, as_of=None, ids=None, scope_
         wsb.add_chart(ch, f"A{last + 3}")
     wsb.freeze_panes = "B5"
 
-    # ── Daily Movement ──
-    wsd = wb.create_sheet("Daily Movement")
-    title(wsd, "Daily Open MTM Movement — every day" + (" · excl transport" if excl else ", as on Home"),
-          sub + " · newest day first · TOTAL rows are the open book of that day (Row = TOTAL to filter them)")
-    heads = ["Date", "Prior date", "Row", "Ref", "Commodity", "Supplier", "Flag", "MT", "CBOT Today", "CBOT Prior", "Δ CBOT",
-             "Sav/MT Today", "Sav/MT Prior", "Δ Sav/MT", "from CBOT", "from FX", "from Local", "Other", "Total Today",
-             "Total Prior", "Δ Total", "CIF Today", "CIF Prior", "FX Today", "FX Prior", "FX source", "Local Today",
-             "Local Prior", "Local date", "Own cost", "Our freight", "Local transport", "Record", "Old quotes",
-             "How it was rebuilt"]
-    lines = []
-    for blk in reversed(blocks):
-        b = blk["book"]
-        for x in blk["rows"]:
-            lines.append(("row", x))
-        lines.append(("total", blk))
-    table(wsd, "DailyMovement", heads, [11, 11, 7, 18, 10, 14, 7, 9, 9, 9, 8, 10, 10, 9, 9, 8, 9, 8, 13, 13, 12, 9, 9,
-                                        8, 8, 16, 10, 10, 11, 10, 9, 9, 8, 22, 60], len(lines))
-    fm = [None] * 7 + [F0, F2, F2, S2, F0, F0, S0, S0, S0, S0, S0, F0, F0, S0, F2, F2, F4, F4, None, F0, F0, None, F0,
-                       F0, F0, None, None, None]
-    for i, (kind, x) in enumerate(lines):
-        r = 5 + i
-        if kind == "row":
-            vals = [x["date"], x["prior_date"], "Contract", x["ref"], x["commodity"], x["supplier"], x["flag"], x["mt"],
-                    x["cbot"], x["cbot_prior"], x["d_cbot"], x["sav"], x["sav_prior"], x["d_sav"],
-                    *[x[k] for k in PARTS], x["total"], x["total_prior"], x["d_total"], x["cif"], x["cif_prior"],
-                    x["fx"], x["fx_prior"], x["fx_source"], x["local"], x["local_prior"], x["local_date"], x["own"],
-                    x["freight"], x["local_transport"], x["mode"], x["stale"], x["note"]]
-            for j, v in enumerate(vals, start=1):
-                put(wsd, r, j, v, fm[j - 1])
-            if x["mode"] == "Rebuilt":
-                wsd.cell(r, 33).fill = PatternFill("solid", fgColor=REBUILT_FILL)
-            if x["flag"]:
-                wsd.cell(r, 7).fill = PatternFill("solid", fgColor=NEW_FILL)
-        else:
-            blk, b = x, x["book"]
-            vals = [blk["date"], blk["prior_date"], "TOTAL",
-                    f"TOTAL OPEN BOOK ({b['contracts']} today / {b['contracts_prior']} prior)", "", "", "", b["mt"],
-                    None, None, None, b["sav"], b["sav_prior"], b["d_sav"], *[b[k] for k in PARTS],
-                    b["total"], b["total_prior"], b["d_total"]] + [None] * 11 + [b["mode"], b["stale"], b["text"]]
-            for j, v in enumerate(vals, start=1):
-                put(wsd, r, j, v, fm[j - 1], bold=True, fill=TOTAL_FILL)
-    if lines:
-        signs(wsd, f"K5:K{4 + len(lines)}"); signs(wsd, f"N5:R{4 + len(lines)}"); signs(wsd, f"U5:U{4 + len(lines)}")
-    wsd.freeze_panes = "E5"
-
-    # ── Contract Trail ──
-    wst = wb.create_sheet("Contract Trail")
-    title(wst, "Contract trail — each contract against its own previous day", sub)
-    heads = ["Ref", "Contract ID", "Commodity", "Date", "Prior date", "Record", "MT", "CBOT", "Δ CBOT", "CIF $/MT", "FX",
-             "Local", "Local date", "Own cost", "Sav/MT", "Δ Sav/MT", "from CBOT", "from FX", "from Local", "Other",
-             "Total EGP", "Δ Total", "Cumulative Δ Sav/MT", "Our freight", "Local transport", "Old quotes",
-             "How it was rebuilt"]
-    tl = [(cid, x) for cid in order for x in trails[cid]]
-    table(wst, "ContractTrail", heads, [16, 10, 10, 11, 11, 8, 9, 9, 8, 9, 8, 10, 11, 10, 10, 9, 9, 8, 9, 8, 13, 12, 11,
-                                        9, 9, 22, 60], len(tl))
-    fm = [None] * 6 + [F0, F2, S2, F2, F4, F0, None, F0, F0, S0, S0, S0, S0, S0, F0, S0, S0, F0, F0, None, None]
-    first_sav = {}
-    for i, (cid, x) in enumerate(tl):
-        r, rec, p = 5 + i, x["rec"], x["prior"]
-        first_sav.setdefault(cid, _n(rec.get("saving_egp_mt")))
-        vals = [rec.get("contract_ref") or cid, cid, _base(rec), rec["date"], (p or {}).get("date", ""),
-                "Rebuilt" if rec.get("mode") == "RECONSTRUCTED" else "Live", _n(rec.get("qty_mt")), _n(rec.get("cbot_price")),
-                _sub(_n(rec.get("cbot_price")), _n((p or {}).get("cbot_price"))), _n(rec.get("cif_usd_mt")), _n(rec.get("fx")),
-                _n(rec.get("local_egp_mt")), rec.get("local_price_date", ""), _n(rec.get("own_after_egp_mt")),
-                _n(rec.get("saving_egp_mt")), x["why"].get("change"), *[x["why"].get(k) for k in PARTS],
-                _n(rec.get("total_saving_egp")), _sub(_n(rec.get("total_saving_egp")), _n((p or {}).get("total_saving_egp"))),
-                _sub(_n(rec.get("saving_egp_mt")), first_sav[cid]), _n(rec.get("freight_egp_mt")),
-                _n(rec.get("local_transport_egp_mt")), "; ".join(rec.get("stale_quotes") or []),
-                rec.get("reconstructed_from", "")]
-        for j, v in enumerate(vals, start=1):
-            put(wst, r, j, v, fm[j - 1])
-        if rec.get("mode") == "RECONSTRUCTED":
-            wst.cell(r, 6).fill = PatternFill("solid", fgColor=REBUILT_FILL)
-    if tl:
-        signs(wst, f"I5:I{4 + len(tl)}"); signs(wst, f"P5:T{4 + len(tl)}"); signs(wst, f"V5:W{4 + len(tl)}")
-    wst.freeze_panes = "D5"
-
-    # ── one sheet per open contract, movement columns as formulas ──
+    # ── one sheet per open contract: the same formula chain ──
+    pos_of = {}
+    p = 0
+    for cid in order:
+        pos_of[cid] = p
+        p += len(trails[cid])
     for cid, name in sheets.items():
-        tr = trails[cid]
-        last_rec = tr[-1]["rec"]
+        ys = tr_vals[pos_of[cid]:pos_of[cid] + len(trails[cid])]
         c = contracts.get(cid, {})
         w = wb.create_sheet(name)
-        title(w, f"{last_rec.get('contract_ref') or cid} · {_base(last_rec)} · {last_rec.get('supplier') or c.get('supplier') or ''}",
+        y1 = ys[-1]
+        title(w, f"{y1['ref']} · {y1['base']} · {trails[cid][-1]['rec'].get('supplier') or c.get('supplier') or ''}"
+                 + (" · excl transport" if excl else ""),
               f"Contract {cid} · storage start {storage_start(c) or '—'} · entered {str(c.get('created_ts') or '')[:10] or '—'}"
-              f" · {len(tr)} days · {'prices EXCL transport · ' if excl else ''}movement columns are formulas over the row above (EGP/MT unless EGP)")
-        heads = ["Date", "Prior date", "Record", "MT", "CBOT", "Δ CBOT", "CIF $/MT", "FX", "Local", "Local date", "Own cost",
-                 "Sav/MT", "Δ Sav/MT", "from CBOT", "from FX", "from Local", "Other", "Total EGP", "Δ Total EGP",
-                 "Cumulative Δ Sav/MT", "Our freight", "Local transport", "Old quotes", "How it was rebuilt"]
-        table(w, "T_" + re.sub(r"\W", "_", cid), heads, [11, 11, 8, 9, 9, 8, 9, 8, 10, 11, 10, 10, 9, 9, 8, 9, 8, 13, 12,
-                                                        11, 9, 9, 22, 60], len(tr))
-        s0 = _n(tr[0]["rec"].get("saving_egp_mt"))
-        for i, x in enumerate(tr):
-            r, rec, p, a = 5 + i, x["rec"], x["prior"], x["why"]
-            g = lambda k: _n(rec.get(k))
-            put(w, r, 1, rec["date"]); put(w, r, 2, (p or {}).get("date", ""))
-            put(w, r, 3, "Rebuilt" if rec.get("mode") == "RECONSTRUCTED" else "Live",
-                fill=REBUILT_FILL if rec.get("mode") == "RECONSTRUCTED" else None)
-            put(w, r, 4, g("qty_mt"), F0); put(w, r, 5, g("cbot_price"), F2); put(w, r, 7, g("cif_usd_mt"), F2)
-            put(w, r, 8, g("fx"), F4); put(w, r, 9, g("local_egp_mt"), F0); put(w, r, 10, rec.get("local_price_date", ""))
-            put(w, r, 11, g("own_after_egp_mt"), F0); put(w, r, 12, g("saving_egp_mt"), F0); put(w, r, 18, g("total_saving_egp"), F0)
-            put(w, r, 21, g("freight_egp_mt"), F0); put(w, r, 22, g("local_transport_egp_mt"), F0)
-            put(w, r, 23, "; ".join(rec.get("stale_quotes") or [])); put(w, r, 24, rec.get("reconstructed_from", ""))
-            if i == 0:
-                for col in (6, 13, 14, 15, 16, 17, 19):
-                    put(w, r, col, None)
-            else:
-                q = r - 1
-                ok = lambda *cells: "AND(" + ",".join(f"ISNUMBER({cl})" for cl in cells) + ")"
-                f(w, r, 6, f'=IF({ok(f"E{r}", f"E{q}")},E{r}-E{q},"")', _sub(g("cbot_price"), _n(p.get("cbot_price"))), S2)
-                f(w, r, 13, f'=IF({ok(f"L{r}", f"L{q}")},L{r}-L{q},"")', a.get("change"), S0)
-                f(w, r, 14, f'=IF({ok(f"G{r}", f"G{q}", f"H{q}")},-(G{r}-G{q})*H{q},"")', a.get("from_cbot"), S0)
-                f(w, r, 15, f'=IF({ok(f"G{r}", f"H{r}", f"H{q}")},-G{r}*(H{r}-H{q}),"")', a.get("from_fx"), S0)
-                f(w, r, 16, f'=IF({ok(f"I{r}", f"I{q}")},I{r}-I{q},"")', a.get("from_local"), S0)
-                f(w, r, 17, f'=IF({ok(f"M{r}", f"N{r}", f"O{r}", f"P{r}")},M{r}-N{r}-O{r}-P{r},"")', a.get("other"), S0)
-                f(w, r, 19, f'=IF({ok(f"R{r}", f"R{q}")},R{r}-R{q},"")',
-                  _sub(g("total_saving_egp"), _n(p.get("total_saving_egp"))), S0)
-            f(w, r, 20, f'=IF({"AND(ISNUMBER(L%d),ISNUMBER($L$5))" % r},L{r}-$L$5,"")', _sub(g("saving_egp_mt"), s0), S0)
-        last = 4 + len(tr)
+              f" · {len(ys)} days · yellow = input, everything else is a formula (EGP/MT unless EGP)")
+        table(w, "T_" + re.sub(r"\W", "_", cid), trail_heads(), TR_W, len(ys))
+        last = write_trail(w, 5, ys)
         tr_row = last + 2
-        put(w, tr_row, 1, "Since the first day", bold=True, fill=TOTAL_FILL)
-        for col in range(2, 21):
-            w.cell(tr_row, col).fill = PatternFill("solid", fgColor=TOTAL_FILL)
-        e0, e1 = _n(tr[0]["rec"].get("cbot_price")), _n(last_rec.get("cbot_price"))
-        f(w, tr_row, 6, f'=IF(AND(ISNUMBER(E{last}),ISNUMBER(E5)),E{last}-E5,"")', _sub(e1, e0), S2, bold=True)
-        f(w, tr_row, 13, f'=IF(AND(ISNUMBER(L{last}),ISNUMBER(L5)),L{last}-L5,"")',
-          _sub(_n(last_rec.get("saving_egp_mt")), s0), S0, bold=True)
-        for col, k in zip((14, 15, 16, 17), PARTS):
-            f(w, tr_row, col, f"=SUM({L(col)}5:{L(col)}{last})", sum(x["why"][k] for x in tr if x["why"].get(k) is not None),
-              S0, bold=True)
-        f(w, tr_row, 19, f"=SUM(S5:S{last})", sum((_sub(_n(x["rec"].get("total_saving_egp")), _n((x["prior"] or {}).get("total_saving_egp"))) or 0.0)
-                                                  for x in tr[1:]), S0, bold=True)
+        put(w, tr_row, 1, "Since the first day", bold=True)
+        for colx in range(1, len(TR_HEADS) + 1):
+            w.cell(tr_row, colx).fill = PatternFill("solid", fgColor=TOTAL_FILL)
+        f(w, tr_row, TC["Δ CBOT"], f'=IF({isn(f"H{last}", "H5")},H{last}-H5,"")', _sub(y1["cbot"], ys[0]["cbot"]), S2, bold=True)
+        f(w, tr_row, TC["Δ Sav/MT"], f'=IF({isn(f"Z{last}", "Z5")},Z{last}-Z5,"")', _sub(y1["sav"], ys[0]["sav"]), S0, bold=True)
+        for h, k in (("from CBOT", "from_cbot"), ("from FX", "from_fx"), ("from Local", "from_local"), ("Other", "other"),
+                     ("Δ Total", "d_total")):
+            cl = L(TC[h])
+            f(w, tr_row, TC[h], f"=SUM({cl}5:{cl}{last})", sum(y[k] or 0.0 for y in ys), S0, bold=True)
         put(w, tr_row + 1, 1, "The four parts add up to Δ Sav/MT on every row; their sums add up to the change since "
                               "the first day when no day is missing a price.", italic=True, color=GREY)
-        signs(w, f"F5:F{tr_row}"); signs(w, f"M5:Q{tr_row}"); signs(w, f"S5:T{tr_row}")
-        w.freeze_panes = "B5"
-        if len(tr) > 1:
+        signs(w, f"I5:I{tr_row}"); signs(w, f"AA5:AE{tr_row}"); signs(w, f"AG5:AH{tr_row}")
+        w.freeze_panes = "E5"
+        if len(ys) > 1:
             ch = LineChart()
             ch.title, ch.height, ch.width = "Sav/MT (EGP)" + tag, 7, 22
-            ch.add_data(Reference(w, min_col=12, min_row=4, max_row=last), titles_from_data=True)
-            ch.set_categories(Reference(w, min_col=1, min_row=5, max_row=last))
+            ch.add_data(Reference(w, min_col=TC["Sav/MT"], min_row=4, max_row=last), titles_from_data=True)
+            ch.set_categories(Reference(w, min_col=4, min_row=5, max_row=last))
             ch.legend = None
             w.add_chart(ch, f"A{tr_row + 3}")
 
@@ -619,4 +853,6 @@ def write_movements_excel(history, contracts, path, as_of=None, ids=None, scope_
     wb.save(path)
     store_formula_results(path, cache)
     return {"days": len(blocks), "contracts": len(trails), "open_sheets": len(sheets), "movement_rows": len(lines),
-            "rebuilt_before_entry": n_ext, "basis": "excl" if excl else "incl", "first_day": blocks[0]["date"] if blocks else "", "last_day": last_day}
+            "rebuilt_before_entry": n_ext, "basis": "excl" if excl else "incl",
+            "formulas": sum(len(v) for v in cache.values()),
+            "first_day": blocks[0]["date"] if blocks else "", "last_day": last_day}

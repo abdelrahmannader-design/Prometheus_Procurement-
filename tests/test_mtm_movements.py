@@ -148,13 +148,28 @@ class ExclTransportTests(unittest.TestCase):
             wb = openpyxl.load_workbook(fp, data_only=True)
             dm = wb["Daily Movement"]
             heads = [c.value for c in dm[4]]
-            for h in ("Sav/MT Today (excl tr.)", "Local excl tr. Today", "Our price excl tr.", "Our freight", "Local transport"):
+            for h in ("Sav/MT Today (excl tr.)", "Local Today (excl tr.)", "Our price Today (excl tr.)", "Our freight",
+                      "Local transport"):
                 self.assertIn(h, heads)
+            th = [c.value for c in wb["Contract Trail"][4]]
+            for h in ("Our price incl tr.", "Our price excl tr.", "Local incl tr.", "Local transport", "Local excl tr."):
+                self.assertIn(h, th)
             self.assertIn("EXCL TRANSPORT", dm["A2"].value)
             row = next(r for r in dm.iter_rows(min_row=5, values_only=True) if r[2] == "Contract")
             self.assertEqual((row[heads.index("Our freight")], row[heads.index("Local transport")]), (300.0, 400.0))
             bb = wb["Book by Day"]
             self.assertIn("Open MTM edge excl transport", bb.cell(6, bb.max_column).value)
+
+
+class ChainTests(unittest.TestCase):
+    def test_chain_matches_records_both_bases(self):
+        h = mv.excl_transport(ExclTransportTests().ledger(), {}, lambda c, r: 400.0)
+        for basis, recs in (("excl", h), ("incl", [mv.incl_view(r) for r in h])):
+            rows = sorted(recs, key=lambda r: (r["contract_id"], r["date"]))
+            ys = mv.chain([mv.row_inputs(r) for r in rows], basis == "excl")
+            for r, y in zip(rows, ys):
+                self.assertAlmostEqual(y["sav"], r["saving_egp_mt"], places=3)
+                self.assertAlmostEqual(y["total"], r["total_saving_egp"], places=0)
 
 
 class WorkbookTests(unittest.TestCase):
@@ -177,17 +192,38 @@ class WorkbookTests(unittest.TestCase):
             self.assertIn("A-1", wb.sheetnames)
             self.assertNotIn("B-2", wb.sheetnames)                       # closed: in the tables, no own sheet
             ws = wb["A-1"]
-            self.assertEqual(ws["A5"].value, "2026-10-30")
-            self.assertTrue(str(ws["N6"].value).startswith("=IF("))      # from CBOT is a formula
+            self.assertEqual(ws["D5"].value.date().isoformat(), "2026-10-30")
+            heads = [c.value for c in ws[4]]
+            col = lambda h: heads.index(h) + 1
+            # every derived column is a formula; only the inputs are values
+            for h in ("CIF $/MT", "Our price incl tr.", "Our price excl tr.", "Local excl tr.", "Sav/MT (incl tr.)",
+                      "Total EGP (incl tr.)", "Δ Sav/MT", "from CBOT", "from FX", "from Local", "Other", "Δ Total"):
+                self.assertTrue(str(ws.cell(6, col(h)).value).startswith("="), h)
+            self.assertEqual(ws.cell(6, col("CIF $/MT")).value, '=IF(ISNUMBER(L6),L6,IF(AND(ISNUMBER(H6),ISNUMBER(J6),'
+                                                                 'ISNUMBER(K6)),(H6+J6)*K6,""))')
             vals = openpyxl.load_workbook(fp, data_only=True)
             v = vals["A-1"]
             for r in range(6, 9):                                         # parts add up to Δ Sav/MT (stored results)
-                self.assertAlmostEqual(sum(v.cell(r, c).value for c in (14, 15, 16, 17)), v.cell(r, 13).value, places=4)
+                parts = sum(v.cell(r, col(h)).value for h in ("from CBOT", "from FX", "from Local", "Other"))
+                self.assertAlmostEqual(parts, v.cell(r, col("Δ Sav/MT")).value, places=4)
+            # the formula chain reproduces the app's own saving per tonne
+            want = {r["date"]: r["saving_egp_mt"] for r in ledger() if r["contract_id"] == "C1"}
+            for r in range(6, 9):
+                self.assertAlmostEqual(v.cell(r, col("Sav/MT (incl tr.)")).value,
+                                       want[v.cell(r, col("Date")).value.date().isoformat()], places=3)
+            wf = openpyxl.load_workbook(fp)
+            self.assertTrue(str(wf["Book by Day"]["I5"].value).startswith("=SUMIFS("))
+            self.assertTrue(str(wf["Summary"]["T11"].value).startswith("=SUMIFS("))
             bb = vals["Book by Day"]
-            self.assertEqual(bb["A5"].value, "2026-10-30")
+            self.assertEqual(bb["A5"].value.date().isoformat(), "2026-10-30")
             self.assertEqual(bb.cell(5, 5).value, 1)
             dm = vals["Daily Movement"]
-            self.assertEqual(dm["A5"].value, "2026-11-04")                # newest first
+            self.assertEqual(dm["A5"].value.date().isoformat(), "2026-11-04")   # newest first
+            # the TOTAL row of each day equals the book of that day
+            for blk in mv.day_blocks(ledger() + ext):
+                tot = next(r for r in dm.iter_rows(min_row=5, values_only=True)
+                           if r[2] == "TOTAL" and r[0].date().isoformat() == blk["date"])
+                self.assertAlmostEqual(tot[21], blk["book"]["total"], places=2)
             kinds = [dm.cell(r, 3).value for r in range(5, dm.max_row + 1) if dm.cell(r, 3).value]
             self.assertEqual(kinds.count("TOTAL"), 4)
 
