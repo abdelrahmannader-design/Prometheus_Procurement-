@@ -81,7 +81,7 @@ class WorkbookTests(unittest.TestCase):
             wf, wv = openpyxl.load_workbook(fp), openpyxl.load_workbook(fp, data_only=True)
             self.assertEqual(wf.sheetnames, list(ov.SHEETS))
             for ws in wf.worksheets:                              # nothing to scroll sideways
-                self.assertLessEqual(ws.max_column, 13, ws.title)
+                self.assertLessEqual(ws.max_column, 16, ws.title)
             fx, fv = wf["Fixed consumption"], wv["Fixed consumption"]
             # block 1: bar on row 4, terms on row 6, days from row 8
             self.assertIn("REF-C1", fx["A4"].value)
@@ -97,9 +97,9 @@ class WorkbookTests(unittest.TestCase):
             self.assertAlmostEqual(fv["F10"].value, m["cbot"][0]["usd"] + m["cbot"][1]["usd"])
             # summary reads the blocks and adds up to the engine's total
             sx, sv_ = wf["Summary"], wv["Summary"]
-            self.assertEqual(sx["K9"].value, "='Fixed consumption'!F10")
-            tot = next(r for r in range(9, 20) if str(sv_.cell(r, 1).value).startswith("Total — fixed"))
-            self.assertAlmostEqual(sv_.cell(tot, 11).value, want, places=6)
+            self.assertEqual(sx["J10"].value, "='Fixed consumption'!F10")
+            tot = next(r for r in range(10, 20) if str(sv_.cell(r, 1).value).startswith("Total — fixed"))
+            self.assertAlmostEqual(sv_.cell(tot, 10).value, want, places=6)
             self.assertEqual(sv_.cell(tot, 4).value, 2500.0)
             # open contract: day 0 after three lead days; changes are formulas
             ox, ow = wf["Open contracts"], wv["Open contracts"]
@@ -113,6 +113,77 @@ class WorkbookTests(unittest.TestCase):
             self.assertAlmostEqual(ow["J12"].value, cif * 55.53 + 435.0)
             self.assertAlmostEqual(ow["L12"].value, 14300.0 - (cif * 55.53 + 435.0))
             self.assertTrue(str(ox["J12"].value).startswith("=IF(ISNUMBER(I12)"))
+
+    def test_receiving_date_side_by_side(self):
+        import openpyxl
+        m = model()
+        win = [{"date": d, "cbot": c, "local_excl": 14800.0} for d, c in
+               (("2026-10-20", 467.75), ("2026-10-21", 459.0), ("2026-10-22", 464.25), ("2026-10-23", 999.0),
+                ("2026-10-24", 999.0), ("2026-10-25", 456.0), ("2026-10-26", 455.0), ("2026-10-27", 448.75))]
+        rc = {"C1": {"date": "2026-10-20", "vessel": "ELENI M II", "shipment": "2nd half October", "closed": "2026-10-28",
+                     "window": win, "cbot": 467.75, "local_excl": 14800.0, "contract": "REF-C1", "mt": 2000.0},
+              "C3": {"date": "2026-10-30", "vessel": "MEGAN HOPE", "cbot": 455.0, "local_excl": 15100.0, "contract": "REF-C3",
+                     "window": [{"date": "2026-10-30", "cbot": 455.0, "local_excl": 15100.0},
+                                {"date": "2026-10-31", "cbot": 447.75, "local_excl": 15200.0}]},
+              "C9": {"date": "2026-11-02", "vessel": "PHILIPPAKOS", "contract": "OPEN-9", "mt": 5000.0},
+              "C8": {"date": "", "vessel": "ALPHA TEAM", "contract": "REF-C8", "mt": 5000.0}}
+        t = dict(trail(), vessel="PHILIPPAKOS", received="2026-11-02")
+        with tempfile.TemporaryDirectory() as tmp:
+            fp = os.path.join(tmp, "ov.xlsx")
+            res = ov.write_overview(m, fp, "CORN", [t], receipts=rc, only={"C1", "C3", "C9", "C8"})
+            self.assertEqual((res["fixed_contracts"], res["unfixed_contracts"], res["open_contracts"], res["received_rows"]),
+                             (1, 1, 1, 3))                                  # C2 is left out by ``only``
+            wf, wv = openpyxl.load_workbook(fp), openpyxl.load_workbook(fp, data_only=True)
+            fx, fv = wf["Fixed consumption"], wv["Fixed consumption"]
+            self.assertIn("vessel ELENI M II", fx["A4"].value)
+            self.assertIn("received 2026-10-20 → closed 2026-10-28", fx["A4"].value)
+            # every day from the receiving date to the last pricing day; MT only on the consumption days
+            days = [fv.cell(r, 1).value.date().isoformat() for r in range(8, 16)]
+            self.assertEqual(days, [w["date"] for w in win])
+            self.assertEqual([fv.cell(r, 2).value for r in range(8, 16)], [None, None, None, 500, 500, None, None, None])
+            self.assertEqual(fv["C11"].value, 456.0)                       # a consumption day keeps the engine's CBOT
+            self.assertEqual(fx["A8"].number_format, ov.RECV_FMT)          # the receiving date is marked
+            self.assertIsNone(fv["F8"].value)                              # no tonnes that day: no saving
+            self.assertAlmostEqual(fv["D8"].value, 467.75 - (245.66 / FACTOR - 175.0))
+            self.assertEqual(fv["B16"].value, 1000.0)                      # total = the consumed tonnes
+            self.assertEqual(fx["C17"].value, '=IF(COUNT(C8:C15)>0,AVERAGE(C8:C15),"")')
+            cbs = [467.75, 459.0, 464.25, 456.0, 455.0, 456.0, 455.0, 448.75]
+            self.assertAlmostEqual(fv["C17"].value, sum(cbs) / 8)
+            # the receiving sheet: the whole contract on its receiving date
+            rx, rv = wf["Receiving date"], wv["Receiving date"]
+            rows = {rv.cell(r, 1).value: r for r in range(5, 20) if rv.cell(r, 1).value}
+            r1 = rows["REF-C1"]
+            self.assertEqual(rv.cell(r1, 2).value, "ELENI M II")
+            self.assertEqual(rx.cell(r1, 10).value, "='Fixed consumption'!C8")
+            diff = 467.75 - (245.66 / FACTOR - 175.0)
+            self.assertAlmostEqual(rv.cell(r1, 11).value, diff)
+            self.assertAlmostEqual(rv.cell(r1, 13).value, diff * FACTOR * 2000.0)
+            self.assertAlmostEqual(rv.cell(r1, 14).value, diff * FACTOR * 2000.0 * 53.58)
+            self.assertEqual(rv.cell(r1, 16).value, "Advantage")
+            r3, r9 = rows["REF-C3"], rows["OPEN-9"]
+            self.assertAlmostEqual(rv.cell(r3, 11).value, 455.0 - 446.25)   # not fixed: against the latest CBOT
+            self.assertEqual(rv.cell(r3, 16).value, "Indicative")
+            self.assertAlmostEqual(rv.cell(r9, 11).value, 449.75 - 446.0)   # open, not consumed: day 0 against now
+            self.assertEqual(rv.cell(rows["REF-C8"], 4).value, "Not received")
+            # the summary reads the receiving sheet, next to the consumption figures
+            sx, sv_ = wf["Summary"], wv["Summary"]
+            self.assertEqual(sx["O10"].value, f"='Receiving date'!M{r1}")
+            self.assertAlmostEqual(sv_["O10"].value, diff * FACTOR * 2000.0)
+            self.assertAlmostEqual(sv_["J10"].value, m["cbot"][0]["usd"] + m["cbot"][1]["usd"])
+            # not fixed: the window days carry the CIF used on the consumption day
+            uv = wv["Not fixed consumption"]
+            self.assertEqual([uv.cell(r, 1).value.date().isoformat() for r in range(8, 11)],
+                             ["2026-10-30", "2026-10-31", "2026-11-01"])
+            self.assertEqual({uv.cell(r, 8).value for r in range(8, 11)}, {246.5})
+
+    def test_merge_window(self):
+        days = [{"date": ov._d("2026-10-23"), "mt": 500.0, "cbot": 456.0, "local_excl": 1.0, "cif_used": 9.0}]
+        rv = {"date": "2026-10-22", "window": [{"date": "2026-10-22", "cbot": 464.25}, {"date": "2026-10-23", "cbot": 0.0},
+                                               {"date": "2026-10-24", "cbot": 455.0}]}
+        out = ov.merge_window(days, rv, carry=("cif_used",))
+        self.assertEqual([(d["date"].isoformat(), d["mt"], d["cbot"], d["cif_used"]) for d in out],
+                         [("2026-10-22", None, 464.25, 9.0), ("2026-10-23", 500.0, 456.0, 9.0), ("2026-10-24", None, 455.0, 9.0)])
+        self.assertEqual(ov.merge_window(days, None), days)
 
     def test_form4_fx_and_fixed_cif_hold_the_price(self):
         import openpyxl

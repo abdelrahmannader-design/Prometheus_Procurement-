@@ -27,7 +27,9 @@ F0, F2, F4 = "#,##0;-#,##0", "#,##0.00;-#,##0.00", "0.0000"
 S0, S2 = "[>=0.5]+#,##0;[<=-0.5]-#,##0;0", "[>=0.005]+#,##0.00;[<=-0.005]-#,##0.00;0.00"
 DF = "yyyy-mm-dd"
 EPOCH = dt.date(1899, 12, 30)
-SHEETS = ("Summary", "Fixed consumption", "Not fixed consumption", "Open contracts")
+SHEETS = ("Summary", "Receiving date", "Fixed consumption", "Not fixed consumption", "Open contracts")
+RECV_FILL = "E3F1E5"
+RECV_FMT = '"Received "yyyy-mm-dd'
 
 
 def _n(v):
@@ -119,17 +121,43 @@ def unfixed_blocks(model, base="CORN"):
     return blocks
 
 
+def merge_window(days, rv, carry=()):
+    """A block's consumption days plus every day of its receipt window (receiving date → last pricing
+    day before the contract was closed, or today while it is open), oldest first. A day without
+    consumption has no MT. ``carry``: per-day terms taken from the nearest consumption day."""
+    if not rv:
+        return list(days)
+    by = {d["date"]: dict(d) for d in days}
+    win = rv.get("window") or [{"date": rv.get("date"), "cbot": rv.get("cbot"), "local_excl": rv.get("local_excl")}]
+    for w in win:
+        dd = _d(w.get("date"))
+        if dd and dd not in by:
+            by[dd] = {"date": dd, "mt": None, "cbot": _n(w.get("cbot")), "local_excl": _n(w.get("local_excl"))}
+    out = [by[k] for k in sorted(by)]
+    for k in carry:
+        last = next((d.get(k) for d in out if d.get(k) is not None), None)
+        for d in out:
+            if d.get(k) is None:
+                d[k] = last
+            else:
+                last = d[k]
+    return out
+
+
 def lead_days(trading_days, ref, n=3):
     """The ``n`` trading days before ``ref`` (ISO dates, oldest first)."""
     before = sorted(d for d in set(trading_days or []) if d < ref)
     return before[-n:] if n > 0 else []
 
 
-def write_overview(model, path, base="CORN", open_trails=None, lead=3):
+def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=None, only=None):
     """Write the workbook. ``open_trails``: one dict per open contract with keys contract_id, contract,
     supplier, commodity, mt, pricing, entered, storage_start, day0 (ISO), premium, factor, fixed_cif,
     fixed_fx, fx_basis, discharge, clearance, other_fee and days: [{date, cbot, market_fx, local_excl,
-    mode}] oldest first. Returns the counts written."""
+    mode}] oldest first. ``receipts``: {contract_id: {date (ISO, '' = not received yet), vessel, shipment, cbot
+    (close on that date), local_excl, contract, supplier, mt}}: each contract is then also compared on its
+    receiving date, side by side with its consumption days. ``only``: limit to these contract ids.
+    Returns the counts written."""
     from openpyxl import Workbook
     from openpyxl.formatting.rule import CellIsRule
     from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -140,6 +168,18 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3):
     band = _n((model.get("options") or {}).get("neutral_cbot")) or 1.0
     fixed, unfixed = fixed_blocks(model, base), unfixed_blocks(model, base)
     opens = sorted(open_trails or [], key=lambda t: (t.get("day0") or "", t.get("contract") or ""), reverse=True)
+    rc = receipts or {}
+    if only is not None:
+        only = set(only)
+        fixed = [b for b in fixed if b["contract_id"] in only]
+        unfixed = [b for b in unfixed if b["contract_id"] in only]
+        opens = [t for t in opens if t.get("contract_id") in only]
+        rc = {k: v for k, v in rc.items() if k in only}
+    n_blocks = {}
+    for b in fixed + unfixed:
+        n_blocks[b["contract_id"]] = n_blocks.get(b["contract_id"], 0) + 1
+    vessel_of = lambda cid: (rc.get(cid) or {}).get("vessel") or ""
+    recv_of = lambda cid: (rc.get(cid) or {}) if _d((rc.get(cid) or {}).get("date")) else None
     as_of = model.get("as_of") or dt.date.today().isoformat()
     unit = next((b["unit"] for b in fixed if b.get("unit")), "¢/bu")
 
@@ -188,7 +228,9 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3):
         ws = wb.active if title == SHEETS[0] else wb.create_sheet(title)
         ws.title = title
         put(ws, 1, 1, text, bold=True, size=15, color=NAVY)
-        put(ws, 2, 1, sub, italic=True, color=GREY)
+        ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=len(widths))
+        put(ws, 2, 1, sub, italic=True, color=GREY, wrap=True)
+        ws.row_dimensions[2].height = 15 * max(1, -(-len(sub) // int(sum(widths) * 1.15)))
         for i, w in enumerate(widths, start=1):
             ws.column_dimensions[L(i)].width = w
         return ws
@@ -200,22 +242,32 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3):
     money = lambda v: "—" if v is None else f"{v:,.0f}"
 
     ws0 = sheet("Summary", f"{base} — CBOT fixed vs consumption", f"As of {as_of} · open and closed {base} contracts · "
-                "yellow = input, everything else is a formula", [27, 15, 20, 10, 11, 11, 11, 12, 11, 10, 12, 14, 19])
+                "consumption days and receiving date side by side · yellow = input, everything else is a formula",
+                [26, 16, 19, 10, 12, 12, 10, 10, 11, 11, 16, 12, 10, 11, 11, 16])
+    wr_ = sheet("Receiving date", f"{base} — each contract on its receiving date",
+                "Our fixed CBOT against the CBOT on the day the cargo was received (the last close before it when that day "
+                "is not a trading day), on the whole contract quantity. Not fixed = against the latest CBOT, indicative. "
+                "Positive = our price was cheaper than the market on the receiving date.",
+                [24, 15, 20, 12, 8, 12, 10, 8, 10, 10, 11, 9, 11, 13, 11, 15])
 
     # ── Fixed consumption ──
-    W = [13, 9, 11, 11, 10, 12, 12, 12, 13, 13, 17]
+    W = [20, 9, 11, 11, 10, 12, 12, 12, 13, 13, 17]
     wf = sheet("Fixed consumption", f"{base} — consumption of fixed contracts, day by day",
                "A contract's terms are shown once, above its days. Difference = CBOT on the consumption day − our fixed "
-               "CBOT: positive means our fixing was cheaper than the market that day. Local and landed cost exclude "
-               "inland transport.", W)
+               "CBOT: positive means our fixing was cheaper than the market that day. Days run from the receiving date "
+               "(green) to the last pricing day before the contract was closed; MT shows on the days the corn was used "
+               "(estimate). Weekends carry the last close. Local and landed cost exclude inland transport.", W)
     refs_fixed = []
     r = 4
     for b in fixed:
-        days = b["days"]
+        rv = recv_of(b["contract_id"])
+        days = merge_window(b["days"], rv)
         mt_tot = sum(d["mt"] or 0 for d in days)
         bar(wf, r, f"{b['contract']}  ·  {b['supplier']}  ·  {b['commodity']}  ·  "
                    f"{money(b['qty_mt'])} MT  ·  {b['futures']}  ·  {b['fix_type'] or 'Fixed'} CBOT fixing"
-                   + ("  ·  still open" if b["open"] else ""), 11)
+                   + (f"  ·  vessel {vessel_of(b['contract_id'])}" if vessel_of(b["contract_id"]) else "")
+                   + (f"  ·  received {rv['date']} → " + (f"closed {rv['closed']}" if rv.get("closed") else "still open") if rv
+                      else ("  ·  still open" if b["open"] else "")), 11)
         heads(wf, r + 1, [f"Fixed CBOT {unit}", f"Premium {unit}", "Factor to $/MT", "CIF $/MT", "FX (contract)",
                           "CIF EGP/MT", "Discharge", "Clearance", "Landed excl. transport", "Inland freight",
                           "Landed incl. transport"])
@@ -248,11 +300,11 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3):
             put(wf, q, 1, d["date"], DF, inp=True); put(wf, q, 2, d["mt"], F0, inp=True); put(wf, q, 3, d["cbot"], F2, inp=True)
             f(wf, q, 4, f'=IF({isn(f"C{q}", f"$A${t}")},C{q}-$A${t},"")', diff, S2)
             f(wf, q, 5, f'=IF(ISNUMBER(D{q}),D{q}*$C${t},"")', usd_mt, S2)
-            f(wf, q, 6, f'=IF(ISNUMBER(E{q}),E{q}*B{q},"")', usd, S0)
+            f(wf, q, 6, f'=IF({isn(f"E{q}", f"B{q}")},E{q}*B{q},"")', usd, S0)
             f(wf, q, 7, f'=IF(ISNUMBER(F{q}),F{q}*$E${t},"")', _mul(usd, b["fx"]), S0)
             put(wf, q, 8, d["local_excl"], F0, inp=True)
             f(wf, q, 9, f'=IF({isn(f"H{q}", f"$I${t}")},H{q}-$I${t},"")', spread, S0)
-            f(wf, q, 10, f'=IF(ISNUMBER(I{q}),I{q}*B{q},"")', _mul(spread, d["mt"]), S0)
+            f(wf, q, 10, f'=IF({isn(f"I{q}", f"B{q}")},I{q}*B{q},"")', _mul(spread, d["mt"]), S0)
             f(wf, q, 11, res_f(f"D{q}"), result_of(diff, band), align="center")
         d1 = d0 + len(days) - 1
         tr = d1 + 1
@@ -275,15 +327,43 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3):
         f(wf, tr, 11, res_f(f"D{tr}"), result_of(diff_t, band), bold=True, align="center")
         for c in range(1, 12):
             wf.cell(tr, c).fill = PatternFill("solid", fgColor=TOTAL_FILL)
+        rr, r_diff, r_usd, r_mt, r_spread, ri = None, None, None, None, None, None
+        if rv:
+            ri = next((i for i, d in enumerate(days) if d["date"] == _d(rv["date"])), None)
+        if ri is not None:
+            rr = d0 + ri
+            r_mt = mt_tot if n_blocks.get(b["contract_id"], 1) > 1 else (b["qty_mt"] or mt_tot)
+            r_diff = _sub(days[ri]["cbot"], fix)
+            r_usd = _mul(_mul(r_diff, b["factor"]), r_mt)
+            r_spread = _sub(days[ri]["local_excl"], landed_x)
+            wf.cell(rr, 1).number_format = RECV_FMT
+            wf.cell(rr, 1).font = Font(bold=True)
+            for c in range(1, 12):
+                wf.cell(rr, c).fill = PatternFill("solid", fgColor=RECV_FILL)
         wr = tr + 1
-        if b["win_cbot"] is not None:
+        if ri is not None and len(days) - ri > 1:
+            # the average over every day from the receiving date to the last pricing day
+            cbs = [d["cbot"] for d in days[ri:] if d["cbot"] is not None]
+            w_avg = sum(cbs) / len(cbs) if cbs else None
+            wd = _sub(w_avg, fix)
+            wf.merge_cells(start_row=wr, start_column=1, end_row=wr, end_column=2)
+            put(wf, wr, 1, "Avg CBOT, receiving date → last pricing day", italic=True, color=GREY, wrap=True)
+            wf.row_dimensions[wr].height = 30
+            f(wf, wr, 3, f'=IF(COUNT(C{rr}:C{d1})>0,AVERAGE(C{rr}:C{d1}),"")', w_avg, F2)
+            f(wf, wr, 4, f'=IF({isn(f"C{wr}", f"$A${t}")},C{wr}-$A${t},"")', wd, S2)
+            f(wf, wr, 5, f'=IF(ISNUMBER(D{wr}),D{wr}*$C${t},"")', _mul(wd, b["factor"]), S2)
+            f(wf, wr, 6, f'=IF(ISNUMBER(E{wr}),E{wr}*B{tr},"")', _mul(_mul(wd, b["factor"]), mt_tot), S0)
+            f(wf, wr, 7, f'=IF(ISNUMBER(F{wr}),F{wr}*$E${t},"")', _mul(_mul(_mul(wd, b["factor"]), mt_tot), b["fx"]), S0)
+            f(wf, wr, 11, res_f(f"D{wr}"), result_of(wd, band), align="center")
+            wf.merge_cells(start_row=wr, start_column=8, end_row=wr, end_column=10)
+            put(wf, wr, 8, f"{days[ri]['date'].isoformat()} → {days[-1]['date'].isoformat()} ({len(cbs)} days)",
+                italic=True, color=GREY, align="center")
+        elif b["win_cbot"] is not None:
             wd = _sub(b["win_cbot"], fix)
             put(wf, wr, 1, "② Avg CBOT, storage date → last consumption", italic=True, color=GREY)
-            put(wf, wr, 3, None)
-            ws_ = wf
-            ws_.merge_cells(start_row=wr, start_column=1, end_row=wr, end_column=2)
-            ws_.cell(wr, 1).alignment = Alignment(wrap_text=True, vertical="center")
-            ws_.row_dimensions[wr].height = 30
+            wf.merge_cells(start_row=wr, start_column=1, end_row=wr, end_column=2)
+            wf.cell(wr, 1).alignment = Alignment(wrap_text=True, vertical="center")
+            wf.row_dimensions[wr].height = 30
             put(wf, wr, 3, b["win_cbot"], F2, inp=True)
             f(wf, wr, 4, f'=IF({isn(f"C{wr}", f"$A${t}")},C{wr}-$A${t},"")', wd, S2)
             f(wf, wr, 5, f'=IF(ISNUMBER(D{wr}),D{wr}*$C${t},"")', _mul(wd, b["factor"]), S2)
@@ -292,9 +372,14 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3):
             f(wf, wr, 11, res_f(f"D{wr}"), result_of(wd, band), align="center")
             wf.merge_cells(start_row=wr, start_column=8, end_row=wr, end_column=10)
             put(wf, wr, 8, f"{b['win_start']} → {b['win_end']}", italic=True, color=GREY, align="center")
+        else:
+            wr = tr
         signs(wf, f"D{d0}:G{wr}"); signs(wf, f"I{d0}:J{tr}")
         refs_fixed.append({"b": b, "t": t, "d0": d0, "d1": d1, "tr": tr, "mt": mt_tot, "c_avg": c_avg, "diff": diff_t,
-                           "usd": usd_t, "fix": fix})
+                           "usd": usd_t, "fix": fix, "rr": rr, "rv": rv, "r_diff": r_diff, "r_usd": r_usd, "r_mt": r_mt,
+                           "r_spread": r_spread, "r_cbot": days[ri]["cbot"] if ri is not None else None,
+                           "first": next((d["date"] for d in days if d["mt"]), None),
+                           "last": next((d["date"] for d in reversed(days) if d["mt"]), None)})
         r = wr + 2
     if not fixed:
         put(wf, 4, 1, f"No fixed {base} contract has consumption yet.", italic=True, color=GREY)
@@ -304,14 +389,19 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3):
     wu = sheet("Not fixed consumption", f"{base} — consumption of contracts not fixed yet (indicative)",
                "Not realised: the contract has no fixed CBOT yet, so each consumption day is compared with the latest "
                "CBOT. Positive = the market was higher on the consumption day than it is now. Local and landed cost "
-               "exclude inland transport.", [13, 9, 11, 11, 10, 12, 12, 11, 13, 12, 13])
+               "exclude inland transport. Days run from the receiving date (green) to the last pricing day (today while open).",
+               [20, 9, 11, 11, 10, 12, 12, 11, 13, 12, 13])
     refs_unfixed = []
     r = 4
     for b in unfixed:
-        days = b["days"]
+        rv = recv_of(b["contract_id"])
+        days = merge_window(b["days"], rv, carry=("cif_used",))
         mt_tot = sum(d["mt"] or 0 for d in days)
         bar(wu, r, f"{b['contract']}  ·  {b['supplier']}  ·  {b['commodity']}  ·  {money(b['qty_mt'])} MT  ·  "
-                   f"{b['futures']}  ·  not fixed yet" + ("  ·  still open" if b["open"] else ""), 11)
+                   f"{b['futures']}  ·  not fixed yet"
+                   + (f"  ·  vessel {vessel_of(b['contract_id'])}" if vessel_of(b["contract_id"]) else "")
+                   + (f"  ·  received {rv['date']} → " + (f"closed {rv['closed']}" if rv.get("closed") else "still open") if rv
+                      else ("  ·  still open" if b["open"] else "")), 11)
         heads(wu, r + 1, [f"Premium {unit}", "Factor to $/MT", f"Latest CBOT {unit}", "FX (contract)", "Discharge",
                           "Clearance", "Inland freight", "Latest CBOT date", "", "", ""])
         t = r + 2
@@ -334,7 +424,7 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3):
             put(wu, q, 1, d["date"], DF, inp=True); put(wu, q, 2, d["mt"], F0, inp=True); put(wu, q, 3, d["cbot"], F2, inp=True)
             f(wu, q, 4, f'=IF({isn(f"C{q}", f"$C${t}")},C{q}-$C${t},"")', diff, S2)
             f(wu, q, 5, f'=IF(ISNUMBER(D{q}),D{q}*$B${t},"")', usd_mt, S2)
-            f(wu, q, 6, f'=IF(ISNUMBER(E{q}),E{q}*B{q},"")', usd, S0)
+            f(wu, q, 6, f'=IF({isn(f"E{q}", f"B{q}")},E{q}*B{q},"")', usd, S0)
             f(wu, q, 7, f'=IF(ISNUMBER(F{q}),F{q}*$D${t},"")', _mul(usd, b["fx"]), S0)
             put(wu, q, 8, d["cif_used"], F2, inp=True)
             f(wu, q, 9, f'=IF({isn(f"H{q}", f"$D${t}")},H{q}*$D${t}+$E${t}+$F${t},"")', landed(d), F0)
@@ -363,17 +453,50 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3):
           _sub(wavg([d["local_excl"] for d in days]), wavg([landed(d) for d in days])), S0, bold=True)
         for c in range(1, 12):
             wu.cell(tr, c).fill = PatternFill("solid", fgColor=TOTAL_FILL)
-        signs(wu, f"D{d0}:G{tr}"); signs(wu, f"K{d0}:K{tr}")
+        rr, r_diff, r_usd, r_mt, r_spread, ri = None, None, None, None, None, None
+        if rv:
+            ri = next((i for i, d in enumerate(days) if d["date"] == _d(rv["date"])), None)
+        if ri is not None:
+            rr = d0 + ri
+            r_mt = mt_tot if n_blocks.get(b["contract_id"], 1) > 1 else (b["qty_mt"] or mt_tot)
+            r_diff = _sub(days[ri]["cbot"], b["latest"])
+            r_usd = _mul(_mul(r_diff, b["factor"]), r_mt)
+            r_spread = _sub(days[ri]["local_excl"], landed(days[ri]))
+            wu.cell(rr, 1).number_format = RECV_FMT
+            wu.cell(rr, 1).font = Font(bold=True)
+            for c in range(1, 12):
+                wu.cell(rr, c).fill = PatternFill("solid", fgColor=RECV_FILL)
+        wr = tr
+        if ri is not None and len(days) - ri > 1:
+            wr = tr + 1
+            cbs = [d["cbot"] for d in days[ri:] if d["cbot"] is not None]
+            w_avg = sum(cbs) / len(cbs) if cbs else None
+            wd = _sub(w_avg, b["latest"])
+            wu.merge_cells(start_row=wr, start_column=1, end_row=wr, end_column=2)
+            put(wu, wr, 1, "Avg CBOT, receiving date → last pricing day", italic=True, color=GREY, wrap=True)
+            wu.row_dimensions[wr].height = 30
+            f(wu, wr, 3, f'=IF(COUNT(C{rr}:C{d1})>0,AVERAGE(C{rr}:C{d1}),"")', w_avg, F2)
+            f(wu, wr, 4, f'=IF({isn(f"C{wr}", f"$C${t}")},C{wr}-$C${t},"")', wd, S2)
+            f(wu, wr, 5, f'=IF(ISNUMBER(D{wr}),D{wr}*$B${t},"")', _mul(wd, b["factor"]), S2)
+            f(wu, wr, 6, f'=IF(ISNUMBER(E{wr}),E{wr}*B{tr},"")', _mul(_mul(wd, b["factor"]), mt_tot), S0)
+            f(wu, wr, 7, f'=IF(ISNUMBER(F{wr}),F{wr}*$D${t},"")', _mul(_mul(_mul(wd, b["factor"]), mt_tot), b["fx"]), S0)
+            wu.merge_cells(start_row=wr, start_column=8, end_row=wr, end_column=10)
+            put(wu, wr, 8, f"{days[ri]['date'].isoformat()} → {days[-1]['date'].isoformat()} ({len(cbs)} days)",
+                italic=True, color=GREY, align="center")
+        signs(wu, f"D{d0}:G{wr}"); signs(wu, f"K{d0}:K{tr}")
         refs_unfixed.append({"b": b, "t": t, "d0": d0, "d1": d1, "tr": tr, "mt": mt_tot, "c_avg": c_avg, "diff": diff_t,
-                             "usd": usd_t})
-        r = tr + 2
+                             "usd": usd_t, "rr": rr, "rv": rv, "r_diff": r_diff, "r_usd": r_usd, "r_mt": r_mt,
+                             "r_spread": r_spread, "r_cbot": days[ri]["cbot"] if ri is not None else None,
+                             "first": next((d["date"] for d in days if d["mt"]), None),
+                             "last": next((d["date"] for d in reversed(days) if d["mt"]), None)})
+        r = wr + 2
     if not unfixed:
         put(wu, 4, 1, f"No tonnes were consumed from a {base} contract that is not fixed yet.", italic=True, color=GREY)
     wu.freeze_panes = "A4"
 
     # ── Open contracts: CBOT and FX from a few trading days before the contract's date ──
     wo = sheet("Open contracts", f"{base} — open contracts: CBOT and FX since {lead} trading days before the contract date",
-               f"Day 0 = the earlier of the storage start and the day the contract was entered in the system; the {lead} "
+               f"Day 0 = the receiving date (for a contract not received yet: the day it was entered in the system); the {lead} "
                "grey rows above it are the trading days before. Our price and Sav/MT use today's contract terms on each "
                "day's CBOT and FX, excluding inland transport. Positive Sav/MT = cheaper than local.",
                [12, 8, 10, 10, 11, 10, 10, 11, 10, 13, 13, 12])
@@ -387,8 +510,10 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3):
         i0 = next((i for i, d in enumerate(days) if _d(d["date"]) and day0 and _d(d["date"]) >= day0), 0)
         fx_txt = tr_.get("fx_basis") or ("Form 4" if tr_.get("fixed_fx") is not None else "Market FX of the day")
         bar(wo, r, f"{tr_.get('contract')}  ·  {tr_.get('supplier') or ''}  ·  {money(_n(tr_.get('mt')))} MT  ·  "
-                   f"{tr_.get('pricing') or ''}  ·  FX: {fx_txt}  ·  entered {tr_.get('entered') or '—'}  ·  stored "
-                   f"{tr_.get('storage_start') or '—'}", 12)
+                   f"{tr_.get('pricing') or ''}  ·  FX: {fx_txt}"
+                   + (f"  ·  vessel {tr_.get('vessel')}" if tr_.get("vessel") else "")
+                   + (f"  ·  received {tr_.get('received')}" if tr_.get("received")
+                      else f"  ·  not received yet (entered {tr_.get('entered') or '—'})"), 12)
         heads(wo, r + 1, [f"Premium {unit}", "Factor to $/MT", "Fixed CIF $/MT", "Form 4 FX", "Discharge", "Clearance",
                           "Other fees", "MT", "Day 0", f"CBOT on day 0 {unit}", "Market FX on day 0", ""])
         t = r + 2
@@ -452,6 +577,101 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3):
         put(wo, 4, 1, f"No open {base} contract.", italic=True, color=GREY)
     wo.freeze_panes = "A4"
 
+    # ── Receiving date: one row per contract ──
+    heads(wr_, 4, ["Contract", "Vessel", "Shipment", "Receiving date", "MT", "Pricing", f"Fixed / latest CBOT {unit}",
+                   "Factor to $/MT", "FX (contract)", f"CBOT on receiving date {unit}", f"Difference {unit}", "USD/MT",
+                   "USD", "EGP", "Local − landed EGP/MT", "Result"])
+    lines = []
+    for kind, refs, sh in (("Fixed", refs_fixed, "Fixed consumption"), ("Not fixed", refs_unfixed, "Not fixed consumption")):
+        for x in refs:
+            if x.get("rr"):
+                lines.append((x["rv"]["date"], kind, sh, x))
+    seen = {x["b"]["contract_id"] for _d0, _k, _s, x in lines}
+    for x in refs_open:
+        cid = x["t"].get("contract_id")
+        if cid not in seen and x["t"].get("received"):
+            lines.append((x["t"]["received"], "Not fixed", "Open contracts", x))
+            seen.add(cid)
+    lines.sort(key=lambda z: z[0], reverse=True)
+    row = 5
+    for date, kind, sh, x in lines:
+        q = f"'{sh}'!"
+        if sh == "Open contracts":
+            t_, v, top, d1, z = x["t"], x["vals"], x["top"], x["d1"], x["z"]
+            cid, fac = t_.get("contract_id"), _n(t_.get("factor"))
+            fx = _n(t_.get("fixed_fx")) if _n(t_.get("fixed_fx")) is not None else v[-1]["fx"]
+            diff = _sub(v[x["i0"]]["cbot"], v[-1]["cbot"])
+            usd = _mul(_mul(diff, fac), _n(t_.get("mt")))
+            put(wr_, row, 1, t_.get("contract"), bold=True)
+            wr_.cell(row, 1).hyperlink = f"#'{sh}'!A{top - 2}"
+            f(wr_, row, 4, f"={q}I{top}", _d(t_["days"][x["i0"]]["date"]), DF)
+            f(wr_, row, 5, f"={q}H{top}", _n(t_.get("mt")), F0)
+            f(wr_, row, 7, f'=IF(ISNUMBER({q}C{d1}),{q}C{d1},"")', v[-1]["cbot"], F2)
+            f(wr_, row, 8, f"={q}B{top}", fac, F4)
+            f(wr_, row, 9, f'=IF(ISNUMBER({q}D{top}),{q}D{top},{q}F{d1})', fx, F4)
+            f(wr_, row, 10, f"={q}J{top}", v[x["i0"]]["cbot"], F2)
+            f(wr_, row, 15, f'=IF(ISNUMBER({q}L{z}),{q}L{z},"")', v[x["i0"]]["sav"], S0)
+        else:
+            b, t, rr = x["b"], x["t"], x["rr"]
+            cid, fac, fx = b["contract_id"], b["factor"], b["fx"]
+            diff, usd = x["r_diff"], x["r_usd"]
+            put(wr_, row, 1, b["contract"], bold=True)
+            wr_.cell(row, 1).hyperlink = f"#'{sh}'!A{t - 2}"
+            f(wr_, row, 4, f"={q}A{rr}", _d(x["rv"]["date"]), DF)
+            put(wr_, row, 5, x["r_mt"], F0, inp=True)
+            fixc, facc, fxc = ("A", "C", "E") if kind == "Fixed" else ("C", "B", "D")
+            f(wr_, row, 7, f"={q}{fixc}{t}", x.get("fix") if kind == "Fixed" else b["latest"], F2)
+            f(wr_, row, 8, f"={q}{facc}{t}", fac, F4)
+            f(wr_, row, 9, f"={q}{fxc}{t}", fx, F4)
+            f(wr_, row, 10, f"={q}C{rr}", x["r_cbot"], F2)
+            f(wr_, row, 15, f"={q}{'I' if kind == 'Fixed' else 'K'}{rr}", x["r_spread"], S0)
+        wr_.cell(row, 1).font = Font(bold=True, color="1F5FBF", underline="single")
+        put(wr_, row, 2, vessel_of(cid)); put(wr_, row, 3, (rc.get(cid) or {}).get("shipment") or "")
+        put(wr_, row, 6, kind, align="center")
+        f(wr_, row, 11, f'=IF({isn(f"J{row}", f"G{row}")},J{row}-G{row},"")', diff, S2, bold=True)
+        f(wr_, row, 12, f'=IF({isn(f"K{row}", f"H{row}")},K{row}*H{row},"")', _mul(diff, fac), S2)
+        f(wr_, row, 13, f'=IF({isn(f"L{row}", f"E{row}")},L{row}*E{row},"")', usd, S0, bold=True)
+        f(wr_, row, 14, f'=IF({isn(f"M{row}", f"I{row}")},M{row}*I{row},"")', _mul(usd, fx), S0)
+        if kind == "Fixed":
+            f(wr_, row, 16, res_f(f"K{row}"), result_of(diff, band), align="center")
+        else:
+            put(wr_, row, 16, "Indicative", align="center")
+        x["_rrow"] = row
+        x["_recv_usd"], x["_recv_kind"], x["_recv_mt"], x["_recv_egp"] = usd, kind, (x["r_mt"] if sh != "Open contracts" else _n(x["t"].get("mt"))), _mul(usd, fx)
+        row += 1
+    last = row - 1
+    n_recv = len(lines)
+    if lines:
+        signs(wr_, f"K5:N{last}"); signs(wr_, f"O5:O{last}")
+        row += 1
+        for kind, label in (("Fixed", "Total — fixed"), ("Not fixed", "Total — not fixed (indicative)")):
+            sel = [x for _a, k, _s, x in lines if k == kind]
+            if not sel:
+                continue
+            put(wr_, row, 1, label, bold=True)
+            f(wr_, row, 5, f'=SUMIF($F$5:$F${last},"{kind}",E5:E{last})', sum(x["_recv_mt"] or 0 for x in sel), F0, bold=True)
+            f(wr_, row, 12, f'=IF(E{row}<>0,M{row}/E{row},"")',
+              (sum(x["_recv_usd"] or 0 for x in sel) / sum(x["_recv_mt"] or 0 for x in sel)) if sum(x["_recv_mt"] or 0 for x in sel) else None, S2, bold=True)
+            f(wr_, row, 13, f'=SUMIF($F$5:$F${last},"{kind}",M5:M{last})', sum(x["_recv_usd"] or 0 for x in sel), S0, bold=True)
+            f(wr_, row, 14, f'=SUMIF($F$5:$F${last},"{kind}",N5:N{last})', sum(x["_recv_egp"] or 0 for x in sel), S0, bold=True)
+            for c in range(1, 17):
+                wr_.cell(row, c).fill = PatternFill("solid", fgColor=TOTAL_FILL)
+            signs(wr_, f"L{row}:N{row}")
+            row += 1
+    pending = [(cid, v) for cid, v in rc.items() if not _d(v.get("date"))]
+    if pending:
+        row += 1
+        put(wr_, row, 1, "Not received yet", bold=True, color=GREY)
+        row += 1
+        for cid, v in sorted(pending, key=lambda z: z[1].get("contract") or z[0]):
+            put(wr_, row, 1, v.get("contract") or cid, bold=True); put(wr_, row, 2, v.get("vessel") or "")
+            put(wr_, row, 3, v.get("shipment") or ""); put(wr_, row, 4, "Not received", italic=True, color=GREY)
+            put(wr_, row, 5, _n(v.get("mt")), F0)
+            row += 1
+    if not lines and not pending:
+        put(wr_, 5, 1, "No receiving dates were given.", italic=True, color=GREY)
+    wr_.freeze_panes = "B5"
+
     # ── Summary: one row per contract, read from the blocks ──
     notes = [
         "Fixed = our CBOT is fixed: the difference is the CBOT on each consumption day minus our fixed CBOT. "
@@ -461,60 +681,75 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3):
         "Open = CBOT and FX since the contract date are on the Open contracts sheet.",
     ]
     for i, tx in enumerate(notes):
-        ws0.merge_cells(start_row=3 + i, start_column=1, end_row=3 + i, end_column=13)
+        ws0.merge_cells(start_row=3 + i, start_column=1, end_row=3 + i, end_column=16)
         put(ws0, 3 + i, 1, tx, italic=True, color=GREY, wrap=True)
         ws0.row_dimensions[3 + i].height = 30
     put(ws0, 6, 1, f"Neutral band (± {unit})", bold=True)
     put(ws0, 6, 3, band, F2, inp=True)
     put(ws0, 6, 4, "a difference smaller than this either way is Neutral", italic=True, color=GREY)
-    hr = 8
-    heads(ws0, hr, ["Contract", "Supplier", "Status", "Consumed MT", "First day", "Last day", f"Fixed / latest CBOT {unit}",
-                    f"Avg CBOT on consumption days {unit}", f"Difference {unit}", "USD/MT", "USD", "EGP", "Result"])
+    hr = 9
+    for c0, c1, txt, fill in ((8, 11, "ON THE CONSUMPTION DAYS (estimated)", HEAD_FILL), (12, 16, "ON THE RECEIVING DATE", RECV_FILL)):
+        ws0.merge_cells(start_row=hr - 1, start_column=c0, end_row=hr - 1, end_column=c1)
+        put(ws0, hr - 1, c0, txt, bold=True, fill=fill, align="center")
+    heads(ws0, hr, ["Contract", "Vessel", "Status", "Consumed MT", "First consumption day", "Last consumption day",
+                    f"Fixed / latest CBOT {unit}", f"Avg CBOT {unit}", f"Difference {unit}", "USD", "Result",
+                    "Receiving date", f"CBOT that day {unit}", f"Difference {unit}", "USD", "Result"])
+    for c in range(12, 17):
+        ws0.cell(hr, c).fill = PatternFill("solid", fgColor=RECV_FILL)
     row = hr + 1
     spans = {}
-    for kind, refs, sh, fixcell, fxcell in (("Fixed", refs_fixed, "Fixed consumption", "A", "E"),
-                                            ("Not fixed — indicative", refs_unfixed, "Not fixed consumption", "C", "D")):
+    for kind, refs, sh, fixcell in (("Fixed", refs_fixed, "Fixed consumption", "A"),
+                                    ("Not fixed — indicative", refs_unfixed, "Not fixed consumption", "C")):
         start = row
         for x in refs:
             b, q = x["b"], f"'{sh}'!"
-            put(ws0, row, 1, b["contract"], bold=True); put(ws0, row, 2, b["supplier"]); put(ws0, row, 3, kind)
+            put(ws0, row, 1, b["contract"], bold=True); put(ws0, row, 2, vessel_of(b["contract_id"]) or b["supplier"])
+            put(ws0, row, 3, kind)
             ws0.cell(row, 1).hyperlink = f"#'{sh}'!A{x['t'] - 2}"
             ws0.cell(row, 1).font = Font(bold=True, color="1F5FBF", underline="single")
             f(ws0, row, 4, f"={q}B{x['tr']}", x["mt"], F0)
-            f(ws0, row, 5, f"={q}A{x['d0']}", b["days"][0]["date"], DF)
-            f(ws0, row, 6, f"={q}A{x['d1']}", b["days"][-1]["date"], DF)
+            put(ws0, row, 5, x["first"], DF); put(ws0, row, 6, x["last"], DF)
             f(ws0, row, 7, f"={q}{fixcell}{x['t']}", x.get("fix") if kind == "Fixed" else b["latest"], F2)
             f(ws0, row, 8, f"={q}C{x['tr']}", x["c_avg"], F2)
             f(ws0, row, 9, f"={q}D{x['tr']}", x["diff"], S2)
-            f(ws0, row, 10, f"={q}E{x['tr']}", x["usd"] / x["mt"] if x["mt"] else None, S2)
-            f(ws0, row, 11, f"={q}F{x['tr']}", x["usd"], S0)
-            f(ws0, row, 12, f"={q}G{x['tr']}", _mul(x["usd"], b["fx"]), S0)
+            f(ws0, row, 10, f"={q}F{x['tr']}", x["usd"], S0)
             if kind == "Fixed":
-                f(ws0, row, 13, f"={q}K{x['tr']}", result_of(x["diff"], band), align="center")
+                f(ws0, row, 11, f"={q}K{x['tr']}", result_of(x["diff"], band), align="center")
             else:
-                put(ws0, row, 13, "Indicative", align="center")
+                put(ws0, row, 11, "Indicative", align="center")
+            if x.get("_rrow"):
+                rq, rw = "'Receiving date'!", x["_rrow"]
+                f(ws0, row, 12, f"={rq}D{rw}", _d(x["rv"]["date"]), DF)
+                f(ws0, row, 13, f"={rq}J{rw}", x["r_cbot"], F2)
+                f(ws0, row, 14, f"={rq}K{rw}", x["r_diff"], S2)
+                f(ws0, row, 15, f"={rq}M{rw}", x["r_usd"], S0)
+                if kind == "Fixed":
+                    f(ws0, row, 16, f"={rq}P{rw}", result_of(x["r_diff"], band), align="center")
+                else:
+                    put(ws0, row, 16, "Indicative", align="center")
+            elif b["contract_id"] in rc:
+                put(ws0, row, 12, "Not received", italic=True, color=GREY)
             row += 1
         if refs:
             spans[kind] = (start, row - 1)
             put(ws0, row, 1, f"Total — {kind.lower()}", bold=True)
             f(ws0, row, 4, f"=SUM(D{start}:D{row - 1})", sum(x["mt"] for x in refs), F0, bold=True)
-            f(ws0, row, 10, f'=IF(D{row}<>0,K{row}/D{row},"")',
-              sum(x["usd"] for x in refs) / sum(x["mt"] for x in refs) if sum(x["mt"] for x in refs) else None, S2, bold=True)
-            f(ws0, row, 11, f"=SUM(K{start}:K{row - 1})", sum(x["usd"] for x in refs), S0, bold=True)
-            f(ws0, row, 12, f"=SUM(L{start}:L{row - 1})", sum(_mul(x["usd"], x["b"]["fx"]) or 0 for x in refs), S0, bold=True)
-            for c in range(1, 14):
+            f(ws0, row, 10, f"=SUM(J{start}:J{row - 1})", sum(x["usd"] for x in refs), S0, bold=True)
+            f(ws0, row, 15, f"=SUM(O{start}:O{row - 1})", sum(x.get("r_usd") or 0 for x in refs), S0, bold=True)
+            for c in range(1, 17):
                 ws0.cell(row, c).fill = PatternFill("solid", fgColor=TOTAL_FILL)
             row += 2
     if refs_open:
-        heads(ws0, row, ["Open contract", "Supplier", "Pricing", "MT", "Day 0", "Last day", f"CBOT on day 0 {unit}",
-                         f"CBOT now {unit}", f"Δ CBOT since day 0 {unit}", "Δ market FX since day 0",
-                         "Our price now excl. tr.", "Local now excl. tr.", "Sav/MT now excl. tr."])
+        heads(ws0, row, ["Open contract", "Vessel", "Pricing", "MT", "Day 0 (receiving date)", "Last day",
+                         f"CBOT on day 0 {unit}", f"CBOT now {unit}", f"Δ CBOT since day 0 {unit}",
+                         "Δ market FX since day 0", "Our price now excl. tr.", "Local now excl. tr.", "Sav/MT now excl. tr."])
         row += 1
         o0 = row
         for x in refs_open:
             tr_, q, v = x["t"], "'Open contracts'!", x["vals"]
-            put(ws0, row, 1, tr_.get("contract"), bold=True); put(ws0, row, 2, tr_.get("supplier") or "")
-            put(ws0, row, 3, tr_.get("pricing") or "")
+            put(ws0, row, 1, tr_.get("contract"), bold=True)
+            put(ws0, row, 2, tr_.get("vessel") or tr_.get("supplier") or "")
+            put(ws0, row, 3, (tr_.get("pricing") or "") + ("" if tr_.get("received") or not rc else " · not received"))
             ws0.cell(row, 1).hyperlink = f"#'Open contracts'!A{x['top'] - 2}"
             ws0.cell(row, 1).font = Font(bold=True, color="1F5FBF", underline="single")
             f(ws0, row, 4, f"={q}H{x['top']}", _n(tr_.get("mt")), F0)
@@ -530,7 +765,7 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3):
             row += 1
         signs(ws0, f"I{o0}:J{row - 1}"); signs(ws0, f"M{o0}:M{row - 1}")
     for a, b_ in spans.values():
-        signs(ws0, f"I{a}:L{b_ + 1}")
+        signs(ws0, f"I{a}:J{b_ + 1}"); signs(ws0, f"N{a}:O{b_ + 1}")
     ws0.freeze_panes = f"B{hr + 1}"
 
     for s in wb.worksheets:
@@ -545,5 +780,5 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3):
     store_formula_results(path, cache)
     return {"base": base, "fixed_contracts": len(refs_fixed), "fixed_days": sum(len(x["b"]["days"]) for x in refs_fixed),
             "unfixed_contracts": len(refs_unfixed), "unfixed_days": sum(len(x["b"]["days"]) for x in refs_unfixed),
-            "open_contracts": len(refs_open), "formulas": sum(len(v) for v in cache.values()),
+            "open_contracts": len(refs_open), "received_rows": n_recv, "formulas": sum(len(v) for v in cache.values()),
             "fixed_usd": sum(x["usd"] for x in refs_fixed), "fixed_mt": sum(x["mt"] for x in refs_fixed)}
