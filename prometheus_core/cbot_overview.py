@@ -144,6 +144,34 @@ def merge_window(days, rv, carry=()):
     return out
 
 
+def lots_by_day(lots):
+    """{date: tonnes priced that day} from a contract's pricing lots ([{date, mt}])."""
+    out = {}
+    for x in lots or []:
+        d, mt = _d(x.get("date")), _n(x.get("mt") if x.get("mt") is not None else x.get("qty_mt"))
+        if d and mt:
+            out[d] = out.get(d, 0.0) + mt
+    return out
+
+
+MONTHS = {"JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6, "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11,
+          "DEC": 12}
+
+
+def first_notice_day(futures):
+    """First notice day of a CBOT grain future such as 'DEC-26': the last business day of the month
+    before the contract month (weekends only; exchange holidays are not known here). None if unreadable."""
+    try:
+        mon, yy = str(futures).upper().replace(" ", "").split("-")[:2]
+        month, year = MONTHS[mon[:3]], 2000 + int(yy[-2:])
+    except (KeyError, ValueError):
+        return None
+    d = dt.date(year, month, 1) - dt.timedelta(days=1)
+    while d.weekday() >= 5:
+        d -= dt.timedelta(days=1)
+    return d
+
+
 def lead_days(trading_days, ref, n=3):
     """The ``n`` trading days before ``ref`` (ISO dates, oldest first)."""
     before = sorted(d for d in set(trading_days or []) if d < ref)
@@ -224,11 +252,11 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
         ws.conditional_formatting.add(ref, CellIsRule(operator="lessThan", formula=["0"], font=Font(color=RED)))
         ws.conditional_formatting.add(ref, CellIsRule(operator="greaterThan", formula=["0"], font=Font(color=GREEN)))
 
-    def sheet(title, text, sub, widths):
+    def sheet(title, text, sub, widths, span=None):
         ws = wb.active if title == SHEETS[0] else wb.create_sheet(title)
         ws.title = title
         put(ws, 1, 1, text, bold=True, size=15, color=NAVY)
-        ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=len(widths))
+        ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=span or len(widths))
         put(ws, 2, 1, sub, italic=True, color=GREY, wrap=True)
         ws.row_dimensions[2].height = 15 * max(1, -(-len(sub) // int(sum(widths) * 1.15)))
         for i, w in enumerate(widths, start=1):
@@ -243,39 +271,67 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
 
     ws0 = sheet("Summary", f"{base} — CBOT fixed vs consumption", f"As of {as_of} · open and closed {base} contracts · "
                 "consumption days and receiving date side by side · yellow = input, everything else is a formula",
-                [26, 16, 19, 10, 12, 12, 10, 10, 11, 11, 16, 12, 10, 11, 11, 16])
+                [26, 16, 19, 10, 12, 12, 10, 10, 11, 11, 16, 12, 10, 11, 11, 16, 10, 11, 12, 10, 10, 11, 10, 12, 11], span=16)
     wr_ = sheet("Receiving date", f"{base} — each contract on its receiving date",
                 "Our fixed CBOT against the CBOT on the day the cargo was received (the last close before it when that day "
                 "is not a trading day), on the whole contract quantity. Not fixed = against the latest CBOT, indicative. "
                 "Positive = our price was cheaper than the market on the receiving date.",
                 [24, 15, 20, 12, 8, 12, 10, 8, 10, 10, 11, 9, 11, 13, 11, 15])
 
-    # ── Fixed consumption ──
-    W = [20, 9, 11, 11, 10, 12, 12, 12, 13, 13, 17]
-    wf = sheet("Fixed consumption", f"{base} — consumption of fixed contracts, day by day",
-               "A contract's terms are shown once, above its days. Difference = CBOT on the consumption day − our fixed "
-               "CBOT: positive means our fixing was cheaper than the market that day. Days run from the receiving date "
-               "(green) to the last pricing day before the contract was closed; MT shows on the days the corn was used "
-               "(estimate). Weekends carry the last close. Local and landed cost exclude inland transport.", W)
+    # ── Fixed consumption: pricing days and the market from the receiving date to the window end ──
+    W = [20, 9, 11, 11, 10, 12, 12, 12, 13, 13, 17, 11, 12, 12]
+    FXD = "[>=0.00005]+0.0000;[<=-0.00005]-0.0000;0.0000"
+    fut = next((b["futures"] for b in fixed if b.get("futures")), "")
+    fnd = first_notice_day(fut)
+    wf = sheet("Fixed consumption", f"{base} — fixed contracts: pricing days and the market from receiving date to today",
+               "A contract's terms are shown once, above its days. MT = the lots priced on that date. Days run from the "
+               "receiving date (green) to the window end date in C3 (today while the pricing window is open; your pricing "
+               "deadline once it passes), trading days only. Difference = CBOT that day − our fixed CBOT: positive means "
+               "our fixing was cheaper than the market that day. Market FX = the day's market rate against our contract "
+               "FX: positive = our contract FX was cheaper than the market (EGP/MT effect = difference × CIF $/MT). Local "
+               "and landed cost exclude inland transport.", W)
+    wf.row_dimensions[2].height = 75
+    w_end = _d(as_of) or dt.date.today()
+    put(wf, 3, 1, "Window end date", bold=True)
+    put(wf, 3, 3, w_end, DF, inp=True)
+    put(wf, 3, 4, "today while the pricing window is open" + (
+        f" · set it to your {fut} pricing deadline once that passes" + (f" (first notice day {fnd.day} {fnd:%b %Y} at the latest)" if fnd else "")
+        if fut else " · set it to your pricing deadline once that passes") + ", then add the new days below each contract",
+        italic=True, color=GREY)
+    WE = "'Fixed consumption'!$C$3"
     refs_fixed = []
     r = 4
     for b in fixed:
         rv = recv_of(b["contract_id"])
-        days = merge_window(b["days"], rv)
+        lots = lots_by_day((rc.get(b["contract_id"]) or {}).get("lots"))
+        if rv and rv.get("pricing_window"):
+            days = [{"date": _d(w["date"]), "mt": None, "cbot": _n(w.get("cbot")), "local_excl": _n(w.get("local_excl")),
+                     "fx": _n(w.get("market_fx")), "trading": bool(w.get("trading", True))} for w in rv["pricing_window"]]
+        else:
+            days = [dict(d, mt=None, fx=None, trading=True) for d in merge_window(b["days"], rv)]
+        have = {d["date"] for d in days}
+        for ld in sorted(lots):                      # a lot priced on a day that is not listed gets its own row
+            if ld not in have:
+                days.append({"date": ld, "mt": None, "cbot": None, "local_excl": None, "fx": None, "trading": True})
+        days.sort(key=lambda d: d["date"])
+        for d in days:
+            d["mt"] = lots.get(d["date"])
         mt_tot = sum(d["mt"] or 0 for d in days)
         bar(wf, r, f"{b['contract']}  ·  {b['supplier']}  ·  {b['commodity']}  ·  "
                    f"{money(b['qty_mt'])} MT  ·  {b['futures']}  ·  {b['fix_type'] or 'Fixed'} CBOT fixing"
                    + (f"  ·  vessel {vessel_of(b['contract_id'])}" if vessel_of(b["contract_id"]) else "")
                    + (f"  ·  received {rv['date']} → " + (f"closed {rv['closed']}" if rv.get("closed") else "still open") if rv
-                      else ("  ·  still open" if b["open"] else "")), 11)
+                      else ("  ·  still open" if b["open"] else "")), 14)
         heads(wf, r + 1, [f"Fixed CBOT {unit}", f"Premium {unit}", "Factor to $/MT", "CIF $/MT", "FX (contract)",
                           "CIF EGP/MT", "Discharge", "Clearance", "Landed excl. transport", "Inland freight",
                           "Landed incl. transport"])
         t = r + 2
         cif_egp = _mul(b["cif"], b["fx"])
         landed_x = (cif_egp + (b["discharge"] or 0) + (b["clearance"] or 0)) if cif_egp is not None else None
-        if b["fix_type"] == "Implied" and None not in (b["cif"], b["factor"], b["premium"]):
-            f(wf, t, 1, f"=D{t}/C{t}-B{t}", b["cif"] / b["factor"] - b["premium"], F2, bold=True)
+        implied = b["fix_type"] == "Implied" and None not in (b["cif"], b["factor"], b["premium"])
+        fix = b["cif"] / b["factor"] - b["premium"] if implied else b["fix"]
+        if implied:
+            f(wf, t, 1, f"=D{t}/C{t}-B{t}", fix, F2, bold=True)
         else:
             put(wf, t, 1, b["fix"], F2, inp=True, bold=True)
         put(wf, t, 2, b["premium"], F2, inp=True); put(wf, t, 3, b["factor"], F4, inp=True)
@@ -286,10 +342,9 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
         put(wf, t, 10, b["freight"], F0, inp=True)
         f(wf, t, 11, f'=IF({isn(f"I{t}", f"J{t}")},I{t}+J{t},"")',
           (landed_x + b["freight"]) if None not in (landed_x, b["freight"]) else None, F0)
-        fix = b["cif"] / b["factor"] - b["premium"] if b["fix_type"] == "Implied" and None not in (b["cif"], b["factor"], b["premium"]) else b["fix"]
-        heads(wf, r + 3, ["Consumption date", "MT", f"CBOT that day {unit}", f"CBOT − fixed {unit}", "USD/MT",
+        heads(wf, r + 3, ["Date", "MT priced", f"CBOT that day {unit}", f"CBOT − fixed {unit}", "USD/MT",
                           "Saving USD", "Saving EGP", "Local excl. transport", "Local − landed EGP/MT",
-                          "Local spread EGP", "Result"])
+                          "Local spread EGP", "Result", "Market FX", "Market FX − contract FX", "FX effect EGP/MT"])
         d0 = r + 4
         for i, d in enumerate(days):
             q = d0 + i
@@ -297,7 +352,8 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
             usd_mt = _mul(diff, b["factor"])
             usd = _mul(usd_mt, d["mt"])
             spread = _sub(d["local_excl"], landed_x)
-            put(wf, q, 1, d["date"], DF, inp=True); put(wf, q, 2, d["mt"], F0, inp=True); put(wf, q, 3, d["cbot"], F2, inp=True)
+            dfx = _sub(d["fx"], b["fx"])
+            put(wf, q, 1, d["date"], DF, inp=True); put(wf, q, 2, d["mt"], F0); put(wf, q, 3, d["cbot"], F2, inp=True)
             f(wf, q, 4, f'=IF({isn(f"C{q}", f"$A${t}")},C{q}-$A${t},"")', diff, S2)
             f(wf, q, 5, f'=IF(ISNUMBER(D{q}),D{q}*$C${t},"")', usd_mt, S2)
             f(wf, q, 6, f'=IF({isn(f"E{q}", f"B{q}")},E{q}*B{q},"")', usd, S0)
@@ -306,15 +362,18 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
             f(wf, q, 9, f'=IF({isn(f"H{q}", f"$I${t}")},H{q}-$I${t},"")', spread, S0)
             f(wf, q, 10, f'=IF({isn(f"I{q}", f"B{q}")},I{q}*B{q},"")', _mul(spread, d["mt"]), S0)
             f(wf, q, 11, res_f(f"D{q}"), result_of(diff, band), align="center")
+            put(wf, q, 12, d["fx"], F4, inp=True)
+            f(wf, q, 13, f'=IF({isn(f"L{q}", f"$E${t}")},L{q}-$E${t},"")', dfx, FXD)
+            f(wf, q, 14, f'=IF({isn(f"M{q}", f"$D${t}")},M{q}*$D${t},"")', _mul(dfx, b["cif"]), S0)
         d1 = d0 + len(days) - 1
         tr = d1 + 1
         wavg = lambda k: (sum((d[k] or 0) * (d["mt"] or 0) for d in days if d[k] is not None)
                           / sum(d["mt"] or 0 for d in days if d[k] is not None)) if any(d[k] is not None and d["mt"] for d in days) else None
-        c_avg, l_avg = wavg("cbot"), wavg("local_excl")
+        c_avg, l_avg = (wavg("cbot"), wavg("local_excl")) if mt_tot else (None, None)
         diff_t = _sub(c_avg, fix)
         usd_t = sum(_mul(_mul(_sub(d["cbot"], fix), b["factor"]), d["mt"]) or 0 for d in days)
         spread_t = sum(_mul(_sub(d["local_excl"], landed_x), d["mt"]) or 0 for d in days)
-        put(wf, tr, 1, "Total / avg", bold=True)
+        put(wf, tr, 1, "Total / avg — lots priced", bold=True)
         f(wf, tr, 2, f"=SUM(B{d0}:B{d1})", mt_tot, F0, bold=True)
         f(wf, tr, 3, f'=IF(B{tr}<>0,SUMPRODUCT(B{d0}:B{d1},C{d0}:C{d1})/B{tr},"")', c_avg, F2, bold=True)
         f(wf, tr, 4, f'=IF({isn(f"C{tr}", f"$A${t}")},C{tr}-$A${t},"")', diff_t, S2, bold=True)
@@ -325,77 +384,102 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
         f(wf, tr, 9, f'=IF(B{tr}<>0,J{tr}/B{tr},"")', spread_t / mt_tot if mt_tot else None, S0, bold=True)
         f(wf, tr, 10, f"=SUM(J{d0}:J{d1})", spread_t, S0, bold=True)
         f(wf, tr, 11, res_f(f"D{tr}"), result_of(diff_t, band), bold=True, align="center")
-        for c in range(1, 12):
+        for c in range(1, 15):
             wf.cell(tr, c).fill = PatternFill("solid", fgColor=TOTAL_FILL)
+            wf.cell(tr, c).font = Font(bold=True)
+
+        # the receiving-date row, and the window: trading days from it up to the window end date
         rr, r_diff, r_usd, r_mt, r_spread, ri = None, None, None, None, None, None
         if rv:
             ri = next((i for i, d in enumerate(days) if d["date"] == _d(rv["date"])), None)
         if ri is not None:
             rr = d0 + ri
-            r_mt = mt_tot if n_blocks.get(b["contract_id"], 1) > 1 else (b["qty_mt"] or mt_tot)
+            r_mt = mt_tot if n_blocks.get(b["contract_id"], 1) > 1 and mt_tot else (b["qty_mt"] or mt_tot)
             r_diff = _sub(days[ri]["cbot"], fix)
             r_usd = _mul(_mul(r_diff, b["factor"]), r_mt)
             r_spread = _sub(days[ri]["local_excl"], landed_x)
             wf.cell(rr, 1).number_format = RECV_FMT
             wf.cell(rr, 1).font = Font(bold=True)
-            for c in range(1, 12):
+            for c in range(1, 15):
                 wf.cell(rr, c).fill = PatternFill("solid", fgColor=RECV_FILL)
-        wr = tr + 1
-        if ri is not None and len(days) - ri > 1:
-            # the average over every day from the receiving date to the last pricing day
-            cbs = [d["cbot"] for d in days[ri:] if d["cbot"] is not None]
-            w_avg = sum(cbs) / len(cbs) if cbs else None
-            wd = _sub(w_avg, fix)
-            wf.merge_cells(start_row=wr, start_column=1, end_row=wr, end_column=2)
-            put(wf, wr, 1, "Avg CBOT, receiving date → last pricing day", italic=True, color=GREY, wrap=True)
-            wf.row_dimensions[wr].height = 30
-            f(wf, wr, 3, f'=IF(COUNT(C{rr}:C{d1})>0,AVERAGE(C{rr}:C{d1}),"")', w_avg, F2)
-            f(wf, wr, 4, f'=IF({isn(f"C{wr}", f"$A${t}")},C{wr}-$A${t},"")', wd, S2)
-            f(wf, wr, 5, f'=IF(ISNUMBER(D{wr}),D{wr}*$C${t},"")', _mul(wd, b["factor"]), S2)
-            f(wf, wr, 6, f'=IF(ISNUMBER(E{wr}),E{wr}*B{tr},"")', _mul(_mul(wd, b["factor"]), mt_tot), S0)
-            f(wf, wr, 7, f'=IF(ISNUMBER(F{wr}),F{wr}*$E${t},"")', _mul(_mul(_mul(wd, b["factor"]), mt_tot), b["fx"]), S0)
-            f(wf, wr, 11, res_f(f"D{wr}"), result_of(wd, band), align="center")
-            wf.merge_cells(start_row=wr, start_column=8, end_row=wr, end_column=10)
-            put(wf, wr, 8, f"{days[ri]['date'].isoformat()} → {days[-1]['date'].isoformat()} ({len(cbs)} days)",
-                italic=True, color=GREY, align="center")
-        elif b["win_cbot"] is not None:
-            wd = _sub(b["win_cbot"], fix)
-            put(wf, wr, 1, "② Avg CBOT, storage date → last consumption", italic=True, color=GREY)
-            wf.merge_cells(start_row=wr, start_column=1, end_row=wr, end_column=2)
-            wf.cell(wr, 1).alignment = Alignment(wrap_text=True, vertical="center")
-            wf.row_dimensions[wr].height = 30
-            put(wf, wr, 3, b["win_cbot"], F2, inp=True)
-            f(wf, wr, 4, f'=IF({isn(f"C{wr}", f"$A${t}")},C{wr}-$A${t},"")', wd, S2)
-            f(wf, wr, 5, f'=IF(ISNUMBER(D{wr}),D{wr}*$C${t},"")', _mul(wd, b["factor"]), S2)
-            f(wf, wr, 6, f'=IF(ISNUMBER(E{wr}),E{wr}*B{tr},"")', _mul(_mul(wd, b["factor"]), mt_tot), S0)
-            f(wf, wr, 7, f'=IF(ISNUMBER(F{wr}),F{wr}*$E${t},"")', _mul(_mul(_mul(wd, b["factor"]), mt_tot), b["fx"]), S0)
-            f(wf, wr, 11, res_f(f"D{wr}"), result_of(wd, band), align="center")
-            wf.merge_cells(start_row=wr, start_column=8, end_row=wr, end_column=10)
-            put(wf, wr, 8, f"{b['win_start']} → {b['win_end']}", italic=True, color=GREY, align="center")
-        else:
-            wr = tr
-        signs(wf, f"D{d0}:G{wr}"); signs(wf, f"I{d0}:J{tr}")
+        a_i = next((i for i, d in enumerate(days) if i >= (ri or 0) and d["trading"]), ri or 0)
+        a0 = d0 + a_i
+        win = [d for d in days[a_i:] if d["date"] <= w_end]
+        cbs = [d["cbot"] for d in win if d["cbot"] is not None]
+        fxs = [d["fx"] for d in win if d["fx"] is not None]
+        RA, RC, RL = f"A{a0}:A{d1}", f"C{a0}:C{d1}", f"L{a0}:L{d1}"
+        inwin = f'COUNTIFS({RA},"<="&{WE})'
+        wr, lo, hi, pc = tr + 1, tr + 2, tr + 3, tr + 4
+        labels = {wr: "Avg CBOT, receiving date → window end", lo: "Lowest in window (CBOT · FX)",
+                  hi: "Highest in window (CBOT · FX)", pc: "Trading days cheaper than our fixing"}
+        for row_, text in labels.items():
+            wf.merge_cells(start_row=row_, start_column=1, end_row=row_, end_column=2)
+            put(wf, row_, 1, text, italic=True, color=GREY, wrap=True)
+            wf.merge_cells(start_row=row_, start_column=8, end_row=row_, end_column=10)
+        wf.row_dimensions[wr].height = 30
+        wf.row_dimensions[pc].height = 28.35
+        w_avg = sum(cbs) / len(cbs) if cbs else None
+        wd = _sub(w_avg, fix)
+        f(wf, wr, 3, f'=IFERROR(AVERAGEIFS({RC},{RA},"<="&{WE}),"")', w_avg, F2)
+        f(wf, wr, 4, f'=IF({isn(f"C{wr}", f"$A${t}")},C{wr}-$A${t},"")', wd, S2)
+        f(wf, wr, 5, f'=IF(ISNUMBER(D{wr}),D{wr}*$C${t},"")', _mul(wd, b["factor"]), S2)
+        f(wf, wr, 6, f'=IF(ISNUMBER(E{wr}),E{wr}*B{tr},"")', _mul(_mul(wd, b["factor"]), mt_tot), S0)
+        f(wf, wr, 7, f'=IF(ISNUMBER(F{wr}),F{wr}*$E${t},"")', _mul(_mul(_mul(wd, b["factor"]), mt_tot), b["fx"]), S0)
+        f(wf, wr, 8, f'=IF({inwin}>0,TEXT(A{a0},"yyyy-mm-dd")&" → "&TEXT(MIN({WE},MAX({RA})),"yyyy-mm-dd")&" ("&{inwin}&" trading days)","")',
+          (f"{win[0]['date'].isoformat()} → {min(w_end, days[-1]['date']).isoformat()} ({len(win)} trading days)" if win else None),
+          italic=True, color=GREY, align="center")
+        f(wf, wr, 11, res_f(f"D{wr}"), result_of(wd, band), align="center")
+        fx_avg = sum(fxs) / len(fxs) if fxs else None
+        f(wf, wr, 12, f'=IFERROR(AVERAGEIFS({RL},{RA},"<="&{WE}),"")', fx_avg, F4)
+        for row_, fn, vals_c, vals_f in ((lo, "MINIFS", min(cbs) if cbs else None, min(fxs) if fxs else None),
+                                         (hi, "MAXIFS", max(cbs) if cbs else None, max(fxs) if fxs else None)):
+            f(wf, row_, 3, f'=IF({inwin}>0,_xlfn.{fn}({RC},{RA},"<="&{WE}),"")', vals_c if win else None, F2)
+            f(wf, row_, 4, f'=IF({isn(f"C{row_}", f"$A${t}")},C{row_}-$A${t},"")', _sub(vals_c, fix) if win else None, S2)
+            on = next((d["date"] for d in days[a_i:] if d["cbot"] == vals_c), None) if (win and vals_c is not None) else None
+            f(wf, row_, 8, f'=IF(ISNUMBER(C{row_}),"CBOT on "&TEXT(INDEX({RA},MATCH(C{row_},{RC},0)),"yyyy-mm-dd"),"")',
+              f"CBOT on {on.isoformat()}" if on else None, italic=True, color=GREY, align="center")
+            f(wf, row_, 12, f'=IF({inwin}>0,_xlfn.{fn}({RL},{RA},"<="&{WE}),"")', (vals_f if fxs else 0) if win else None, F4)
+        for row_ in (wr, lo, hi):
+            lv = {wr: fx_avg, lo: (min(fxs) if fxs else 0) if win else None, hi: (max(fxs) if fxs else 0) if win else None}[row_]
+            f(wf, row_, 13, f'=IF({isn(f"L{row_}", f"$E${t}")},L{row_}-$E${t},"")', _sub(lv, b["fx"]), FXD)
+            f(wf, row_, 14, f'=IF({isn(f"M{row_}", f"$D${t}")},M{row_}*$D${t},"")', _mul(_sub(lv, b["fx"]), b["cif"]), S0)
+        f(wf, pc, 3, f'=IF({inwin}>0,COUNTIFS({RC},"<"&$A${t},{RA},"<="&{WE})/{inwin},"")',
+          (sum(1 for d in win if d["cbot"] is not None and fix is not None and d["cbot"] < fix) / len(win)) if win else None, "0%")
+        put(wf, pc, 8, "CBOT below our fixing · 0% = we fixed at the low", italic=True, color=GREY, align="center")
+        f(wf, pc, 12, f'=IF({inwin}>0,COUNTIFS({RL},"<"&$E${t},{RA},"<="&{WE})/{inwin},"")',
+          (sum(1 for d in win if d["fx"] is not None and b["fx"] is not None and d["fx"] < b["fx"]) / len(win)) if win else None, "0%")
+        wf.merge_cells(start_row=pc, start_column=13, end_row=pc, end_column=14)
+        put(wf, pc, 13, "← days market FX < ours", italic=True, color=GREY, align="center")
+        signs(wf, f"D{d0}:G{pc}"); signs(wf, f"I{d0}:J{tr}"); signs(wf, f"M{d0}:N{hi}")
         refs_fixed.append({"b": b, "t": t, "d0": d0, "d1": d1, "tr": tr, "mt": mt_tot, "c_avg": c_avg, "diff": diff_t,
                            "usd": usd_t, "fix": fix, "rr": rr, "rv": rv, "r_diff": r_diff, "r_usd": r_usd, "r_mt": r_mt,
                            "r_spread": r_spread, "r_cbot": days[ri]["cbot"] if ri is not None else None,
-                           "first": next((d["date"] for d in days if d["mt"]), None),
-                           "last": next((d["date"] for d in reversed(days) if d["mt"]), None)})
-        r = wr + 2
+                           "first": b["days"][0]["date"] if b["days"] else None,
+                           "last": b["days"][-1]["date"] if b["days"] else None,
+                           "wr": wr, "lo": lo, "hi": hi, "pc": pc,
+                           "w": {"avg": w_avg, "diff": wd, "usd": _mul(_mul(wd, b["factor"]), mt_tot),
+                                 "lo": min(cbs) if (cbs and win) else None, "hi": max(cbs) if (cbs and win) else None,
+                                 "pct": (sum(1 for d in win if d["cbot"] is not None and fix is not None and d["cbot"] < fix) / len(win)) if win else None,
+                                 "fx": fx_avg, "dfx": _sub(fx_avg, b["fx"]), "fx_egp": _mul(_sub(fx_avg, b["fx"]), b["cif"])}})
+        r = pc + 2
     if not fixed:
         put(wf, 4, 1, f"No fixed {base} contract has consumption yet.", italic=True, color=GREY)
-    wf.freeze_panes = "A4"
 
     # ── Not fixed consumption ──
-    wu = sheet("Not fixed consumption", f"{base} — consumption of contracts not fixed yet (indicative)",
-               "Not realised: the contract has no fixed CBOT yet, so each consumption day is compared with the latest "
-               "CBOT. Positive = the market was higher on the consumption day than it is now. Local and landed cost "
-               "exclude inland transport. Days run from the receiving date (green) to the last pricing day (today while open).",
+    wu = sheet("Not fixed consumption", f"{base} — contracts not fixed yet (indicative)",
+               "Not realised: the contract has no fixed CBOT yet, so each day is compared with the latest CBOT. "
+               "MT = the lots priced on that date. Positive = the market was higher that day than it is now. Local and "
+               "landed cost exclude inland transport. Days run from the receiving date (green) to the last pricing day "
+               "(today while open).",
                [20, 9, 11, 11, 10, 12, 12, 11, 13, 12, 13])
     refs_unfixed = []
     r = 4
     for b in unfixed:
         rv = recv_of(b["contract_id"])
         days = merge_window(b["days"], rv, carry=("cif_used",))
+        lots = lots_by_day((rc.get(b["contract_id"]) or {}).get("lots"))
+        for d in days:
+            d["mt"] = lots.get(d["date"])
         mt_tot = sum(d["mt"] or 0 for d in days)
         bar(wu, r, f"{b['contract']}  ·  {b['supplier']}  ·  {b['commodity']}  ·  {money(b['qty_mt'])} MT  ·  "
                    f"{b['futures']}  ·  not fixed yet"
@@ -410,7 +494,7 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
         put(wu, t, 5, b["discharge"], F0, inp=True); put(wu, t, 6, b["clearance"], F0, inp=True)
         put(wu, t, 7, b["freight"], F0, inp=True)
         put(wu, t, 8, (b["latest_date"] + (" · live" if b["latest_live"] else "")).strip(" ·"))
-        heads(wu, r + 3, ["Consumption date", "MT", f"CBOT that day {unit}", f"CBOT − latest {unit}", "USD/MT",
+        heads(wu, r + 3, ["Date", "MT priced", f"CBOT that day {unit}", f"CBOT − latest {unit}", "USD/MT",
                           "Indicative USD", "Indicative EGP", "CIF used $/MT", "Landed excl. transport",
                           "Local excl. transport", "Local − landed EGP/MT"])
         d0 = r + 4
@@ -421,7 +505,7 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
             diff = _sub(d["cbot"], b["latest"])
             usd_mt = _mul(diff, b["factor"])
             usd = _mul(usd_mt, d["mt"])
-            put(wu, q, 1, d["date"], DF, inp=True); put(wu, q, 2, d["mt"], F0, inp=True); put(wu, q, 3, d["cbot"], F2, inp=True)
+            put(wu, q, 1, d["date"], DF, inp=True); put(wu, q, 2, d["mt"], F0); put(wu, q, 3, d["cbot"], F2, inp=True)
             f(wu, q, 4, f'=IF({isn(f"C{q}", f"$C${t}")},C{q}-$C${t},"")', diff, S2)
             f(wu, q, 5, f'=IF(ISNUMBER(D{q}),D{q}*$B${t},"")', usd_mt, S2)
             f(wu, q, 6, f'=IF({isn(f"E{q}", f"B{q}")},E{q}*B{q},"")', usd, S0)
@@ -437,8 +521,9 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
             if any(v is not None and d["mt"] for v, d in zip(vals, days)) else None
         c_avg = wavg([d["cbot"] for d in days])
         diff_t = _sub(c_avg, b["latest"])
+        b_first, b_last = b["days"][0]["date"], b["days"][-1]["date"]
         usd_t = sum(_mul(_mul(_sub(d["cbot"], b["latest"]), b["factor"]), d["mt"]) or 0 for d in days)
-        put(wu, tr, 1, "Total / avg", bold=True)
+        put(wu, tr, 1, "Total / avg — lots priced", bold=True)
         f(wu, tr, 2, f"=SUM(B{d0}:B{d1})", mt_tot, F0, bold=True)
         f(wu, tr, 3, f'=IF(B{tr}<>0,SUMPRODUCT(B{d0}:B{d1},C{d0}:C{d1})/B{tr},"")', c_avg, F2, bold=True)
         f(wu, tr, 4, f'=IF({isn(f"C{tr}", f"$C${t}")},C{tr}-$C${t},"")', diff_t, S2, bold=True)
@@ -487,8 +572,7 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
         refs_unfixed.append({"b": b, "t": t, "d0": d0, "d1": d1, "tr": tr, "mt": mt_tot, "c_avg": c_avg, "diff": diff_t,
                              "usd": usd_t, "rr": rr, "rv": rv, "r_diff": r_diff, "r_usd": r_usd, "r_mt": r_mt,
                              "r_spread": r_spread, "r_cbot": days[ri]["cbot"] if ri is not None else None,
-                             "first": next((d["date"] for d in days if d["mt"]), None),
-                             "last": next((d["date"] for d in reversed(days) if d["mt"]), None)})
+                             "first": b_first, "last": b_last})
         r = wr + 2
     if not unfixed:
         put(wu, 4, 1, f"No tonnes were consumed from a {base} contract that is not fixed yet.", italic=True, color=GREY)
@@ -688,12 +772,16 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
     put(ws0, 6, 3, band, F2, inp=True)
     put(ws0, 6, 4, "a difference smaller than this either way is Neutral", italic=True, color=GREY)
     hr = 9
-    for c0, c1, txt, fill in ((8, 11, "ON THE CONSUMPTION DAYS (estimated)", HEAD_FILL), (12, 16, "ON THE RECEIVING DATE", RECV_FILL)):
+    for c0, c1, txt, fill in ((8, 11, "ON THE PRICING DAYS (lots priced)", HEAD_FILL), (12, 16, "ON THE RECEIVING DATE", RECV_FILL),
+                              (17, 25, "PRICING WINDOW: RECEIVING DATE → WINDOW END (trading days)", HEAD_FILL)):
         ws0.merge_cells(start_row=hr - 1, start_column=c0, end_row=hr - 1, end_column=c1)
         put(ws0, hr - 1, c0, txt, bold=True, fill=fill, align="center")
-    heads(ws0, hr, ["Contract", "Vessel", "Status", "Consumed MT", "First consumption day", "Last consumption day",
-                    f"Fixed / latest CBOT {unit}", f"Avg CBOT {unit}", f"Difference {unit}", "USD", "Result",
-                    "Receiving date", f"CBOT that day {unit}", f"Difference {unit}", "USD", "Result"])
+    heads(ws0, hr, ["Contract", "Vessel", "Status", "MT priced", "First consumption day (estimate)",
+                    "Last consumption day (estimate)", f"Fixed / latest CBOT {unit}", f"Avg CBOT {unit}",
+                    f"Difference {unit}", "USD", "Result", "Receiving date", f"CBOT that day {unit}", f"Difference {unit}",
+                    "USD", "Result", f"Avg CBOT {unit}", f"Difference {unit}", "USD on lots priced", f"Lowest CBOT {unit}",
+                    f"Highest CBOT {unit}", "Days cheaper than our fixing", "Avg market FX", "Market FX − contract FX",
+                    "FX effect EGP/MT"])
     for c in range(12, 17):
         ws0.cell(hr, c).fill = PatternFill("solid", fgColor=RECV_FILL)
     row = hr + 1
@@ -729,6 +817,15 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
                     put(ws0, row, 16, "Indicative", align="center")
             elif b["contract_id"] in rc:
                 put(ws0, row, 12, "Not received", italic=True, color=GREY)
+            if kind == "Fixed" and x.get("wr"):
+                w = x["w"]
+                for col, cell, val, fmt in ((17, f"C{x['wr']}", w["avg"], F2), (18, f"D{x['wr']}", w["diff"], S2),
+                                            (19, f"F{x['wr']}", w["usd"], S0), (20, f"C{x['lo']}", w["lo"], F2),
+                                            (21, f"C{x['hi']}", w["hi"], F2), (22, f"C{x['pc']}", w["pct"], "0%"),
+                                            (23, f"L{x['wr']}", w["fx"], F4),
+                                            (24, f"M{x['wr']}", w["dfx"], "[>=0.00005]+0.0000;[<=-0.00005]-0.0000;0.0000"),
+                                            (25, f"N{x['wr']}", w["fx_egp"], S0)):
+                    f(ws0, row, col, f"={q}{cell}", val, fmt)
             row += 1
         if refs:
             spans[kind] = (start, row - 1)
@@ -736,8 +833,11 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
             f(ws0, row, 4, f"=SUM(D{start}:D{row - 1})", sum(x["mt"] for x in refs), F0, bold=True)
             f(ws0, row, 10, f"=SUM(J{start}:J{row - 1})", sum(x["usd"] for x in refs), S0, bold=True)
             f(ws0, row, 15, f"=SUM(O{start}:O{row - 1})", sum(x.get("r_usd") or 0 for x in refs), S0, bold=True)
-            for c in range(1, 17):
+            if kind == "Fixed":
+                f(ws0, row, 19, f"=SUM(S{start}:S{row - 1})", sum((x.get("w") or {}).get("usd") or 0 for x in refs), S0, bold=True)
+            for c in range(1, 26 if kind == "Fixed" else 17):
                 ws0.cell(row, c).fill = PatternFill("solid", fgColor=TOTAL_FILL)
+                ws0.cell(row, c).font = Font(bold=True)
             row += 2
     if refs_open:
         heads(ws0, row, ["Open contract", "Vessel", "Pricing", "MT", "Day 0 (receiving date)", "Last day",
@@ -764,8 +864,10 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
             f(ws0, row, 13, f'=IF(ISNUMBER({q}L{x["d1"]}),{q}L{x["d1"]},"")', v[-1]["sav"], S0)
             row += 1
         signs(ws0, f"I{o0}:J{row - 1}"); signs(ws0, f"M{o0}:M{row - 1}")
-    for a, b_ in spans.values():
+    for kind_, (a, b_) in spans.items():
         signs(ws0, f"I{a}:J{b_ + 1}"); signs(ws0, f"N{a}:O{b_ + 1}")
+        if kind_ == "Fixed":
+            signs(ws0, f"R{a}:S{b_ + 1}"); signs(ws0, f"X{a}:Y{b_}")
     ws0.freeze_panes = f"B{hr + 1}"
 
     for s in wb.worksheets:
@@ -775,6 +877,8 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
         s.page_setup.fitToWidth, s.page_setup.fitToHeight = 1, 0
         s.oddFooter.center.text = "&A · page &P of &N"
         s.sheet_view.showGridLines = False
+    ws0.sheet_state = "hidden"            # kept for the links and totals; the Receiving date sheet opens first
+    wb.active = wb.index(wr_)
     wb.calculation.fullCalcOnLoad = True
     wb.save(path)
     store_formula_results(path, cache)
