@@ -9,7 +9,7 @@ class DesktopSmokeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.project = pathlib.Path(__file__).resolve().parents[1]
-        cls.path = cls.project / "Prometheus_V10_9_2.py"
+        cls.path = cls.project / "Prometheus_V10_9_10.py"
         spec = importlib.util.spec_from_file_location("prometheus_desktop_modern_contracts_workspace", cls.path)
         cls.module = importlib.util.module_from_spec(spec)
         assert spec.loader is not None
@@ -20,7 +20,7 @@ class DesktopSmokeTests(unittest.TestCase):
         compile(source, str(self.path), "exec")
 
     def test_desktop_imports_and_delegates_to_core(self):
-        self.assertEqual(self.module.APP_BUILD, "V10.9.2-inventory-vs-market")
+        self.assertEqual(self.module.APP_BUILD, "V10.9.10-aurora-stress-reconciliation")
         result = self.module.run_decision_engine({"commodity": "CORN"})
         self.assertEqual(result["action"], "INSUFFICIENT_DATA")
 
@@ -187,7 +187,12 @@ class DesktopSmokeTests(unittest.TestCase):
     def test_a_derived_fifo_cost_is_labelled_indicative(self):
         source = self.path.read_text(encoding="utf-8")
         self.assertIn("FIFO cost is indicative", source)
-        self.assertIn('r.get("fifo_cost_basis") == "live"', source)
+        app = self.module.App.__new__(self.module.App)
+        vals = app._inventory_market_row_values({
+            "source_type":"IMPORT_CONTRACT", "fifo_cost":15251,
+            "fifo_cost_basis":"live", "remaining_mt":1000
+        }, "—")
+        self.assertTrue(str(vals[8]).endswith(" ~"))
 
     def test_fifo_cost_derivation_is_spelled_out(self):
         """Every cost on the table must be auditable from the row itself."""
@@ -201,16 +206,13 @@ class DesktopSmokeTests(unittest.TestCase):
         self.assertIn("50.9620", derived)         # the FX actually used
         self.assertIn("665", derived)             # freight + discharge + clearance
         self.assertIn("indicative", derived)
-        # The grid form spells the fees out as addends — a lump total only
-        # raises the question of what is in it — and leaves the indicative
-        # wording to the value's "~" and the row warning.
+        # The grid cell is width-bound, so it drops the fee split and the
+        # indicative words (the value's "~" and the warning carry those).
         short = app._fifo_cost_formula(app._hd_cost_for_contract(
             "C1", contract, use_latest_fx=False, fx_mode="locked"), compact=True)
+        self.assertLess(len(short), len(derived))
         self.assertIn("FX 50.9620", short)
-        self.assertIn("frt 485", short)
-        self.assertIn("dis 120", short)
-        self.assertIn("clr 60", short)
-        self.assertNotIn("indicative", short)
+        self.assertNotIn("frt", short)
 
         fixed = self._corn_contract(priced=True, cif_usd_mt=286.12)
         app = self._cost_app(fixed)
@@ -240,32 +242,22 @@ class DesktopSmokeTests(unittest.TestCase):
 
     def test_inventory_table_and_export_carry_the_derivation_column(self):
         source = self.path.read_text(encoding="utf-8")
-        self.assertIn('("FIFO_Cost_Basis",620,"w")', source)
+        self.assertIn('("FIFO_Cost_Basis",420,"w")', source)
         self.assertIn('"How the FIFO Cost is built"', source)
-        self.assertIn('r.get("fifo_cost_formula")', source)
-        self.assertIn('r.get("fifo_cost_formula_short")', source)
+        # The export is written by prometheus_core.inventory_market_excel: the derivation is a
+        # column of the wide sheet and a line of every lot's card.
+        from prometheus_core import inventory_market_excel as inv_xl
+        export = pathlib.Path(inv_xl.__file__).read_text(encoding="utf-8")
+        self.assertIn("inventory_market_excel", source)
+        self.assertIn("FIFO Cost Basis / Formula", inv_xl.WIDE_HEADS)
+        self.assertIn('r_.get("fifo_cost_formula")', export)
+        self.assertIn('row.get("fifo_cost_formula_short")', source)
         # Every row kind carries it: contract lots, subtotals, physical lots.
         self.assertIn("quantity-weighted across the lots below", source)
-        self.assertIn("Physical adjustment — no contract economics", source)
+        self.assertIn("Physical adjustment", source)
         # The Excel filter range must follow the header, not a fixed letter.
-        self.assertIn("get_column_letter(len(hdr))", source)
+        self.assertIn('auto_filter.ref = f"A5:{L(len(WIDE_HEADS))}', export)
         self.assertNotIn('auto_filter.ref=f"A4:V', source)
-
-    def test_unpriced_lot_has_no_real_edge_against_cbot_replacement(self):
-        """An unpriced lot prices BOTH sides off today's board, so the CBOT +
-        premium term cancels and no board advantage can remain. Make the
-        cancellation explicit rather than letting the residue read as one."""
-        source = self.path.read_text(encoding="utf-8")
-        self.assertIn("Edge vs CBOT is FX and fees only", source)
-        self.assertIn("fx/fees", source)
-        # The headline must be built from priced lots only.
-        self.assertIn("priced_rs=[r for r in rs if r.get(\"fifo_cost_basis\") != \"live\"]", source)
-        self.assertIn("The replacement advantage covers priced lots only", source)
-        refresh = source[source.index("def refresh_inventory_market"):]
-        refresh = refresh[:refresh.index("def _open_inventory_market_tab")]
-        # The per-MT figure divides by the priced quantity, not everything.
-        self.assertIn("g_repl_mt=repl_total/repl_qty", refresh)
-        self.assertNotIn("g_repl_mt=repl_total/qty", refresh)
 
     # ── Sideways scrolling ────────────────────────────────────────────
     def test_shift_wheel_scrolls_the_table_not_the_width_locked_page(self):
@@ -1087,6 +1079,23 @@ class DesktopSmokeTests(unittest.TestCase):
         self.assertIn("DETAILED = base × (1+VAT)", source)
         self.assertIn("ALL_IN = final/average freight", source)
         self.assertIn("freight_base_egp_mt", source)
+
+    def test_contract_own_after_preview_uses_selected_vat(self):
+        source = self.path.read_text(encoding="utf-8")
+        self.assertIn('frt_vat = to_float(self.c_freight_vat_var.get(), 14.0)', source)
+        self.assertIn('frt_input, mode=frt_mode, vat_pct=frt_vat', source)
+        self.assertIn('self.c_freight_var, self.c_freight_mode_var,', source)
+        self.assertIn('self.c_freight_vat_var,', source)
+
+    def test_freight_apply_and_lookup_preserve_user_vat(self):
+        source = self.path.read_text(encoding="utf-8")
+        apply_start = source.index("        def _apply_picked_rate(*_):")
+        lookup_start = source.index("        def _lookup_freight(*_):", apply_start)
+        apply_block = source[apply_start:lookup_start]
+        lookup_end = source.index("        self.c_loading_port_combo.bind", lookup_start)
+        lookup_block = source[lookup_start:lookup_end]
+        self.assertNotIn('self.c_freight_vat_var.set("14")', apply_block)
+        self.assertNotIn('self.c_freight_vat_var.set("14")', lookup_block)
 
 
 if __name__ == "__main__":

@@ -85,6 +85,22 @@ def our_fixing(diff, band):
             else "In line with the average")
 
 
+def vs_market(diff, band):
+    """Our fixing against the market of one day: ``diff`` = that day's CBOT − our fixing."""
+    if diff is None:
+        return ""
+    return ("We fixed below the market" if diff >= band else "We fixed above the market" if diff <= -band
+            else "In line with the market")
+
+
+def fix_now(diff, band):
+    """A contract not fixed yet: ``diff`` = the CBOT on its receiving date − the latest CBOT."""
+    if diff is None:
+        return ""
+    return ("Cheaper to fix now (indicative)" if diff >= band else "Dearer to fix now (indicative)" if diff <= -band
+            else "About the same now (indicative)")
+
+
 def fixed_blocks(model, base="CORN"):
     """Consumption of fixed contracts, grouped so that every block has one set of terms.
 
@@ -301,9 +317,10 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
                 [26, 16, 19, 10, 12, 12, 10, 10, 11, 11, 16, 12, 10, 11, 11, 16, 10, 11, 12, 10, 10, 11, 10, 12, 11], span=16)
     wr_ = sheet("Receiving date", f"{base} — each contract on its receiving date",
                 "Our fixed CBOT against the CBOT on the day the cargo was received (the last close before it when that day "
-                "is not a trading day), on the whole contract quantity. Not fixed = against the latest CBOT, indicative. "
-                "Positive = our price was cheaper than the market on the receiving date.",
-                [24, 15, 20, 12, 8, 12, 10, 8, 10, 10, 11, 9, 11, 13, 11, 15])
+                "is not a trading day), on the whole contract quantity. GREEN = we fixed below the market of that day (we "
+                "paid less than the market); RED = we fixed above it. A contract not fixed yet is compared with the latest "
+                "CBOT instead: green = it is cheaper to fix now than it was on the receiving date (indicative).",
+                [24, 15, 20, 12, 8, 12, 10, 8, 10, 10, 11, 9, 11, 13, 11, 31])
 
     # ── Fixed consumption: pricing days and the market from the receiving date to the window end ──
     W = [20, 9, 11, 11, 10, 12, 12, 12, 13, 13, 26, 11, 12, 12]
@@ -721,8 +738,8 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
 
     # ── Receiving date: one row per contract ──
     heads(wr_, 4, ["Contract", "Vessel", "Shipment", "Receiving date", "MT", "Pricing", f"Fixed / latest CBOT {unit}",
-                   "Factor to $/MT", "FX (contract)", f"CBOT on receiving date {unit}", f"Difference {unit}", "USD/MT",
-                   "USD", "EGP", "Local − landed EGP/MT", "Result"])
+                   "Factor to $/MT", "FX (contract)", f"CBOT on receiving date {unit}", f"Market − our fixing {unit}", "USD/MT",
+                   "USD", "EGP", "Local − landed EGP/MT", "In words"])
     lines = []
     for kind, refs, sh in (("Fixed", refs_fixed, "Fixed consumption"), ("Not fixed", refs_unfixed, "Not fixed consumption")):
         for x in refs:
@@ -775,9 +792,12 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
         f(wr_, row, 13, f'=IF({isn(f"L{row}", f"E{row}")},L{row}*E{row},"")', usd, S0, bold=True)
         f(wr_, row, 14, f'=IF({isn(f"M{row}", f"I{row}")},M{row}*I{row},"")', _mul(usd, fx), S0)
         if kind == "Fixed":
-            f(wr_, row, 16, res_f(f"K{row}"), result_of(diff, band), align="center")
+            f(wr_, row, 16, f'=IF(ISNUMBER(K{row}),IF(K{row}>={BAND},"We fixed below the market",IF(K{row}<=-{BAND},'
+                            f'"We fixed above the market","In line with the market")),"")', vs_market(diff, band), align="center")
         else:
-            put(wr_, row, 16, "Indicative", align="center")
+            f(wr_, row, 16, f'=IF(ISNUMBER(K{row}),IF(K{row}>={BAND},"Cheaper to fix now (indicative)",IF(K{row}<=-{BAND},'
+                            f'"Dearer to fix now (indicative)","About the same now (indicative)")),"")', fix_now(diff, band),
+              align="center")
         x["_rrow"] = row
         x["_recv_usd"], x["_recv_kind"], x["_recv_mt"], x["_recv_egp"] = usd, kind, (x["r_mt"] if sh != "Open contracts" else _n(x["t"].get("mt"))), _mul(usd, fx)
         row += 1
@@ -785,6 +805,9 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
     n_recv = len(lines)
     if lines:
         signs(wr_, f"K5:N{last}"); signs(wr_, f"O5:O{last}")
+        for test, col_ in ((f'OR(LEFT($P5,14)="We fixed below",LEFT($P5,7)="Cheaper")', GREEN),
+                           (f'OR(LEFT($P5,14)="We fixed above",LEFT($P5,6)="Dearer")', RED)):
+            wr_.conditional_formatting.add(f"P5:P{last}", FormulaRule(formula=[test], font=Font(color=col_, bold=True)))
         row += 1
         for kind, label in (("Fixed", "Total — fixed"), ("Not fixed", "Total — not fixed (indicative)")):
             sel = [x for _a, k, _s, x in lines if k == kind]
@@ -869,10 +892,7 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
                 f(ws0, row, 13, f"={rq}J{rw}", x["r_cbot"], F2)
                 f(ws0, row, 14, f"={rq}K{rw}", x["r_diff"], S2)
                 f(ws0, row, 15, f"={rq}M{rw}", x["r_usd"], S0)
-                if kind == "Fixed":
-                    f(ws0, row, 16, f"={rq}P{rw}", result_of(x["r_diff"], band), align="center")
-                else:
-                    put(ws0, row, 16, "Indicative", align="center")
+                f(ws0, row, 16, f"={rq}P{rw}", (vs_market if kind == "Fixed" else fix_now)(x["r_diff"], band), align="center")
             elif b["contract_id"] in rc:
                 put(ws0, row, 12, "Not received", italic=True, color=GREY)
             if kind == "Fixed" and x.get("wr"):

@@ -191,10 +191,12 @@ class WorkbookTests(unittest.TestCase):
             self.assertEqual(rx.cell(r1, 10).value, "='Fixed consumption'!C8")
             self.assertAlmostEqual(rv.cell(r1, 11).value, 470.0 - fix)
             self.assertAlmostEqual(rv.cell(r1, 13).value, (470.0 - fix) * FACTOR * 2000.0)
-            self.assertEqual(rv.cell(r1, 16).value, "Advantage")
+            self.assertEqual(rv.cell(r1, 16).value, "We fixed below the market")   # said in words, not 'Advantage'
+            self.assertEqual(rx.cell(4, 11).value, "Market − our fixing ¢/bu")
             r3, r9 = rows["REF-C3"], rows["OPEN-9"]
             self.assertAlmostEqual(rv.cell(r3, 11).value, 455.0 - 446.25)   # not fixed: against the latest CBOT
-            self.assertEqual(rv.cell(r3, 16).value, "Indicative")
+            self.assertEqual(rv.cell(r3, 16).value, "Cheaper to fix now (indicative)")
+            self.assertEqual(rv.cell(r9, 16).value, "Cheaper to fix now (indicative)")
             self.assertAlmostEqual(rv.cell(r9, 11).value, 449.75 - 446.0)   # open, not consumed: day 0 against now
             self.assertEqual(rv.cell(rows["REF-C8"], 4).value, "Not received")
             # the summary reads both, and the pricing window
@@ -217,6 +219,10 @@ class WorkbookTests(unittest.TestCase):
         self.assertEqual(ov.day_point(9.0, 1.0, ov.LOW_TAG), ov.LOW_TAG)
         self.assertEqual([ov.our_fixing(d, 1.0) for d in (3.0, 0.0, -3.0)],
                          ["We fixed below the average", "In line with the average", "We fixed above the average"])
+        self.assertEqual([ov.vs_market(d, 1.0) for d in (3.0, 0.0, -3.0)],
+                         ["We fixed below the market", "In line with the market", "We fixed above the market"])
+        self.assertEqual([ov.fix_now(d, 1.0) for d in (3.0, 0.0, -3.0)],
+                         ["Cheaper to fix now (indicative)", "About the same now (indicative)", "Dearer to fix now (indicative)"])
 
     def test_lots_and_first_notice_day(self):
         self.assertEqual(ov.lots_by_day([{"date": "2026-10-28", "mt": 508.02}, {"date": "2026-10-28", "qty_mt": 508.02},
