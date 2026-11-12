@@ -157,6 +157,32 @@ def unfixed_blocks(model, base="CORN"):
     return blocks
 
 
+def received_unfixed_blocks(model, receipts, base="CORN", skip=()):
+    """Blocks for contracts that are received (a receiving date in ``receipts``) and not fixed, but have no
+    consumption yet: their days come from the receipt window, compared with the latest CBOT."""
+    live = ((model.get("live_cbot") or {}).get(base) or {})
+    latest, l_time = _n(live.get("price")), str(live.get("time") or "")[:10]
+    out = []
+    for c in model.get("contracts") or []:
+        cid = c.get("id")
+        rv = (receipts or {}).get(cid) or {}
+        if (cid in skip or c.get("base") != base or not _d(rv.get("date"))
+                or str(c.get("pricing_status") or "").upper() == "PRICED" or (c.get("fix") or {}).get("fixed")):
+            continue
+        fac = _n((c.get("fix") or {}).get("factor"))
+        prem = _n(c.get("premium"))
+        cif = ((latest + prem) * fac) if None not in (latest, prem, fac) else None
+        out.append({"key": (cid, "received"), "contract_id": cid, "contract": c.get("contract") or cid,
+                    "supplier": c.get("supplier") or "", "commodity": c.get("commodity") or "", "qty_mt": _n(c.get("qty_mt")),
+                    "open": bool(c.get("is_open")), "premium": prem, "factor": fac, "latest": latest, "latest_date": l_time,
+                    "latest_live": bool(live), "fx": _n(c.get("fx")), "discharge": _n(c.get("discharge_egp_mt")),
+                    "clearance": _n(c.get("clearance_egp_mt")), "freight": _n(c.get("freight_egp_mt")),
+                    "futures": (((c.get("contract_month") or {}).get("code") if isinstance(c.get("contract_month"), dict)
+                                 else c.get("contract_month")) or c.get("futures_month") or ""), "days": [],
+                    "seed_cif": cif})
+    return out
+
+
 def merge_window(days, rv, carry=()):
     """A block's consumption days plus every day of its receipt window (receiving date → last pricing
     day before the contract was closed, or today while it is open), oldest first. A day without
@@ -239,6 +265,9 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
         unfixed = [b for b in unfixed if b["contract_id"] in only]
         opens = [t for t in opens if t.get("contract_id") in only]
         rc = {k: v for k, v in rc.items() if k in only}
+    extra = received_unfixed_blocks(model, rc, base, skip={b["contract_id"] for b in fixed + unfixed})
+    unfixed = sorted(unfixed + extra, key=lambda b: (b["days"][0]["date"] if b["days"] else _d((rc.get(b["contract_id"]) or {}).get("date"))) or dt.date.min,
+                     reverse=True)
     n_blocks = {}
     for b in fixed + unfixed:
         n_blocks[b["contract_id"]] = n_blocks.get(b["contract_id"], 0) + 1
@@ -549,6 +578,9 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
     for b in unfixed:
         rv = recv_of(b["contract_id"])
         days = merge_window(b["days"], rv, carry=("cif_used",))
+        if not b["days"] and b.get("seed_cif") is not None:
+            for d in days:
+                d["cif_used"] = b["seed_cif"]
         lots = lots_by_day((rc.get(b["contract_id"]) or {}).get("lots"))
         for d in days:
             d["mt"] = lots.get(d["date"])
@@ -594,7 +626,7 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
             if any(v is not None and d["mt"] for v, d in zip(vals, days)) else None
         c_avg = wavg([d["cbot"] for d in days])
         diff_t = _sub(c_avg, b["latest"])
-        b_first, b_last = b["days"][0]["date"], b["days"][-1]["date"]
+        b_first, b_last = (b["days"][0]["date"], b["days"][-1]["date"]) if b["days"] else (None, None)
         usd_t = sum(_mul(_mul(_sub(d["cbot"], b["latest"]), b["factor"]), d["mt"]) or 0 for d in days)
         put(wu, tr, 1, "Total — lots priced", bold=True)
         f(wu, tr, 2, f"=SUM(B{d0}:B{d1})", mt_tot, F0, bold=True)

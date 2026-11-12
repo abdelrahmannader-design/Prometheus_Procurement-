@@ -232,6 +232,34 @@ class WorkbookTests(unittest.TestCase):
         self.assertEqual(ov.first_notice_day("MAR-27").isoformat(), "2027-02-26")
         self.assertIsNone(ov.first_notice_day("rolling"))
 
+    def test_received_contract_without_consumption_is_listed_as_not_fixed(self):
+        import openpyxl
+        m = model()
+        m["live_cbot"] = {"CORN": {"price": 446.25, "time": "2026-11-11 14:03"}}
+        m["contracts"].append({"id": "C7", "contract": "460/20050340", "base": "CORN", "supplier": "ADM",
+                               "commodity": "CORN-BRZ", "qty_mt": 2000.0, "is_open": True, "pricing_status": "UNPRICED",
+                               "premium": 190.0, "fix": {"factor": FACTOR, "fixed": False}, "fx": 53.97,
+                               "discharge_egp_mt": 245.63, "clearance_egp_mt": 200.0, "freight_egp_mt": 343.98,
+                               "contract_month": {"code": "DEC-26", "year": 2026}, "futures_month": "DEC"})
+        win = [{"date": "2026-11-10", "cbot": 441.25, "local_excl": 14300.0},
+               {"date": "2026-11-11", "cbot": 446.25, "local_excl": 14300.0}]
+        rc = {"C7": {"date": "2026-11-10", "vessel": "ALPHA TEAM", "window": win, "contract": "460/20050340", "mt": 2000.0}}
+        with tempfile.TemporaryDirectory() as tmp:
+            fp = os.path.join(tmp, "ov.xlsx")
+            res = ov.write_overview(m, fp, "CORN", [], receipts=rc, only={"C7"})
+            self.assertEqual((res["unfixed_contracts"], res["received_rows"]), (1, 1))
+            wv = openpyxl.load_workbook(fp, data_only=True)
+            uv = wv["Not fixed consumption"]
+            self.assertIn("460/20050340", uv["A4"].value)
+            self.assertIn("DEC-26", uv["A4"].value)
+            self.assertEqual(uv["C6"].value, 446.25)                              # compared with the latest CBOT
+            self.assertEqual([uv.cell(r, 1).value.date().isoformat() for r in (8, 9)], ["2026-11-10", "2026-11-11"])
+            self.assertAlmostEqual(uv["H8"].value, (446.25 + 190.0) * FACTOR)     # CIF at the latest CBOT
+            self.assertAlmostEqual(uv["D8"].value, 441.25 - 446.25)
+            rv = wv["Receiving date"]
+            self.assertEqual((rv["A5"].value, rv["P5"].value), ("460/20050340", "Dearer to fix now (indicative)"))
+            self.assertAlmostEqual(rv["M5"].value, (441.25 - 446.25) * FACTOR * 2000.0)
+
     def test_merge_window(self):
         days = [{"date": ov._d("2026-10-23"), "mt": 500.0, "cbot": 456.0, "local_excl": 1.0, "cif_used": 9.0}]
         rv = {"date": "2026-10-22", "window": [{"date": "2026-10-22", "cbot": 464.25}, {"date": "2026-10-23", "cbot": 0.0},
