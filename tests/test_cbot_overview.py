@@ -94,7 +94,11 @@ class WorkbookTests(unittest.TestCase):
             self.assertEqual(fx["D8"].value, '=IF(AND(ISNUMBER(C8),ISNUMBER($A$6)),C8-$A$6,"")')
             r0 = m["cbot"][0]
             self.assertAlmostEqual(fv["D8"].value, r0["diff"]); self.assertAlmostEqual(fv["F8"].value, r0["usd"])
-            self.assertAlmostEqual(fv["G8"].value, r0["egp"]); self.assertEqual(fv["K8"].value, "Advantage")
+            self.assertAlmostEqual(fv["G8"].value, r0["egp"])
+            # a day above our fixing is a dearer day to price, not an advantage; the lowest day is the best one
+            self.assertEqual((fv["K8"].value, fv["K9"].value), (ov.HIGH_TAG, ov.LOW_TAG))
+            self.assertEqual(fx["D7"].value, "CBOT that day vs our fixing ¢/bu")
+            self.assertEqual(fx["K7"].value, "That day as a pricing point")
             self.assertAlmostEqual(fv["I8"].value, 14900.0 - (245.66 * 53.58 + 425.0))
             self.assertEqual(fx["F10"].value, "=SUM(F8:F9)")
             self.assertAlmostEqual(fv["F10"].value, m["cbot"][0]["usd"] + m["cbot"][1]["usd"])
@@ -146,7 +150,7 @@ class WorkbookTests(unittest.TestCase):
             fx, fv = wf["Fixed consumption"], wv["Fixed consumption"]
             self.assertIn("vessel ELENI M II", fx["A4"].value)
             self.assertIn("received 2026-10-17 → closed 2026-10-28", fx["A4"].value)
-            self.assertEqual([c.value for c in fx[7]][11:], ["Market FX", "Market FX − contract FX", "FX effect EGP/MT"])
+            self.assertEqual([c.value for c in fx[7]][11:], ["Market FX", "Market FX vs contract FX", "FX effect EGP/MT"])
             # the receiving date, then the trading days; MT on the days lots were priced
             self.assertEqual([fv.cell(r, 1).value.date().isoformat() for r in range(8, 15)], [w["date"] for w in pw])
             self.assertEqual(fx["A8"].number_format, ov.RECV_FMT)
@@ -163,6 +167,17 @@ class WorkbookTests(unittest.TestCase):
             self.assertEqual(fv["H16"].value, "2026-10-19 → 2026-10-26 (6 trading days)")
             self.assertIn("_xlfn.MINIFS(C9:C14", fx["C17"].value)
             self.assertEqual((fv["C17"].value, fv["H17"].value), (448.75, "CBOT on 2026-10-26"))
+            # each day as a pricing point: green words for cheaper days, the low and the high named
+            self.assertEqual([fv.cell(r, 11).value for r in range(8, 15)],
+                             ["Dearer than our fixing", ov.HIGH_TAG, "Dearer than our fixing", "Dearer than our fixing",
+                              "Dearer than our fixing", "Dearer than our fixing", ov.LOW_TAG])
+            self.assertEqual(fv["K16"].value, "We fixed below the average")      # how our own fixing did, in words
+            self.assertEqual((fv["K17"].value, fv["K18"].value), ("Best day to price", "Dearest day"))
+            rules = [(str(rg.sqref), r.operator, r.dxf.font.color.rgb[-6:]) for rg in fx.conditional_formatting
+                     for r in rg.rules if r.type == "cellIs"]
+            self.assertIn(("D8:G15", "lessThan", ov.GREEN), rules)               # below our fixing = green
+            self.assertIn(("D8:G15", "greaterThan", ov.RED), rules)
+            self.assertIn(("I8:J15", "greaterThan", ov.GREEN), rules)            # local above our landed cost stays green
             self.assertEqual((fv["C18"].value, fv["H18"].value), (467.75, "CBOT on 2026-10-19"))
             self.assertAlmostEqual(fv["C19"].value, 1 / 6)                   # one day below our fixing
             self.assertEqual(fx["C19"].number_format, "0%")
@@ -195,6 +210,13 @@ class WorkbookTests(unittest.TestCase):
             self.assertEqual([(uv.cell(r, 1).value.date().isoformat(), uv.cell(r, 2).value) for r in range(8, 11)],
                              [("2026-10-30", None), ("2026-10-31", 1000), ("2026-11-01", None)])
             self.assertEqual({uv.cell(r, 8).value for r in range(8, 11)}, {246.5})
+
+    def test_words(self):
+        self.assertEqual([ov.day_point(d, 1.0) for d in (-3.0, 0.5, 2.0, None)],
+                         ["Cheaper than our fixing", "About our fixing", "Dearer than our fixing", ""])
+        self.assertEqual(ov.day_point(9.0, 1.0, ov.LOW_TAG), ov.LOW_TAG)
+        self.assertEqual([ov.our_fixing(d, 1.0) for d in (3.0, 0.0, -3.0)],
+                         ["We fixed below the average", "In line with the average", "We fixed above the average"])
 
     def test_lots_and_first_notice_day(self):
         self.assertEqual(ov.lots_by_day([{"date": "2026-10-28", "mt": 508.02}, {"date": "2026-10-28", "qty_mt": 508.02},

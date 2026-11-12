@@ -65,6 +65,26 @@ def result_of(diff, band):
     return "Advantage" if diff >= band else "Missed opportunity" if diff <= -band else "Neutral"
 
 
+LOW_TAG, HIGH_TAG = "Lowest · best day to price", "Highest · dearest day"
+
+
+def day_point(diff, band, tag=""):
+    """How good a day was as a pricing point for a buyer: ``diff`` = that day's CBOT − our fixing."""
+    if tag:
+        return tag
+    if diff is None:
+        return ""
+    return "Cheaper than our fixing" if diff <= -band else "Dearer than our fixing" if diff >= band else "About our fixing"
+
+
+def our_fixing(diff, band):
+    """Our fixing against a benchmark: ``diff`` = benchmark CBOT − our fixing (positive = we fixed below it)."""
+    if diff is None:
+        return ""
+    return ("We fixed below the average" if diff >= band else "We fixed above the average" if diff <= -band
+            else "In line with the average")
+
+
 def fixed_blocks(model, base="CORN"):
     """Consumption of fixed contracts, grouped so that every block has one set of terms.
 
@@ -187,7 +207,7 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
     receiving date, side by side with its consumption days. ``only``: limit to these contract ids.
     Returns the counts written."""
     from openpyxl import Workbook
-    from openpyxl.formatting.rule import CellIsRule
+    from openpyxl.formatting.rule import CellIsRule, FormulaRule
     from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
     from openpyxl.utils import get_column_letter as L
 
@@ -248,6 +268,11 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
         c.alignment = Alignment(vertical="center")
         ws.row_dimensions[r].height = 20
 
+    def signs_inv(ws, ref):
+        """A buyer's colours for a price or a rate: lower (negative) is cheaper = green, higher = red."""
+        ws.conditional_formatting.add(ref, CellIsRule(operator="lessThan", formula=["0"], font=Font(color=GREEN)))
+        ws.conditional_formatting.add(ref, CellIsRule(operator="greaterThan", formula=["0"], font=Font(color=RED)))
+
     def signs(ws, ref):
         ws.conditional_formatting.add(ref, CellIsRule(operator="lessThan", formula=["0"], font=Font(color=RED)))
         ws.conditional_formatting.add(ref, CellIsRule(operator="greaterThan", formula=["0"], font=Font(color=GREEN)))
@@ -265,6 +290,8 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
 
     isn = lambda *cells: "AND(" + ",".join(f"ISNUMBER({c})" for c in cells) + ")"
     BAND = "Summary!$C$6"
+    day_f = lambda cell: (f'=IF(ISNUMBER({cell}),IF({cell}<=-{BAND},"Cheaper than our fixing",IF({cell}>={BAND},'
+                          f'"Dearer than our fixing","About our fixing")),"")')
     res_f = lambda cell: (f'=IF(ISNUMBER({cell}),IF({cell}>={BAND},"Advantage",IF({cell}<=-{BAND},"Missed opportunity",'
                           f'"Neutral")),"")')
     money = lambda v: "—" if v is None else f"{v:,.0f}"
@@ -279,17 +306,17 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
                 [24, 15, 20, 12, 8, 12, 10, 8, 10, 10, 11, 9, 11, 13, 11, 15])
 
     # ── Fixed consumption: pricing days and the market from the receiving date to the window end ──
-    W = [20, 9, 11, 11, 10, 12, 12, 12, 13, 13, 17, 11, 12, 12]
+    W = [20, 9, 11, 11, 10, 12, 12, 12, 13, 13, 26, 11, 12, 12]
     FXD = "[>=0.00005]+0.0000;[<=-0.00005]-0.0000;0.0000"
     fut = next((b["futures"] for b in fixed if b.get("futures")), "")
     fnd = first_notice_day(fut)
     wf = sheet("Fixed consumption", f"{base} — fixed contracts: pricing days and the market from receiving date to today",
                "A contract's terms are shown once, above its days. MT = the lots priced on that date. Days run from the "
                "receiving date (green) to the window end date in C3 (today while the pricing window is open; your pricing "
-               "deadline once it passes), trading days only. Difference = CBOT that day − our fixed CBOT: positive means "
-               "our fixing was cheaper than the market that day. Market FX = the day's market rate against our contract "
-               "FX: positive = our contract FX was cheaper than the market (EGP/MT effect = difference × CIF $/MT). Local "
-               "and landed cost exclude inland transport.", W)
+               "deadline once it passes), trading days only. Each day is shown as a pricing point for a buyer: GREEN = "
+               "that day's CBOT (or market FX) was below our fixing, a cheaper day to price; RED = above it, a dearer day. "
+               "The lowest CBOT of the window is the best day to price, the highest the dearest. How our own fixing did "
+               "is said in words on the average row under each contract. Local and landed cost exclude inland transport.", W)
     wf.row_dimensions[2].height = 75
     w_end = _d(as_of) or dt.date.today()
     put(wf, 3, 1, "Window end date", bold=True)
@@ -297,7 +324,9 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
     put(wf, 3, 4, "today while the pricing window is open" + (
         f" · set it to your {fut} pricing deadline once that passes" + (f" (first notice day {fnd.day} {fnd:%b %Y} at the latest)" if fnd else "")
         if fut else " · set it to your pricing deadline once that passes") + ", then add the new days below each contract",
-        italic=True, color=GREY)
+        italic=True, color=GREY, wrap=True)
+    wf.merge_cells(start_row=3, start_column=4, end_row=3, end_column=14)
+    wf.row_dimensions[3].height = 30
     WE = "'Fixed consumption'!$C$3"
     refs_fixed = []
     r = 4
@@ -342,9 +371,10 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
         put(wf, t, 10, b["freight"], F0, inp=True)
         f(wf, t, 11, f'=IF({isn(f"I{t}", f"J{t}")},I{t}+J{t},"")',
           (landed_x + b["freight"]) if None not in (landed_x, b["freight"]) else None, F0)
-        heads(wf, r + 3, ["Date", "MT priced", f"CBOT that day {unit}", f"CBOT − fixed {unit}", "USD/MT",
-                          "Saving USD", "Saving EGP", "Local excl. transport", "Local − landed EGP/MT",
-                          "Local spread EGP", "Result", "Market FX", "Market FX − contract FX", "FX effect EGP/MT"])
+        heads(wf, r + 3, ["Date", "MT priced", f"CBOT that day {unit}", f"CBOT that day vs our fixing {unit}",
+                          "USD/MT vs our fixing", "Lots priced vs our fixing USD", "Lots priced vs our fixing EGP",
+                          "Local excl. transport", "Local − landed EGP/MT", "Local spread EGP",
+                          "That day as a pricing point", "Market FX", "Market FX vs contract FX", "FX effect EGP/MT"])
         d0 = r + 4
         for i, d in enumerate(days):
             q = d0 + i
@@ -361,7 +391,7 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
             put(wf, q, 8, d["local_excl"], F0, inp=True)
             f(wf, q, 9, f'=IF({isn(f"H{q}", f"$I${t}")},H{q}-$I${t},"")', spread, S0)
             f(wf, q, 10, f'=IF({isn(f"I{q}", f"B{q}")},I{q}*B{q},"")', _mul(spread, d["mt"]), S0)
-            f(wf, q, 11, res_f(f"D{q}"), result_of(diff, band), align="center")
+            d["_diff"] = diff                 # the pricing-point words are written once the window is known
             put(wf, q, 12, d["fx"], F4, inp=True)
             f(wf, q, 13, f'=IF({isn(f"L{q}", f"$E${t}")},L{q}-$E${t},"")', dfx, FXD)
             f(wf, q, 14, f'=IF({isn(f"M{q}", f"$D${t}")},M{q}*$D${t},"")', _mul(dfx, b["cif"]), S0)
@@ -373,7 +403,7 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
         diff_t = _sub(c_avg, fix)
         usd_t = sum(_mul(_mul(_sub(d["cbot"], fix), b["factor"]), d["mt"]) or 0 for d in days)
         spread_t = sum(_mul(_sub(d["local_excl"], landed_x), d["mt"]) or 0 for d in days)
-        put(wf, tr, 1, "Total / avg — lots priced", bold=True)
+        put(wf, tr, 1, "Total — lots priced", bold=True)
         f(wf, tr, 2, f"=SUM(B{d0}:B{d1})", mt_tot, F0, bold=True)
         f(wf, tr, 3, f'=IF(B{tr}<>0,SUMPRODUCT(B{d0}:B{d1},C{d0}:C{d1})/B{tr},"")', c_avg, F2, bold=True)
         f(wf, tr, 4, f'=IF({isn(f"C{tr}", f"$A${t}")},C{tr}-$A${t},"")', diff_t, S2, bold=True)
@@ -383,7 +413,7 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
         f(wf, tr, 8, f'=IF(B{tr}<>0,SUMPRODUCT(B{d0}:B{d1},H{d0}:H{d1})/B{tr},"")', l_avg, F0, bold=True)
         f(wf, tr, 9, f'=IF(B{tr}<>0,J{tr}/B{tr},"")', spread_t / mt_tot if mt_tot else None, S0, bold=True)
         f(wf, tr, 10, f"=SUM(J{d0}:J{d1})", spread_t, S0, bold=True)
-        f(wf, tr, 11, res_f(f"D{tr}"), result_of(diff_t, band), bold=True, align="center")
+        f(wf, tr, 11, day_f(f"D{tr}"), day_point(diff_t, band), bold=True, align="center")
         for c in range(1, 15):
             wf.cell(tr, c).fill = PatternFill("solid", fgColor=TOTAL_FILL)
             wf.cell(tr, c).font = Font(bold=True)
@@ -428,7 +458,19 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
         f(wf, wr, 8, f'=IF({inwin}>0,TEXT(A{a0},"yyyy-mm-dd")&" → "&TEXT(MIN({WE},MAX({RA})),"yyyy-mm-dd")&" ("&{inwin}&" trading days)","")',
           (f"{win[0]['date'].isoformat()} → {min(w_end, days[-1]['date']).isoformat()} ({len(win)} trading days)" if win else None),
           italic=True, color=GREY, align="center")
-        f(wf, wr, 11, res_f(f"D{wr}"), result_of(wd, band), align="center")
+        f(wf, wr, 11, f'=IF(ISNUMBER(D{wr}),IF(D{wr}>={BAND},"We fixed below the average",IF(D{wr}<=-{BAND},'
+                      f'"We fixed above the average","In line with the average")),"")', our_fixing(wd, band), bold=True, align="center")
+        put(wf, lo, 11, "Best day to price" if win else None, align="center")
+        put(wf, hi, 11, "Dearest day" if win else None, align="center")
+        # each day as a pricing point: the lowest and the highest of the window are named
+        c_lo, c_hi = (min(cbs), max(cbs)) if (cbs and win) else (None, None)
+        for i, d in enumerate(days):
+            q = d0 + i
+            inw = i >= a_i and d["date"] <= w_end and d["cbot"] is not None
+            tag = LOW_TAG if (inw and d["cbot"] == c_lo) else HIGH_TAG if (inw and d["cbot"] == c_hi) else ""
+            f(wf, q, 11, f'=IF(ISNUMBER(D{q}),IF(AND(A{q}>=$A${a0},A{q}<={WE},C{q}=$C${lo}),"{LOW_TAG}",'
+                         f'IF(AND(A{q}>=$A${a0},A{q}<={WE},C{q}=$C${hi}),"{HIGH_TAG}",{day_f(f"D{q}")[1:]})),"")',
+              day_point(d["_diff"], band, tag) if d["_diff"] is not None else "", align="center")
         fx_avg = sum(fxs) / len(fxs) if fxs else None
         f(wf, wr, 12, f'=IFERROR(AVERAGEIFS({RL},{RA},"<="&{WE}),"")', fx_avg, F4)
         for row_, fn, vals_c, vals_f in ((lo, "MINIFS", min(cbs) if cbs else None, min(fxs) if fxs else None),
@@ -450,7 +492,19 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
           (sum(1 for d in win if d["fx"] is not None and b["fx"] is not None and d["fx"] < b["fx"]) / len(win)) if win else None, "0%")
         wf.merge_cells(start_row=pc, start_column=13, end_row=pc, end_column=14)
         put(wf, pc, 13, "← days market FX < ours", italic=True, color=GREY, align="center")
-        signs(wf, f"D{d0}:G{pc}"); signs(wf, f"I{d0}:J{tr}"); signs(wf, f"M{d0}:N{hi}")
+        # a buyer's colours: a day below our fixing is green, above it red; the summary rows stay plain
+        signs_inv(wf, f"D{d0}:G{tr}"); signs(wf, f"I{d0}:J{tr}"); signs_inv(wf, f"M{d0}:N{d1}")
+        kr = f"K{d0}:K{hi}"
+        bold_g, bold_r = Font(color=GREEN, bold=True), Font(color=RED, bold=True)
+        for test, font in ((f'OR(LEFT($K{d0},6)="Lowest",LEFT($K{d0},8)="Best day",LEFT($K{d0},14)="We fixed below")', bold_g),
+                           (f'OR(LEFT($K{d0},7)="Highest",LEFT($K{d0},7)="Dearest",LEFT($K{d0},14)="We fixed above")', bold_r),
+                           (f'LEFT($K{d0},7)="Cheaper"', Font(color=GREEN)), (f'LEFT($K{d0},6)="Dearer"', Font(color=RED))):
+            wf.conditional_formatting.add(kr, FormulaRule(formula=[test], font=font, stopIfTrue=True))
+        cr = f"C{a0}:C{d1}"
+        wf.conditional_formatting.add(cr, FormulaRule(formula=[f"AND($A{a0}<={WE},C{a0}=$C${lo})"], font=bold_g,
+                                                      fill=PatternFill("solid", bgColor="C6EFCE", fgColor="C6EFCE")))
+        wf.conditional_formatting.add(cr, FormulaRule(formula=[f"AND($A{a0}<={WE},C{a0}=$C${hi})"], font=bold_r,
+                                                      fill=PatternFill("solid", bgColor="FFC7CE", fgColor="FFC7CE")))
         refs_fixed.append({"b": b, "t": t, "d0": d0, "d1": d1, "tr": tr, "mt": mt_tot, "c_avg": c_avg, "diff": diff_t,
                            "usd": usd_t, "fix": fix, "rr": rr, "rv": rv, "r_diff": r_diff, "r_usd": r_usd, "r_mt": r_mt,
                            "r_spread": r_spread, "r_cbot": days[ri]["cbot"] if ri is not None else None,
@@ -468,7 +522,8 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
     # ── Not fixed consumption ──
     wu = sheet("Not fixed consumption", f"{base} — contracts not fixed yet (indicative)",
                "Not realised: the contract has no fixed CBOT yet, so each day is compared with the latest CBOT. "
-               "MT = the lots priced on that date. Positive = the market was higher that day than it is now. Local and "
+               "MT = the lots priced on that date. GREEN = that day's CBOT was below the latest CBOT (a cheaper day to "
+               "price than now), RED = above it (a dearer day). Local and "
                "landed cost exclude inland transport. Days run from the receiving date (green) to the last pricing day "
                "(today while open).",
                [20, 9, 11, 11, 10, 12, 12, 11, 13, 12, 13])
@@ -494,8 +549,9 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
         put(wu, t, 5, b["discharge"], F0, inp=True); put(wu, t, 6, b["clearance"], F0, inp=True)
         put(wu, t, 7, b["freight"], F0, inp=True)
         put(wu, t, 8, (b["latest_date"] + (" · live" if b["latest_live"] else "")).strip(" ·"))
-        heads(wu, r + 3, ["Date", "MT priced", f"CBOT that day {unit}", f"CBOT − latest {unit}", "USD/MT",
-                          "Indicative USD", "Indicative EGP", "CIF used $/MT", "Landed excl. transport",
+        heads(wu, r + 3, ["Date", "MT priced", f"CBOT that day {unit}",
+                          f"CBOT that day vs latest {unit}", "USD/MT vs latest", "Lots priced vs latest USD",
+                          "Lots priced vs latest EGP", "CIF used $/MT", "Landed excl. transport",
                           "Local excl. transport", "Local − landed EGP/MT"])
         d0 = r + 4
         landed = lambda d: (d["cif_used"] * b["fx"] + (b["discharge"] or 0) + (b["clearance"] or 0)
@@ -523,7 +579,7 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
         diff_t = _sub(c_avg, b["latest"])
         b_first, b_last = b["days"][0]["date"], b["days"][-1]["date"]
         usd_t = sum(_mul(_mul(_sub(d["cbot"], b["latest"]), b["factor"]), d["mt"]) or 0 for d in days)
-        put(wu, tr, 1, "Total / avg — lots priced", bold=True)
+        put(wu, tr, 1, "Total — lots priced", bold=True)
         f(wu, tr, 2, f"=SUM(B{d0}:B{d1})", mt_tot, F0, bold=True)
         f(wu, tr, 3, f'=IF(B{tr}<>0,SUMPRODUCT(B{d0}:B{d1},C{d0}:C{d1})/B{tr},"")', c_avg, F2, bold=True)
         f(wu, tr, 4, f'=IF({isn(f"C{tr}", f"$C${t}")},C{tr}-$C${t},"")', diff_t, S2, bold=True)
@@ -568,7 +624,7 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
             wu.merge_cells(start_row=wr, start_column=8, end_row=wr, end_column=10)
             put(wu, wr, 8, f"{days[ri]['date'].isoformat()} → {days[-1]['date'].isoformat()} ({len(cbs)} days)",
                 italic=True, color=GREY, align="center")
-        signs(wu, f"D{d0}:G{wr}"); signs(wu, f"K{d0}:K{tr}")
+        signs_inv(wu, f"D{d0}:G{tr}"); signs(wu, f"K{d0}:K{tr}")
         refs_unfixed.append({"b": b, "t": t, "d0": d0, "d1": d1, "tr": tr, "mt": mt_tot, "c_avg": c_avg, "diff": diff_t,
                              "usd": usd_t, "rr": rr, "rv": rv, "r_diff": r_diff, "r_usd": r_usd, "r_mt": r_mt,
                              "r_spread": r_spread, "r_cbot": days[ri]["cbot"] if ri is not None else None,
@@ -582,7 +638,8 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
     wo = sheet("Open contracts", f"{base} — open contracts: CBOT and FX since {lead} trading days before the contract date",
                f"Day 0 = the receiving date (for a contract not received yet: the day it was entered in the system); the {lead} "
                "grey rows above it are the trading days before. Our price and Sav/MT use today's contract terms on each "
-               "day's CBOT and FX, excluding inland transport. Positive Sav/MT = cheaper than local.",
+               "day's CBOT and FX, excluding inland transport. A rise in CBOT or FX is RED (dearer for us), a fall GREEN. "
+               "Positive Sav/MT = cheaper than local.",
                [12, 8, 10, 10, 11, 10, 10, 11, 10, 13, 13, 12])
     refs_open = []
     r = 4
@@ -654,7 +711,8 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
             f(wo, tr, col, f'=IF({isn(f"{cl}{d1}", f"{cl}{z}")},{cl}{d1}-{cl}{z},"")', _sub(last[k], zero[k]), S0, bold=True)
         for c in range(1, 13):
             wo.cell(tr, c).fill = PatternFill("solid", fgColor=TOTAL_FILL)
-        signs(wo, f"D{d0}:E{tr}"); signs(wo, f"G{d0}:H{tr}"); signs(wo, f"L{d0}:L{tr}")
+        signs_inv(wo, f"D{d0}:E{tr}"); signs_inv(wo, f"G{d0}:H{tr}"); signs(wo, f"L{d0}:L{tr}")
+        signs_inv(wo, f"J{tr}:J{tr}")
         refs_open.append({"t": tr_, "top": t, "d0": d0, "d1": d1, "z": z, "tr": tr, "vals": vals, "i0": i0})
         r = tr + 2
     if not refs_open:
@@ -802,7 +860,7 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
             f(ws0, row, 9, f"={q}D{x['tr']}", x["diff"], S2)
             f(ws0, row, 10, f"={q}F{x['tr']}", x["usd"], S0)
             if kind == "Fixed":
-                f(ws0, row, 11, f"={q}K{x['tr']}", result_of(x["diff"], band), align="center")
+                f(ws0, row, 11, f"={q}K{x['tr']}", day_point(x["diff"], band), align="center")
             else:
                 put(ws0, row, 11, "Indicative", align="center")
             if x.get("_rrow"):
@@ -863,7 +921,7 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
                 f(ws0, row, col, f'=IF(ISNUMBER({q}{src}{x["d1"]}),{q}{src}{x["d1"]},"")', v[-1][k], F0)
             f(ws0, row, 13, f'=IF(ISNUMBER({q}L{x["d1"]}),{q}L{x["d1"]},"")', v[-1]["sav"], S0)
             row += 1
-        signs(ws0, f"I{o0}:J{row - 1}"); signs(ws0, f"M{o0}:M{row - 1}")
+        signs_inv(ws0, f"I{o0}:J{row - 1}"); signs(ws0, f"M{o0}:M{row - 1}")
     for kind_, (a, b_) in spans.items():
         signs(ws0, f"I{a}:J{b_ + 1}"); signs(ws0, f"N{a}:O{b_ + 1}")
         if kind_ == "Fixed":
