@@ -194,7 +194,10 @@ def merge_window(days, rv, carry=()):
     for w in win:
         dd = _d(w.get("date"))
         if dd and dd not in by:
-            by[dd] = {"date": dd, "mt": None, "cbot": _n(w.get("cbot")), "local_excl": _n(w.get("local_excl"))}
+            by[dd] = {"date": dd, "mt": None, "cbot": _n(w.get("cbot")), "local_excl": _n(w.get("local_excl")),
+                      "mfx": _n(w.get("market_fx"))}
+        elif dd:
+            by[dd].setdefault("mfx", _n(w.get("market_fx")))
     out = [by[k] for k in sorted(by)]
     for k in carry:
         last = next((d.get(k) for d in out if d.get(k) is not None), None)
@@ -571,8 +574,10 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
                "MT = the lots priced on that date. GREEN = that day's CBOT was below the latest CBOT (a cheaper day to "
                "price than now), RED = above it (a dearer day). Local and "
                "landed cost exclude inland transport. Days run from the receiving date (green) to the last pricing day "
-               "(today while open).",
-               [20, 9, 11, 11, 10, 12, 12, 11, 13, 12, 13])
+               "(today while open). Market FX = the day's market rate (non-trading days use the latest earlier rate). "
+               "FX effect = (market FX − contract FX) × CIF used ($/MT): GREEN = the market FX was below our contract FX "
+               "(cheaper), RED = above it.",
+               [20, 9, 11, 11, 10, 12, 12, 11, 13, 12, 13, 11.7, 14.1, 12])
     refs_unfixed = []
     r = 4
     for b in unfixed:
@@ -601,7 +606,8 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
         heads(wu, r + 3, ["Date", "MT priced", f"CBOT that day {unit}",
                           f"CBOT that day vs latest {unit}", "USD/MT vs latest", "Lots priced vs latest USD",
                           "Lots priced vs latest EGP", "CIF used $/MT", "Landed excl. transport",
-                          "Local excl. transport", "Local − landed EGP/MT"])
+                          "Local excl. transport", "Local − landed EGP/MT", "Market FX", "Market FX vs contract FX",
+                          "FX effect EGP/MT"])
         d0 = r + 4
         landed = lambda d: (d["cif_used"] * b["fx"] + (b["discharge"] or 0) + (b["clearance"] or 0)
                             if None not in (d["cif_used"], b["fx"]) else None)
@@ -619,6 +625,10 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
             f(wu, q, 9, f'=IF({isn(f"H{q}", f"$D${t}")},H{q}*$D${t}+$E${t}+$F${t},"")', landed(d), F0)
             put(wu, q, 10, d["local_excl"], F0, inp=True)
             f(wu, q, 11, f'=IF({isn(f"J{q}", f"I{q}")},J{q}-I{q},"")', _sub(d["local_excl"], landed(d)), S0)
+            mfx = d.get("mfx")
+            put(wu, q, 12, mfx, F4, inp=True)
+            f(wu, q, 13, f'=IF({isn(f"L{q}", f"$D${t}")},L{q}-$D${t},"")', _sub(mfx, b["fx"]), FXD)
+            f(wu, q, 14, f'=IF({isn(f"M{q}", f"H{q}")},M{q}*H{q},"")', _mul(_sub(mfx, b["fx"]), d["cif_used"]), S0)
         d1 = d0 + len(days) - 1
         tr = d1 + 1
         wavg = lambda vals: (sum(v * (d["mt"] or 0) for v, d in zip(vals, days) if v is not None)
@@ -641,7 +651,11 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
               F2 if col == 8 else F0, bold=True)
         f(wu, tr, 11, f'=IF({isn(f"J{tr}", f"I{tr}")},J{tr}-I{tr},"")',
           _sub(wavg([d["local_excl"] for d in days]), wavg([landed(d) for d in days])), S0, bold=True)
-        for c in range(1, 12):
+        l_t, h_t = wavg([d.get("mfx") for d in days]), wavg([d["cif_used"] for d in days])
+        f(wu, tr, 12, f'=IF(B{tr}>0,SUMPRODUCT(B{d0}:B{d1},L{d0}:L{d1})/B{tr},"")', l_t, F4, bold=True)
+        f(wu, tr, 13, f'=IF(ISNUMBER(L{tr}),L{tr}-$D${t},"")', _sub(l_t, b["fx"]), FXD, bold=True)
+        f(wu, tr, 14, f'=IF({isn(f"M{tr}", f"H{tr}")},M{tr}*H{tr},"")', _mul(_sub(l_t, b["fx"]), h_t), S0, bold=True)
+        for c in range(1, 15):
             wu.cell(tr, c).fill = PatternFill("solid", fgColor=TOTAL_FILL)
         rr, r_diff, r_usd, r_mt, r_spread, ri = None, None, None, None, None, None
         if rv:
@@ -654,7 +668,7 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
             r_spread = _sub(days[ri]["local_excl"], landed(days[ri]))
             wu.cell(rr, 1).number_format = RECV_FMT
             wu.cell(rr, 1).font = Font(bold=True)
-            for c in range(1, 12):
+            for c in range(1, 15):
                 wu.cell(rr, c).fill = PatternFill("solid", fgColor=RECV_FILL)
         wr = tr
         if ri is not None and len(days) - ri > 1:
@@ -673,7 +687,12 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
             wu.merge_cells(start_row=wr, start_column=8, end_row=wr, end_column=10)
             put(wu, wr, 8, f"{days[ri]['date'].isoformat()} → {days[-1]['date'].isoformat()} ({len(cbs)} days)",
                 italic=True, color=GREY, align="center")
-        signs_inv(wu, f"D{d0}:G{tr}"); signs(wu, f"K{d0}:K{tr}")
+            fxs = [d.get("mfx") for d in days[ri:] if d.get("mfx") is not None]
+            l_w = sum(fxs) / len(fxs) if fxs else None
+            f(wu, wr, 12, f'=IF(COUNT(L{rr}:L{d1})>0,AVERAGE(L{rr}:L{d1}),"")', l_w, F4)
+            f(wu, wr, 13, f'=IF(ISNUMBER(L{wr}),L{wr}-$D${t},"")', _sub(l_w, b["fx"]), FXD)
+            f(wu, wr, 14, f'=IF({isn(f"M{wr}", f"H{rr}")},M{wr}*H{rr},"")', _mul(_sub(l_w, b["fx"]), days[ri]["cif_used"]), S0)
+        signs_inv(wu, f"D{d0}:G{tr}"); signs(wu, f"K{d0}:K{tr}"); signs_inv(wu, f"M{d0}:N{d1}")
         refs_unfixed.append({"b": b, "t": t, "d0": d0, "d1": d1, "tr": tr, "mt": mt_tot, "c_avg": c_avg, "diff": diff_t,
                              "usd": usd_t, "rr": rr, "rv": rv, "r_diff": r_diff, "r_usd": r_usd, "r_mt": r_mt,
                              "r_spread": r_spread, "r_cbot": days[ri]["cbot"] if ri is not None else None,

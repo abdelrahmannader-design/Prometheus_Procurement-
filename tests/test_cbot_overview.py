@@ -241,8 +241,8 @@ class WorkbookTests(unittest.TestCase):
                                "premium": 190.0, "fix": {"factor": FACTOR, "fixed": False}, "fx": 53.97,
                                "discharge_egp_mt": 245.63, "clearance_egp_mt": 200.0, "freight_egp_mt": 343.98,
                                "contract_month": {"code": "DEC-26", "year": 2026}, "futures_month": "DEC"})
-        win = [{"date": "2026-11-10", "cbot": 441.25, "local_excl": 14300.0},
-               {"date": "2026-11-11", "cbot": 446.25, "local_excl": 14300.0}]
+        win = [{"date": "2026-11-10", "cbot": 441.25, "local_excl": 14300.0, "market_fx": 53.924},
+               {"date": "2026-11-11", "cbot": 446.25, "local_excl": 14300.0, "market_fx": 53.475}]
         rc = {"C7": {"date": "2026-11-10", "vessel": "ALPHA TEAM", "window": win, "contract": "460/20050340", "mt": 2000.0}}
         with tempfile.TemporaryDirectory() as tmp:
             fp = os.path.join(tmp, "ov.xlsx")
@@ -256,6 +256,13 @@ class WorkbookTests(unittest.TestCase):
             self.assertEqual([uv.cell(r, 1).value.date().isoformat() for r in (8, 9)], ["2026-11-10", "2026-11-11"])
             self.assertAlmostEqual(uv["H8"].value, (446.25 + 190.0) * FACTOR)     # CIF at the latest CBOT
             self.assertAlmostEqual(uv["D8"].value, 441.25 - 446.25)
+            # market FX against our contract FX, as on the Fixed tab
+            self.assertEqual([c.value for c in openpyxl.load_workbook(fp)["Not fixed consumption"][7]][11:],
+                             ["Market FX", "Market FX vs contract FX", "FX effect EGP/MT"])
+            self.assertEqual(uv["L8"].value, 53.924)
+            self.assertAlmostEqual(uv["M8"].value, 53.924 - 53.97)
+            self.assertAlmostEqual(uv["N8"].value, (53.924 - 53.97) * (446.25 + 190.0) * FACTOR)
+            self.assertAlmostEqual(uv["L11"].value, (53.924 + 53.475) / 2)      # the window average
             rv = wv["Receiving date"]
             self.assertEqual((rv["A5"].value, rv["P5"].value), ("460/20050340", "Dearer to fix now (indicative)"))
             self.assertAlmostEqual(rv["M5"].value, (441.25 - 446.25) * FACTOR * 2000.0)
