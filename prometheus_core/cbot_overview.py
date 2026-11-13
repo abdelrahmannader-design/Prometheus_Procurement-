@@ -209,6 +209,29 @@ def merge_window(days, rv, carry=()):
     return out
 
 
+def status_text(rv, still_open=False):
+    """'received X → last lot priced Y · closed in the app Z' for a contract block's header.
+
+    The app's closed date is the day the contract's status was set to Closed, not a pricing event, so
+    the last priced lot leads when there is one; a Closed contract without a recorded date says so."""
+    if not rv:
+        return "  ·  still open" if still_open else ""
+    lots = lots_by_day(rv.get("lots"))
+    last = max(lots) if lots else None
+    closed, is_closed = rv.get("closed") or "", bool(rv.get("closed_status") or rv.get("closed"))
+    head = f"  ·  received {rv.get('date')} → "
+    if last:
+        tail = f"last lot priced {last.isoformat()}"
+        if closed:
+            tail += f"  ·  closed in the app {closed}"
+        elif is_closed:
+            tail += "  ·  closed (date not recorded)"
+        return head + tail
+    if closed:
+        return head + f"closed in the app {closed}"
+    return head + ("closed (date not recorded)" if is_closed else "still open")
+
+
 def lots_by_day(lots):
     """{date: tonnes priced that day} from a contract's pricing lots ([{date, mt}])."""
     out = {}
@@ -398,8 +421,7 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
         bar(wf, r, f"{b['contract']}  ·  {b['supplier']}  ·  {b['commodity']}  ·  "
                    f"{money(b['qty_mt'])} MT  ·  {b['futures']}  ·  {b['fix_type'] or 'Fixed'} CBOT fixing"
                    + (f"  ·  vessel {vessel_of(b['contract_id'])}" if vessel_of(b["contract_id"]) else "")
-                   + (f"  ·  received {rv['date']} → " + (f"closed {rv['closed']}" if rv.get("closed") else "still open") if rv
-                      else ("  ·  still open" if b["open"] else "")), 14)
+                   + status_text(rv, b["open"]), 14)
         heads(wf, r + 1, [f"Fixed CBOT {unit}", f"Premium {unit}", "Factor to $/MT", "CIF $/MT", "FX (contract)",
                           "CIF EGP/MT", "Discharge", "Clearance", "Landed excl. transport", "Inland freight",
                           "Landed incl. transport"])
@@ -593,8 +615,7 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
         bar(wu, r, f"{b['contract']}  ·  {b['supplier']}  ·  {b['commodity']}  ·  {money(b['qty_mt'])} MT  ·  "
                    f"{b['futures']}  ·  not fixed yet"
                    + (f"  ·  vessel {vessel_of(b['contract_id'])}" if vessel_of(b["contract_id"]) else "")
-                   + (f"  ·  received {rv['date']} → " + (f"closed {rv['closed']}" if rv.get("closed") else "still open") if rv
-                      else ("  ·  still open" if b["open"] else "")), 11)
+                   + status_text(rv, b["open"]), 11)
         heads(wu, r + 1, [f"Premium {unit}", "Factor to $/MT", f"Latest CBOT {unit}", "FX (contract)", "Discharge",
                           "Clearance", "Inland freight", "Latest CBOT date", "", "", ""])
         t = r + 2

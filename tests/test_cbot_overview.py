@@ -149,7 +149,7 @@ class WorkbookTests(unittest.TestCase):
             wf, wv = openpyxl.load_workbook(fp), openpyxl.load_workbook(fp, data_only=True)
             fx, fv = wf["Fixed consumption"], wv["Fixed consumption"]
             self.assertIn("vessel ELENI M II", fx["A4"].value)
-            self.assertIn("received 2026-10-17 → closed 2026-10-28", fx["A4"].value)
+            self.assertIn("received 2026-10-17 → last lot priced 2026-10-23  ·  closed in the app 2026-10-28", fx["A4"].value)
             self.assertEqual([c.value for c in fx[7]][11:], ["Market FX", "Market FX vs contract FX", "FX effect EGP/MT"])
             # the receiving date, then the trading days; MT on the days lots were priced
             self.assertEqual([fv.cell(r, 1).value.date().isoformat() for r in range(8, 15)], [w["date"] for w in pw])
@@ -223,6 +223,19 @@ class WorkbookTests(unittest.TestCase):
                          ["We fixed below the market", "In line with the market", "We fixed above the market"])
         self.assertEqual([ov.fix_now(d, 1.0) for d in (3.0, 0.0, -3.0)],
                          ["Cheaper to fix now (indicative)", "About the same now (indicative)", "Dearer to fix now (indicative)"])
+
+    def test_status_text_leads_with_the_last_priced_lot(self):
+        lots = [{"date": "2026-10-28", "mt": 1016.04}, {"date": "2026-10-30", "mt": 1016.05}]
+        self.assertEqual(ov.status_text({"date": "2026-10-20", "lots": lots, "closed": "2026-11-05", "closed_status": True}),
+                         "  ·  received 2026-10-20 → last lot priced 2026-10-30  ·  closed in the app 2026-11-05")
+        self.assertEqual(ov.status_text({"date": "2026-04-30", "lots": [], "closed": "", "closed_status": True}),
+                         "  ·  received 2026-04-30 → closed (date not recorded)")
+        self.assertEqual(ov.status_text({"date": "2026-09-10", "closed": "2026-09-10", "closed_status": True}),
+                         "  ·  received 2026-09-10 → closed in the app 2026-09-10")
+        self.assertEqual(ov.status_text({"date": "2026-11-10", "closed": ""}), "  ·  received 2026-11-10 → still open")
+        self.assertEqual(ov.status_text(None, True), "  ·  still open")
+        self.assertEqual(ov.status_text({"date": "2026-04-30", "lots": lots, "closed_status": True}),
+                         "  ·  received 2026-04-30 → last lot priced 2026-10-30  ·  closed (date not recorded)")
 
     def test_lots_and_first_notice_day(self):
         self.assertEqual(ov.lots_by_day([{"date": "2026-10-28", "mt": 508.02}, {"date": "2026-10-28", "qty_mt": 508.02},
