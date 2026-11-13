@@ -21,6 +21,7 @@ from typing import Any
 from .numbers import to_float
 
 DAY_BASIS = 360          # the app's finance convention (prometheus_core.cbot.carry_usd_mt)
+LOCAL_DAY_BASIS = 365    # EGP local interest, as the YC offers mail (prometheus_core.whatif)
 
 
 def _n(x: Any, nd: int = 2) -> str:
@@ -207,17 +208,22 @@ def build_workings(inp: Mapping[str, Any], out: Mapping[str, Any], *,
                            f"interest takes {_n(carry * fx)} EGP/MT of it."))
         # Local side: the days a local purchase would tie up money too
         ldays = to_float(inp.get("local_finance_days"), 0.0) or 0.0
+        lyear = to_float(out.get("local_year_basis"), None) or LOCAL_DAY_BASIS
         lcarry = to_float(out.get("local_carry_egp_mt"), None)       # the engine's figure, so both views agree
         if lcarry is None:
-            lcarry = local * rate / 100.0 * ldays / DAY_BASIS
+            lcarry = local * rate / 100.0 / lyear * ldays
         L.append(("h", "4b · Local side interest (fair comparison)"))
         if ldays == 0:
             L.append(("n", "Local: days money is out = 0 — local corn is taken as bought just in time, so it carries "
                            "no interest and the fair saving equals the saving above. If you pay for local corn ahead "
                            "of use, enter those days; enter negative days for supplier credit."))
         else:
-            L.append(("f", f"Local interest = local × rate × local days ÷ {DAY_BASIS} = {_n(local)} × {_n(rate)}% × "
-                           f"{_n(ldays, 0)} ÷ {DAY_BASIS} = {_signed(lcarry)} EGP/MT"))
+            L.append(("f", f"Local interest per day = local × rate ÷ {lyear:g} = {_n(local)} × {_n(rate)}% ÷ {lyear:g} "
+                           f"= {_n(local * rate / 100.0 / lyear)} EGP/MT/day"))
+            L.append(("f", f"Local interest = {_n(local * rate / 100.0 / lyear)} × {_n(ldays, 0)} days "
+                           f"= {_signed(lcarry)} EGP/MT"))
+            L.append(("n", f"Local money is EGP, so it uses a {lyear:g}-day year, as the YC offers mail does; "
+                           f"the import's USD finance stays on {DAY_BASIS}."))
             if ldays < 0:
                 L.append(("n", "Negative days = supplier credit: you pay after use, which is worth money to you, "
                                "so local becomes cheaper."))

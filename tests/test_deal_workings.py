@@ -145,7 +145,7 @@ def test_workings_use_fifo_days_for_the_stock_carry():
 def test_engine_adds_local_interest_only_to_the_fair_saving():
     base = compute_decision(_inp())
     out = compute_decision(_inp(local_finance_days=30))
-    li = 13500 * 0.18 * 30 / 360
+    li = 13500 * 0.18 / 365 * 30
     assert abs(out["local_carry_egp_mt"] - li) < 1e-9
     assert out["direct_saving_egp_mt"] == base["direct_saving_egp_mt"]       # Home/Portfolio basis unchanged
     assert abs(out["fair_direct_saving_egp_mt"] - (base["direct_saving_egp_mt"] + li)) < 1e-9
@@ -159,8 +159,9 @@ def test_workings_show_local_interest_and_the_fair_break_even():
     fees = [("Direct intake", 250.0), ("Clearance", 200.0), ("Inland freight", 100.0)]
     inp = _inp(local_finance_days=30); out = compute_decision(inp)
     t = _text(inp, out, fees=fees)
-    li = 13500 * 0.18 * 30 / 360
-    assert f"13,500.00 × 18.00% × 30 ÷ 360 = {li:+,.2f} EGP/MT" in t
+    li = 13500 * 0.18 / 365 * 30
+    assert f"13,500.00 × 18.00% ÷ 365 = {13500 * 0.18 / 365:,.2f} EGP/MT/day" in t
+    assert f"× 30 days = {li:+,.2f} EGP/MT" in t
     assert f"= {out['fair_direct_saving_egp_mt']:+,.2f} EGP/MT" in t
     be = break_even_days(out["import_usd_mt"], 50.0, 18, 550.0, 13500.0, li)
     at_be = compute_decision(_inp(finance_days=be, local_finance_days=30))
@@ -172,3 +173,19 @@ def test_zero_local_days_explains_just_in_time():
     inp = _inp(); out = compute_decision(inp)
     t = _text(inp, out, fees=[("Direct intake", 250.0)])
     assert "bought just in time" in t and "Fair saving =" not in t
+
+
+def test_yc_offers_mail_of_10_nov_is_reproduced_exactly():
+    """Local carried 30 days at 20% on 365 days vs Cofco/ADM/El-Magd, as the mail."""
+    from prometheus_core.whatif import whatif_scenario
+    cb, fx, conv, local, exp = 441.0, 53.5, 0.3937, 14300.0, 500.0
+    mail = whatif_scenario(local, fx, conv, cb, 20.0, 30, exp, 365)
+    assert round(mail["carry_cost_egp_mt"]) == 235 and round(mail["premium"]) == 225
+    for prem, discharge in ((200, 235.0), (200, 245.63), (202, 250.8)):
+        out = compute_decision({"comm_meta": {"type": "CBOT", "locked_factor": conv}, "fx": fx, "qty_mt": 1000,
+                                "local_egp_mt": local, "finance_days": 0, "interest_rate": 20.0, "cbot": cb,
+                                "premium_usd_mt": prem, "canonical_landed_fees_egp_mt": discharge + exp,
+                                "local_finance_days": 30})
+        assert abs(out["local_carry_egp_mt"] - mail["carry_cost_egp_mt"]) < 1e-9
+        gap_egp = (mail["premium"] - (prem + discharge / fx / conv)) * conv * fx
+        assert abs(out["fair_direct_saving_egp_mt"] - gap_egp) < 1e-6

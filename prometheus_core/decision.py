@@ -8,6 +8,7 @@ from typing import Any
 from .cbot import carry_usd_mt, cbot_to_usd_mt
 from .numbers import to_float
 from .stress import run_stress_test
+from .whatif import DEFAULT_YEAR_BASIS as LOCAL_YEAR_BASIS
 
 DECISION_ENGINE_VERSION = "1.2-finance-reconciled"
 DECISION_ACTIONS = (
@@ -270,9 +271,12 @@ def compute_decision(inputs: Mapping[str, Any]) -> dict[str, Any]:
     # Local side of a fair comparison: the days the local purchase ties up
     # money before use (0 = bought just in time, negative = supplier credit).
     # It never changes the savings above, which stay on the Home/Portfolio
-    # basis; the "fair" savings add the local interest on top.
+    # basis; the "fair" savings add the local interest on top. The local
+    # side is EGP money, so it uses the 365-day year of the YC offers mail
+    # (prometheus_core.whatif); the import's USD finance carry stays on 360.
     local_days = to_float(inputs.get("local_finance_days"), 0.0) or 0.0
-    local_carry = (carry_usd_mt(local, local_days, rate)
+    local_year = to_float(inputs.get("local_year_basis"), None) or LOCAL_YEAR_BASIS
+    local_carry = (local * (rate / 100.0) / local_year * local_days
                    if local is not None else None)
     fair_direct = (direct_saving + local_carry
                    if direct_saving is not None and local_carry is not None else None)
@@ -314,6 +318,7 @@ def compute_decision(inputs: Mapping[str, Any]) -> dict[str, Any]:
         "hedged_direct_margin_egp_mt": hedged_direct_margin,
         "hedged_indirect_margin_egp_mt": hedged_indirect_margin,
         "local_finance_days": local_days,
+        "local_year_basis": local_year,
         "local_carry_egp_mt": local_carry,
         "fair_direct_saving_egp_mt": fair_direct,
         "fair_indirect_saving_egp_mt": fair_indirect,
