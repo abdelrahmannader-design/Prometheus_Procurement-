@@ -72,7 +72,7 @@ def test_inventory_days_and_holding_carry():
     assert f"{cif:,.2f} × 18.00% × 10.00 ÷ 360 = {cif * 0.18 * 10 / 360:,.2f} USD/MT" in t
     diff = (cif * 0.18 * 10 / 360 - out["carry_usd_mt"]) * 50
     assert f"by {diff:+,.2f} EGP/MT" in t
-    assert f"= {13400 * 0.18 * 10 / 360:,.2f} EGP/MT" in t
+    assert "Local carry" not in t          # the info-only line used other days; replaced by step 4b
 
 
 def test_no_consumption_rate_is_explained():
@@ -101,7 +101,7 @@ def test_lines_never_start_with_an_equals_sign_and_headings_are_numbered():
     lines = build_workings(inp, out, fees=[("Direct intake", 250.0)], coverage={"cons_mt_day": 120})
     assert all(not txt.startswith("=") for _, txt in lines)
     heads = [txt for k, txt in lines if k == "h"]
-    assert [h[0] for h in heads] == ["1", "2", "3", "4", "5"]
+    assert [h.split(" ")[0] for h in heads] == ["1", "2", "3", "4", "4b", "5"]
     assert re.search(r"Each extra day financed costs [\d,.]+ EGP/MT", as_text(lines))
 
 
@@ -140,3 +140,35 @@ def test_workings_use_fifo_days_for_the_stock_carry():
     cif = out["import_usd_mt"]
     assert f"Carry for 20.00 stock days = {cif:,.2f} × 18.00% × 20.00 ÷ 360" in t
     assert "rate × 0" not in t
+
+
+def test_engine_adds_local_interest_only_to_the_fair_saving():
+    base = compute_decision(_inp())
+    out = compute_decision(_inp(local_finance_days=30))
+    li = 13500 * 0.18 * 30 / 360
+    assert abs(out["local_carry_egp_mt"] - li) < 1e-9
+    assert out["direct_saving_egp_mt"] == base["direct_saving_egp_mt"]       # Home/Portfolio basis unchanged
+    assert abs(out["fair_direct_saving_egp_mt"] - (base["direct_saving_egp_mt"] + li)) < 1e-9
+    assert abs(out["fair_indirect_saving_egp_mt"] - (base["indirect_saving_egp_mt"] + li)) < 1e-9
+    assert base["local_carry_egp_mt"] == 0 and base["fair_direct_saving_egp_mt"] == base["direct_saving_egp_mt"]
+    credit = compute_decision(_inp(local_finance_days=-15))
+    assert credit["fair_direct_saving_egp_mt"] < base["direct_saving_egp_mt"]
+
+
+def test_workings_show_local_interest_and_the_fair_break_even():
+    fees = [("Direct intake", 250.0), ("Clearance", 200.0), ("Inland freight", 100.0)]
+    inp = _inp(local_finance_days=30); out = compute_decision(inp)
+    t = _text(inp, out, fees=fees)
+    li = 13500 * 0.18 * 30 / 360
+    assert f"13,500.00 × 18.00% × 30 ÷ 360 = {li:+,.2f} EGP/MT" in t
+    assert f"= {out['fair_direct_saving_egp_mt']:+,.2f} EGP/MT" in t
+    be = break_even_days(out["import_usd_mt"], 50.0, 18, 550.0, 13500.0, li)
+    at_be = compute_decision(_inp(finance_days=be, local_finance_days=30))
+    assert abs(at_be["fair_direct_saving_egp_mt"]) < 1e-6
+    assert f"= {be:,.0f} days" in t and "local + local interest" in t
+
+
+def test_zero_local_days_explains_just_in_time():
+    inp = _inp(); out = compute_decision(inp)
+    t = _text(inp, out, fees=[("Direct intake", 250.0)])
+    assert "bought just in time" in t and "Fair saving =" not in t

@@ -107,16 +107,17 @@ def fifo_stock_days(*, qty: float, rate: float, today: Any, start: Any = None,
             "avg_days": (first_d + last_d) / 2.0}
 
 
-def break_even_days(cif_usd: float, fx: float, rate_pct: float, fees_egp: float, local: float) -> float | None:
+def break_even_days(cif_usd: float, fx: float, rate_pct: float, fees_egp: float, local: float,
+                    local_carry_egp: float = 0.0) -> float | None:
     """Finance days at which the saving reaches zero.
 
-    saving(d) = local − (CIF × (1 + r·d/360) × FX + fees), so
-    d* = (local − fees − CIF×FX) ÷ (CIF × FX × r/360).
+    saving(d) = local + local interest − (CIF × (1 + r·d/360) × FX + fees), so
+    d* = (local + local interest − fees − CIF×FX) ÷ (CIF × FX × r/360).
     """
     per_day = cif_usd * fx * rate_pct / 100.0 / DAY_BASIS
     if per_day <= 0:
         return None
-    return (local - fees_egp - cif_usd * fx) / per_day
+    return (local + local_carry_egp - fees_egp - cif_usd * fx) / per_day
 
 
 def build_workings(inp: Mapping[str, Any], out: Mapping[str, Any], *,
@@ -128,7 +129,8 @@ def build_workings(inp: Mapping[str, Any], out: Mapping[str, Any], *,
     contract mode it is the canonical stack (intake + clearance + freight);
     in manual mode pass the chosen intake plus clearance and inland freight.
     ``coverage`` carries the inventory figures: cons_mt_day, coverage_days,
-    avg_holding_days, start, end, avg_local, local_carry_mt, local_rate_pct.
+    avg_holding_days, start, end, fifo (from fifo_stock_days), cons_key.
+    The local side uses ``inp['local_finance_days']`` (0 = just in time).
     """
     L: list[tuple[str, str]] = []
     comm_meta = inp.get("comm_meta") or {}
@@ -203,15 +205,46 @@ def build_workings(inp: Mapping[str, Any], out: Mapping[str, Any], *,
         if carry and fx:
             L.append(("n", f"Without the finance carry the saving would be {_signed(saving + carry * fx)} EGP/MT; "
                            f"interest takes {_n(carry * fx)} EGP/MT of it."))
-        be = break_even_days(cif, fx, rate, fee_total, local)
+        # Local side: the days a local purchase would tie up money too
+        ldays = to_float(inp.get("local_finance_days"), 0.0) or 0.0
+        lcarry = to_float(out.get("local_carry_egp_mt"), None)       # the engine's figure, so both views agree
+        if lcarry is None:
+            lcarry = local * rate / 100.0 * ldays / DAY_BASIS
+        L.append(("h", "4b · Local side interest (fair comparison)"))
+        if ldays == 0:
+            L.append(("n", "Local: days money is out = 0 — local corn is taken as bought just in time, so it carries "
+                           "no interest and the fair saving equals the saving above. If you pay for local corn ahead "
+                           "of use, enter those days; enter negative days for supplier credit."))
+        else:
+            L.append(("f", f"Local interest = local × rate × local days ÷ {DAY_BASIS} = {_n(local)} × {_n(rate)}% × "
+                           f"{_n(ldays, 0)} ÷ {DAY_BASIS} = {_signed(lcarry)} EGP/MT"))
+            if ldays < 0:
+                L.append(("n", "Negative days = supplier credit: you pay after use, which is worth money to you, "
+                               "so local becomes cheaper."))
+            fair = saving + lcarry
+            L.append(("x" if fair < 0 else "k", f"Fair saving = saving + local interest = {_signed(saving)} "
+                                                 f"{'+' if lcarry >= 0 else '−'} {_n(abs(lcarry))} = {_signed(fair)} EGP/MT"
+                                                 + ("  (a loss)" if fair < 0 else "")))
+            if qty:
+                L.append(("f", f"On the cargo = {_signed(fair)} × {_n(qty, 0)} MT = {_signed(fair * qty, 0)} EGP"))
+            L.append(("n", f"Both sides now pay interest at {_n(rate)}%: the import for {_n(days, 0)} days, "
+                           f"local for {_n(ldays, 0)} days."))
+        be = break_even_days(cif, fx, rate, fee_total, local, lcarry)
         if be is None:
             L.append(("n", "Break-even finance days: not applicable (no interest rate)."))
         elif be < 0:
-            L.append(("x", "Break-even finance days: none — the deal loses money even with 0 finance days."))
+            L.append(("x", "Break-even finance days: none — the deal loses money even with 0 finance days"
+                           + (" (after the local interest)." if lcarry else ".")))
         else:
-            L.append(("f", f"Break-even finance days = (local − fees − CIF×FX) ÷ (CIF × FX × rate ÷ {DAY_BASIS})"))
-            L.append(("f", f"   = ({_n(local)} − {_n(fee_total)} − {_n(cif * fx)}) ÷ {_n(per_day_usd * fx, 4)} "
-                           f"= {_n(be, 0)} days"))
+            if lcarry:
+                L.append(("f", f"Break-even finance days = (local + local interest − fees − CIF×FX) ÷ "
+                               f"(CIF × FX × rate ÷ {DAY_BASIS})"))
+                L.append(("f", f"   = ({_n(local)} {'+' if lcarry >= 0 else '−'} {_n(abs(lcarry))} − {_n(fee_total)} − "
+                               f"{_n(cif * fx)}) ÷ {_n(per_day_usd * fx, 4)} = {_n(be, 0)} days"))
+            else:
+                L.append(("f", f"Break-even finance days = (local − fees − CIF×FX) ÷ (CIF × FX × rate ÷ {DAY_BASIS})"))
+                L.append(("f", f"   = ({_n(local)} − {_n(fee_total)} − {_n(cif * fx)}) ÷ {_n(per_day_usd * fx, 4)} "
+                               f"= {_n(be, 0)} days"))
             L.append(("k" if be >= days else "x", f"The import stays cheaper than local while it is financed for less than {_n(be, 0)} days "
                            f"({_n(be - days, 0)} days of headroom over the {_n(days, 0)} entered)."
                            if be >= days else
@@ -262,14 +295,7 @@ def build_workings(inp: Mapping[str, Any], out: Mapping[str, Any], *,
                            f"({_signed(diff * qty, 0)} EGP on the cargo)."))
         L.append(("n", "If the supplier is paid before arrival, add the days between payment and arrival "
                        "to the stock days."))
-        avg_local = to_float(cov.get("avg_local"), None)
-        lc = to_float(cov.get("local_carry_mt"), None)
-        lr = to_float(cov.get("local_rate_pct"), rate)
-        if avg_local is not None and lc is not None:
-            L.append(("f", f"Local carry = average local price × rate × stock days ÷ {DAY_BASIS} = "
-                           f"{_n(avg_local, 0)} × {_n(lr)}% × {_n(cov.get('avg_holding_days'))} ÷ {DAY_BASIS} = {_n(lc)} EGP/MT"
-                           + (f" = {_n(lc * qty, 0)} EGP" if qty else "")))
-            L.append(("n", "That is the interest on the stock valued at the local price, on the simple average days (as in Coverage & carry detail)."))
+        L.append(("n", "To put interest on the local side too, enter 'Local: days money is out' (step 4b)."))
     else:
         L.append(("n", "No consumption rate is set for this commodity (Settings → Consumption), "
                        "so the days in inventory cannot be worked out."))

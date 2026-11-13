@@ -267,6 +267,18 @@ def compute_decision(inputs: Mapping[str, Any]) -> dict[str, Any]:
     hedged_direct_saving = local - hedged_direct_own if local is not None and hedged_direct_own is not None else None
     hedged_indirect_saving = local - hedged_indirect_own if local is not None and hedged_indirect_own is not None else None
 
+    # Local side of a fair comparison: the days the local purchase ties up
+    # money before use (0 = bought just in time, negative = supplier credit).
+    # It never changes the savings above, which stay on the Home/Portfolio
+    # basis; the "fair" savings add the local interest on top.
+    local_days = to_float(inputs.get("local_finance_days"), 0.0) or 0.0
+    local_carry = (carry_usd_mt(local, local_days, rate)
+                   if local is not None else None)
+    fair_direct = (direct_saving + local_carry
+                   if direct_saving is not None and local_carry is not None else None)
+    fair_indirect = (indirect_saving + local_carry
+                     if indirect_saving is not None and local_carry is not None else None)
+
     sell_price = to_float(inputs.get("sell_price_egp_mt"), None)
     direct_margin = sell_price - direct_own if sell_price is not None and direct_own is not None else None
     indirect_margin = sell_price - indirect_own if sell_price is not None and indirect_own is not None else None
@@ -301,4 +313,8 @@ def compute_decision(inputs: Mapping[str, Any]) -> dict[str, Any]:
         "indirect_margin_egp_mt": indirect_margin,
         "hedged_direct_margin_egp_mt": hedged_direct_margin,
         "hedged_indirect_margin_egp_mt": hedged_indirect_margin,
+        "local_finance_days": local_days,
+        "local_carry_egp_mt": local_carry,
+        "fair_direct_saving_egp_mt": fair_direct,
+        "fair_indirect_saving_egp_mt": fair_indirect,
     }
