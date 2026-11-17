@@ -266,13 +266,15 @@ def lead_days(trading_days, ref, n=3):
     return before[-n:] if n > 0 else []
 
 
-def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=None, only=None):
+def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=None, only=None, position=None):
     """Write the workbook. ``open_trails``: one dict per open contract with keys contract_id, contract,
     supplier, commodity, mt, pricing, entered, storage_start, day0 (ISO), premium, factor, fixed_cif,
     fixed_fx, fx_basis, discharge, clearance, other_fee and days: [{date, cbot, market_fx, local_excl,
     mode}] oldest first. ``receipts``: {contract_id: {date (ISO, '' = not received yet), vessel, shipment, cbot
     (close on that date), local_excl, contract, supplier, mt}}: each contract is then also compared on its
     receiving date, side by side with its consumption days. ``only``: limit to these contract ids.
+    ``position``: {rows, factor, fx, cbot, rate_note} from prometheus_core.contracts_position — adds the
+    "Contracts position" sheet first and opens the workbook on it.
     Returns the counts written."""
     from openpyxl import Workbook
     from openpyxl.formatting.rule import CellIsRule, FormulaRule
@@ -1029,10 +1031,30 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
         s.sheet_view.showGridLines = False
     ws0.sheet_state = "hidden"            # kept for the links and totals; the Receiving date sheet opens first
     wb.active = wb.index(wr_)
+    pos = None
+    if position is not None:
+        from .contracts_position import SHEET as POS_SHEET, SUMMARY as POS_SUMMARY, write_position_sheet, \
+            write_summary_sheet
+        prow = position.get("rows") or []
+        if only is not None:
+            prow = [r for r in prow if r.get("contract_id") in only]
+        pos = write_position_sheet(wb, prow, as_of=_d(as_of) or dt.date.today(),
+                                   factor=position.get("factor") or 0.3937, fx=position.get("fx"),
+                                   cbot=position.get("cbot"), rate=position.get("rate"),
+                                   rate_note=position.get("rate_note") or "",
+                                   title=position.get("title") or "YC Contracts position")
+        cache[POS_SHEET] = pos["cache"]
+        cache[POS_SUMMARY] = write_summary_sheet(wb, pos, as_of=_d(as_of) or dt.date.today(),
+                                                 title=("Corn" if base == "CORN" else base.title()) + " position")
+        for s_ in wb.worksheets:
+            s_.sheet_view.tabSelected = False
+        wb.active = 0
+        wb.worksheets[0].sheet_view.tabSelected = True
     wb.calculation.fullCalcOnLoad = True
     wb.save(path)
     store_formula_results(path, cache)
     return {"base": base, "fixed_contracts": len(refs_fixed), "fixed_days": sum(len(x["b"]["days"]) for x in refs_fixed),
             "unfixed_contracts": len(refs_unfixed), "unfixed_days": sum(len(x["b"]["days"]) for x in refs_unfixed),
             "open_contracts": len(refs_open), "received_rows": n_recv, "formulas": sum(len(v) for v in cache.values()),
-            "fixed_usd": sum(x["usd"] for x in refs_fixed), "fixed_mt": sum(x["mt"] for x in refs_fixed)}
+            "fixed_usd": sum(x["usd"] for x in refs_fixed), "fixed_mt": sum(x["mt"] for x in refs_fixed),
+            "position_rows": pos["rows"] if pos else 0}
