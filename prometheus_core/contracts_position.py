@@ -832,3 +832,264 @@ def write_summary_sheet(wb, detail, *, as_of, title="Corn position", index=0):
     ws.sheet_properties.pageSetUpPr.fitToPage = True
     ws.page_setup.fitToWidth, ws.page_setup.fitToHeight = 1, 1
     return cache
+
+
+# ── inventory & pricing: the YC layout with remaining stock, FX, consumption and lots ──
+
+INV_SHEET = "Inventory & pricing"
+
+
+def consumed_status(total, received, used):
+    """'Not arrived' / 'Not consumed yet' / 'Partly consumed' / 'Fully consumed'."""
+    total, received, used = (max(to_float(x, 0.0) or 0.0, 0.0) for x in (total, received, used))
+    if received <= 0.5:
+        return "Not arrived"
+    if used <= 0.5:
+        return "Not consumed yet"
+    if used >= received - 0.5 and received >= total - 0.5:
+        return "Fully consumed"
+    return "Partly consumed"
+
+
+def pricing_status(total, priced):
+    total, priced = max(to_float(total, 0.0) or 0.0, 0.0), max(to_float(priced, 0.0) or 0.0, 0.0)
+    if priced <= 0.5:
+        return "Unpriced"
+    if priced >= total - 0.5:
+        return "Fully priced"
+    return f"Partly priced · {priced / total:.0%}" if total else "Partly priced"
+
+
+def write_inventory_sheet(wb, rows, *, as_of, factor=0.3937, fx_now=None, title="YC Contracts position", index=0,
+                          closed_days=15):
+    """One row per contract (and one line per priced lot under it): where the tonnes are — on the way,
+    remaining in inventory, consumed — each split Long (CBOT priced) / Short (CBOT open), with the
+    contract's FX, its consumption status and its pricing status.
+
+    ``rows``: dicts with contract, supplier, origin, total, received, used, premium, futures, fx_contract,
+    fixed_cbot, receiving_date, vessel, shipment, lots [{date, mt, cbot}] and closed (ISO date, '' = open).
+    Open contracts come first; contracts closed in the last ``closed_days`` days follow under their own heading,
+    in grey. Returns {cell: cached value}.
+    """
+    from openpyxl.formatting.rule import FormulaRule
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+
+    EPOCH = dt.date(1899, 12, 30)
+    ws = wb.create_sheet(INV_SHEET, index)
+    cache = {}
+    thin = Side(style="thin", color="7F8C9D")
+    box = Border(left=thin, right=thin, top=thin, bottom=thin)
+    SLATE, YELLOW, BAND, TITLE, INPUT = "44546A", "FFFF00", "DDEBF7", "FFFF99", "FFFBEA"
+    F0 = '#,##0;-#,##0;"-"'
+    widths = {"A": 40, "B": 40, "C": 11, "D": 11, "E": 17, "F": 11, "G": 11, "H": 11, "I": 11, "J": 11, "K": 11,
+              "L": 11, "M": 21, "N": 10, "O": 7, "P": 11, "Q": 10, "R": 3, "S": 11, "T": 11, "U": 11, "V": 11,
+              "W": 9}
+    for col, w in widths.items():
+        ws.column_dimensions[col].width = w
+    ws.sheet_view.showGridLines = False
+
+    def put(r, c, v, fmt=None, bold=False, color=None, fill=None, align=None, italic=False, size=11, wrap=False,
+            border=True):
+        cell = ws.cell(r, c, v)
+        if fmt:
+            cell.number_format = fmt
+        cell.font = Font(bold=bold, color=color, italic=italic, size=size)
+        if fill:
+            cell.fill = PatternFill("solid", fgColor=fill)
+        cell.alignment = Alignment(horizontal=align, vertical="center", wrap_text=wrap)
+        if border:
+            cell.border = box
+        return cell
+
+    def fml(r, c, formula, value, fmt=F0, **kw):
+        put(r, c, formula, fmt, **kw)
+        if isinstance(value, dt.date):
+            value = (value - EPOCH).days
+        cache[ws.cell(r, c).coordinate] = "" if value is None else value
+
+    ws.merge_cells("A1:Q1"); ws.merge_cells("A2:Q2"); ws.merge_cells("A3:Q3")
+    put(1, 1, title, bold=True, size=14, fill=TITLE, align="center", border=False)
+    put(2, 1, f"Date : {as_of.day} {as_of:%B %Y}", bold=True, fill=TITLE, align="center", border=False)
+    put(3, 1, "Long = CBOT priced (the contract's pricing lots, one line each under it with its CIF $ = (lot CBOT + premium) × 0.3937; the contract's CIF $ is their MT-weighted average); Short = CBOT still open. Priced "
+              "tonnes count against the oldest tonnes first: consumed, then inventory, then on the way. Consumed = "
+              "FIFO estimate. FX = the contract's Form 4 rate; pending = no Form 4 yet"
+              + (f" (FX now {fx_now:.4f})" if fx_now else "") + ".", italic=True, size=9, color="555555", wrap=True,
+        border=False)
+    ws.row_dimensions[3].height = 28
+
+    h1, h2 = 5, 6
+    singles = {1: "Supplier", 2: "Vessel / Delivery", 3: "Total Quantity", 4: "FX rate (Form 4)",
+               5: "Consumed?", 12: "Priced MT", 13: "Pricing", 14: "Premium", 15: "CBOT", 16: "Fixed CBOT ¢/bu",
+               17: "CIF $"}
+    for c, text in singles.items():
+        ws.merge_cells(start_row=h1, start_column=c, end_row=h2, end_column=c)
+        put(h1, c, text, bold=True, color="FFFFFF", fill=SLATE, align="center", wrap=True)
+        put(h2, c, None, fill=SLATE)
+    for c0, text in ((6, "On the way"), (8, "Remaining in inventory"), (10, "Consumed")):
+        ws.merge_cells(start_row=h1, start_column=c0, end_row=h1, end_column=c0 + 1)
+        put(h1, c0, text, bold=True, color="FFFFFF", fill=SLATE, align="center")
+        put(h1, c0 + 1, None, fill=SLATE)
+        put(h2, c0, "Long", bold=True, color="FFFFFF", fill=SLATE, align="center")
+        put(h2, c0 + 1, "Short", bold=True, fill=YELLOW, align="center")
+    ws.merge_cells(start_row=h1, start_column=19, end_row=h1, end_column=23)
+    put(h1, 19, "From the app (yellow = input)", bold=True, fill=INPUT, align="center")
+    for c in range(20, 24):
+        put(h1, c, None, fill=INPUT)
+    for c, text in zip(range(19, 24), ("Received MT", "Consumed MT (FIFO)", "Lot date", "Lot CBOT ¢/bu", "Row")):
+        put(h2, c, text, bold=True, fill=INPUT, align="center", wrap=True)
+    ws.row_dimensions[h1].height, ws.row_dimensions[h2].height = 24, 30
+
+    from openpyxl.utils import get_column_letter
+
+    def short(d):
+        x = _dt_or_none(d)
+        return f"{x.day} {x:%b}" if x else str(d or "")
+
+    def group(rows_g, r, kind, is_closed):
+      tot = {k: 0.0 for k in ("total", "lw", "sw", "li", "si", "lc", "sc", "priced")}
+      for i, row in enumerate(rows_g):
+        band = "EDEDED" if is_closed else (BAND if i % 2 == 0 else None)
+        lots = [l for l in (row.get("lots") or []) if (to_float(l.get("mt"), 0.0) or 0.0) > 0]
+        total = row["total"]
+        priced = sum(to_float(l.get("mt"), 0.0) or 0.0 for l in lots)     # as recorded (may round above total)
+        a = allocate(total, row["received"], row["used"], 0.0, min(priced, total))
+        cr = r                                          # the contract row
+        lot_rows = list(range(cr + 1, cr + 1 + len(lots)))
+        put(cr, 1, label(row), bold=True, fill=band)
+        when = (f"received {short(row['receiving_date'])}" if row.get("receiving_date") else
+                (row.get("shipment") or "not received yet"))
+        put(cr, 2, f"{row['contract']}  ·  " + (f"{row['vessel']} · " if row.get("vessel") else "") + when
+                   + (f"  ·  closed {short(row['closed'])}" if is_closed else ""), fill=band)
+        put(cr, 3, total, F0, bold=True, fill=INPUT, align="right")
+        fxc = row.get("fx_contract")
+        put(cr, 4, fxc if fxc is not None else "pending", "0.00##", fill=INPUT if fxc is not None else band,
+            align="center", italic=fxc is None, color="8A6D00" if fxc is None else None)
+        put(cr, 19, row["received"], F0, fill=INPUT)
+        put(cr, 20, row["used"], F0, fill=INPUT)
+        put(cr, 23, kind, None, color="999999", size=8)
+        rec = f"MIN(MAX(S{cr},0),C{cr})"
+        used = f"MIN(MAX(T{cr},0),{rec})"
+        inv = f"({rec}-{used})"
+        pr = f"MIN(L{cr},C{cr})"
+        st = consumed_status(total, row["received"], row["used"])
+        fml(cr, 5, f'=IF({rec}<=0.5,"Not arrived",IF({used}<=0.5,"Not consumed yet",'
+                   f'IF(AND({used}>={rec}-0.5,{rec}>=C{cr}-0.5),"Fully consumed","Partly consumed")))', st, None,
+            fill=band, align="center", bold=st in ("Fully consumed", "Partly consumed"))
+        fml(cr, 12, f"=SUM(L{lot_rows[0]}:L{lot_rows[-1]})" if lots else "=0", priced, bold=True, fill=band)
+        fml(cr, 10, f"=MIN({pr},{used})", a["sold_long"], fill=band)
+        fml(cr, 11, f"={used}-J{cr}", a["sold_short"], fill=YELLOW)
+        fml(cr, 8, f"=MIN({pr}-J{cr},{inv})", a["wh_long"], fill=band)
+        fml(cr, 9, f"={inv}-H{cr}", a["wh_short"], fill=YELLOW)
+        fml(cr, 6, f"=MIN({pr}-J{cr}-H{cr},C{cr}-{rec})", a["long_way"], fill=band)
+        fml(cr, 7, f"=C{cr}-{rec}-F{cr}", a["open_way"], fill=YELLOW)
+        ps = pricing_status(total, priced)
+        fml(cr, 13, f'=IF(L{cr}<=0.5,"Unpriced",IF(L{cr}>=C{cr}-0.5,"Fully priced","Partly priced · "'
+                    f'&TEXT(L{cr}/C{cr},"0%")))', ps, None, fill=band, align="center",
+            bold=ps != "Unpriced", color="B26B00" if ps.startswith("Partly") else None)
+        put(cr, 14, row["premium"], "#,##0.00", bold=True, fill=band)
+        put(cr, 15, month_code(row["futures"]), bold=True, fill=YELLOW, align="center")
+        fixed = row.get("fixed_cbot") if priced > 0 else None
+        put(cr, 16, fixed, "#,##0.00", fill=INPUT if fixed is not None else band)
+        prem_v = row["premium"]
+        lot_cbot = [to_float(l.get("cbot"), None) if to_float(l.get("cbot"), None) is not None else fixed
+                    for l in lots]
+        lot_cif = [(cb + prem_v) * factor if cb is not None and prem_v is not None else None for cb in lot_cbot]
+        if lots:
+            known = [(to_float(l.get("mt"), 0.0) or 0.0, x) for l, x in zip(lots, lot_cif) if x is not None]
+            cif = (sum(m * x for m, x in known) / sum(m for m, _ in known)) if known and sum(m for m, _ in known) else None
+            l0, l1 = lot_rows[0], lot_rows[-1]
+            fml(cr, 17, f'=IFERROR(SUMPRODUCT(L{l0}:L{l1},Q{l0}:Q{l1})/SUMIF(Q{l0}:Q{l1},">0",L{l0}:L{l1}),"")', cif,
+                "$#,##0.00", fill=band, bold=True)
+        else:
+            cif = (fixed + prem_v) * factor if fixed is not None and prem_v is not None else None
+            fml(cr, 17, f'=IF(AND(L{cr}>0,ISNUMBER(P{cr}),ISNUMBER(N{cr})),(P{cr}+N{cr})*{factor},"")', cif,
+                "$#,##0.00", fill=band)
+        ws.row_dimensions[cr].height = 22
+        for k, lot in enumerate(lots):
+            lr = lot_rows[k]
+            ld = lot.get("date")
+            cb = to_float(lot.get("cbot"), None)
+            put(lr, 1, "      ↳ lot priced", italic=True, color="555555", size=10)
+            put(lr, 2, (f"CBOT {cb:,.2f} ¢/bu" if cb is not None else
+                        "CBOT not recorded on the lot" + (f": CIF uses the implied {fixed:,.2f}" if fixed else "")),
+                italic=True, color="555555", size=9, wrap=True)
+            put(lr, 12, to_float(lot.get("mt"), 0.0), F0, fill=INPUT, italic=True)
+            put(lr, 21, _dt_or_none(ld), "yyyy-mm-dd", fill=INPUT)
+            put(lr, 22, cb, "#,##0.00", fill=INPUT)
+            put(lr, 23, "lot", None, color="999999", size=8)
+            fml(lr, 13, f'=IF(ISNUMBER(U{lr}),"priced "&TEXT(U{lr},"dd mmm yyyy"),"priced")',
+                ("priced " + _dt_or_none(ld).strftime("%d %b %Y")) if _dt_or_none(ld) else "priced", None,
+                italic=True, size=9, align="center", color="555555")
+            for c in (3, 4, 5, 6, 7, 8, 9, 10, 11, 14, 15):
+                put(lr, c, None)
+            fml(lr, 16, f'=IF(ISNUMBER(V{lr}),V{lr},IF(ISNUMBER(P{cr}),P{cr},""))', lot_cbot[k], "#,##0.00",
+                italic=True, color="555555" if cb is not None else "8A6D00")
+            fml(lr, 17, f'=IF(AND(ISNUMBER(P{lr}),ISNUMBER(N{cr})),(P{lr}+N{cr})*{factor},"")', lot_cif[k],
+                "$#,##0.00", italic=True, color="555555" if cb is not None else "8A6D00")
+            ws.row_dimensions[lr].height = 20
+        for key, v in (("total", total), ("lw", a["long_way"]), ("sw", a["open_way"]), ("li", a["wh_long"]),
+                       ("si", a["wh_short"]), ("lc", a["sold_long"]), ("sc", a["sold_short"]), ("priced", priced)):
+            tot[key] += v
+        r = cr + 1 + len(lots)
+      return r, tot
+
+    def total_row(tr, text, first_, last_, kind, tot, fill):
+        put(tr, 1, text, bold=True, color="FFFFFF", fill=fill, size=12)
+        for c in (2, 4, 5, 13, 14, 15, 16, 17):
+            put(tr, c, None, fill=fill)
+        for c, key in ((3, "total"), (6, "lw"), (7, "sw"), (8, "li"), (9, "si"), (10, "lc"), (11, "sc"),
+                       (12, "priced")):
+            col = get_column_letter(c)
+            fml(tr, c, f'=SUMIF($W${first_}:$W${last_},"{kind}",{col}{first_}:{col}{last_})', tot[key], bold=True,
+                color="FFFFFF", fill=fill)
+        ws.row_dimensions[tr].height = 24
+
+    cut = as_of - dt.timedelta(days=closed_days)
+    open_rows = [x for x in rows if not x.get("closed")]
+    recent = [x for x in rows if x.get("closed") and (_dt_or_none(x["closed"]) or dt.date.min) >= cut]
+    first = h2 + 1
+    r, tot = group(open_rows, first, "contract", False)
+    last, tr = r - 1, r
+    total_row(tr, "Total Feed (open contracts)", first, last, "contract", tot, "000000")
+    end = tr
+    closed_tot = None
+    if recent:
+        hr = tr + 2
+        ws.merge_cells(start_row=hr, start_column=1, end_row=hr, end_column=17)
+        put(hr, 1, f"Recently closed — closed in the app in the last {closed_days} days (priced; for the record, "
+                   "nothing left to price)", bold=True, color="FFFFFF", fill="7F8C9D")
+        ws.row_dimensions[hr].height = 20
+        r2, closed_tot = group(recent, hr + 1, "closed", True)
+        total_row(r2, "Total recently closed", hr + 1, r2 - 1, "closed", closed_tot, "595959")
+        end = r2
+
+    # a short key under the table (open contracts)
+    k = end + 2
+    inv_tot = tot["li"] + tot["si"]
+    lines = [("Remaining in inventory MT", f"=H{tr}+I{tr}", inv_tot),
+             ("   of which still unpriced", f"=I{tr}", tot["si"]),
+             ("Consumed but still unpriced MT", f"=K{tr}", tot["sc"]),
+             ("Total unpriced MT (on the way + inventory + consumed)", f"=G{tr}+I{tr}+K{tr}",
+              tot["sw"] + tot["si"] + tot["sc"])]
+    for j, (text, formula, value) in enumerate(lines):
+        ws.merge_cells(start_row=k + j, start_column=1, end_row=k + j, end_column=2)
+        put(k + j, 1, text, bold=j in (0, 3)); put(k + j, 2, None)
+        fml(k + j, 3, formula, value, bold=j in (0, 3))
+    ws.conditional_formatting.add(f"E{first}:E{end}", FormulaRule(
+        formula=[f'AND(E{first}="Fully consumed",L{first}<C{first}-0.5)'], font=Font(color="B3261E", bold=True)))
+    ws.freeze_panes = f"C{first}"
+    ws.page_setup.orientation = "landscape"
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    ws.page_setup.fitToWidth, ws.page_setup.fitToHeight = 1, 0
+    ws.print_area = f"A1:Q{k + len(lines)}"
+    return {"cache": cache, "total_row": tr, "first": first, "last": last, "totals": tot,
+            "closed_totals": closed_tot}
+
+
+def _dt_or_none(v):
+    if isinstance(v, dt.date):
+        return v
+    try:
+        return dt.date.fromisoformat(str(v or "")[:10])
+    except ValueError:
+        return None

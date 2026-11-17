@@ -139,3 +139,64 @@ def test_v2_sheet(tmp_path):
     assert sc["E10"] == pytest.approx(cif * 55.2974 + 435) and sc["G10"] == pytest.approx(14300 - sc["E10"])
     assert sm["E9"].value == "Own after excl. freight" and sm["F9"].value == "Local now excl. transport (10/11)"
     assert sc["C13"] == 8500                                          # total to price
+
+
+from prometheus_core.contracts_position import INV_SHEET, consumed_status, pricing_status, write_inventory_sheet
+
+
+def test_consumed_and_pricing_status():
+    assert consumed_status(3000, 0, 0) == "Not arrived"
+    assert consumed_status(2000, 2000, 0) == "Not consumed yet"
+    assert consumed_status(4000, 4000, 1686) == "Partly consumed"
+    assert consumed_status(2000, 2000, 2000) == "Fully consumed"
+    assert pricing_status(2000, 0) == "Unpriced" and pricing_status(2000, 2032.09) == "Fully priced"
+    assert pricing_status(2000, 508.02) == "Partly priced · 25%"
+
+
+def test_inventory_sheet_lots_and_totals():
+    base = {"supplier": "ADM", "origin": "ARG", "futures": "DEC-26", "vessel": "", "shipment": ""}
+    rows = [dict(base, contract="460/20050000", total=2000, received=2000, used=1200, premium=180, fx_contract=55.2974,
+                 fixed_cbot=446.5, receiving_date="2026-10-26",
+                 lots=[{"date": dt.date(2026, 11, 10), "mt": 508.02, "cbot": 441.25},
+                       {"date": dt.date(2026, 11, 11), "mt": 1000, "cbot": None}]),
+            dict(base, contract="460/20050610 3000", total=3000, received=0, used=0, premium=198, fx_contract=None,
+                 fixed_cbot=None, receiving_date="", shipment="December delivery", lots=[])]
+    wb = openpyxl.Workbook()
+    out = write_inventory_sheet(wb, rows, as_of=dt.date(2026, 11, 17), fx_now=53.68)
+    ws, c = wb[INV_SHEET], out["cache"]
+    assert ws["L7"].value == "=SUM(L8:L9)" and c["L7"] == pytest.approx(1508.02)
+    assert c["E7"] == "Partly consumed" and c["M7"] == "Partly priced · 75%"
+    # 1,508 priced: 1,200 consumed long, 308 in inventory long, 492 in inventory short
+    assert c["J7"] == 1200 and c["K7"] == 0 and c["H7"] == pytest.approx(308.02) and c["I7"] == pytest.approx(491.98)
+    assert c["M8"] == "priced 10 Nov 2026" and ws["W8"].value == "lot"
+    assert c["Q8"] == pytest.approx((441.25 + 180) * 0.3937)            # lot CIF from its own CBOT
+    assert c["P9"] == 446.5 and c["Q9"] == pytest.approx((446.5 + 180) * 0.3937)   # no CBOT: implied
+    assert c["Q7"] == pytest.approx((508.02 * c["Q8"] + 1000 * c["Q9"]) / 1508.02)
+    assert ws["D10"].value == "pending" and c["E10"] == "Not arrived" and c["G10"] == 3000
+    tr = out["total_row"]
+    assert ws[f"C{tr}"].value.startswith('=SUMIF($W$7:$W$10,"contract"') and c[f"C{tr}"] == 5000
+    assert c[f"L{tr}"] == pytest.approx(1508.02)                    # lot lines are not counted twice
+
+
+def test_recently_closed_group_has_its_own_subtotal():
+    base = {"supplier": "COFCO", "origin": "BRZ", "futures": "DEC-26", "vessel": "", "shipment": "", "premium": 175,
+            "fx_contract": 53.58, "fixed_cbot": 449.0, "receiving_date": "2026-10-20", "total": 2000,
+            "received": 2000, "used": 2000}
+    rows = [dict(base, contract="OPEN-1", lots=[], fixed_cbot=None),
+            dict(base, contract="SC-33609-CH.2", closed="2026-11-05",
+                 lots=[{"date": "2026-10-28", "mt": 1016.04, "cbot": 451.75}, {"date": "2026-10-30", "mt": 1016.05,
+                                                                              "cbot": 447.75}]),
+            dict(base, contract="OLD", closed="2026-10-01", lots=[])]
+    wb = openpyxl.Workbook()
+    out = write_inventory_sheet(wb, rows, as_of=dt.date(2026, 11, 17))
+    ws, c = wb[INV_SHEET], out["cache"]
+    tr = out["total_row"]
+    assert ws[f"A{tr}"].value == "Total Feed (open contracts)" and c[f"C{tr}"] == 2000 and c[f"L{tr}"] == 0
+    names = [ws.cell(r, 2).value for r in range(tr, ws.max_row + 1)]
+    assert any(n and n.startswith("SC-33609-CH.2") and "closed 5 Nov" in n for n in names)
+    assert not any(n and n.startswith("OLD") for n in names)               # closed too long ago
+    cr = next(r for r in range(tr, ws.max_row + 1) if (ws.cell(r, 2).value or "").startswith("SC-33609-CH.2"))
+    assert c[f"L{cr}"] == pytest.approx(2032.09) and c[f"M{cr}"] == "Fully priced" and c[f"J{cr}"] == 2000
+    sub = cr + 3
+    assert ws[f"A{sub}"].value == "Total recently closed" and '"closed"' in ws[f"C{sub}"].value
+    assert out["closed_totals"]["priced"] == pytest.approx(2032.09)
