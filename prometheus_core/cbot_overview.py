@@ -1046,6 +1046,16 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
         cache[POS_SHEET] = pos["cache"]
         cache[POS_SUMMARY] = write_summary_sheet(wb, pos, as_of=_d(as_of) or dt.date.today(),
                                                  title=("Corn" if base == "CORN" else base.title()) + " position")
+        if position.get("inventory_rows") is not None:
+            from .contracts_position import INV_SHEET, write_inventory_sheet
+            irows = position["inventory_rows"]
+            if only is not None:
+                irows = [r for r in irows if r.get("contract_id") in only or r.get("closed")]
+            inv = write_inventory_sheet(wb, irows, as_of=_d(as_of) or dt.date.today(),
+                                        factor=position.get("factor") or 0.3937, fx_now=position.get("fx"),
+                                        title=position.get("title") or "YC Contracts position", index=1,
+                                        closed_days=position.get("closed_days") or 15)
+            cache[INV_SHEET] = inv["cache"]
         for s_ in wb.worksheets:
             s_.sheet_view.tabSelected = False
         wb.active = 0

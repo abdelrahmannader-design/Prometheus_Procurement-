@@ -106,11 +106,52 @@ def position_rows(open_rows, base="CORN", receipts=None, lots=None, final_cif=No
             "local_date": str(o.get("local_date") or "")[:10],
             "fx_contract": (to_float(o.get("fx"), None)
                             if str(o.get("fx_basis") or "").lower().startswith("form 4") else None),
-            "eta": None, "remarks": [],
+            "eta": None, "remarks": [], "lots": list(cl), "closed": "",
         })
     rows.sort(key=lambda r: (not r["receiving_date"], r["receiving_date"] or "9999", r["contract"]))
     flag_look_alikes(rows)
     return rows
+
+
+def closed_rows(contracts, base="CORN", closed_dates=None, lots=None, as_of=None, closed_days=15, factor=0.3937):
+    """Rows for contracts closed in the last ``closed_days`` days, from the management model's contracts.
+
+    ``closed_dates``: {contract_id: ISO date the contract was closed in the app}; a closed contract without
+    a recorded date is left out (its closing day is unknown). ``lots``: {contract_id: [{date, mt, cbot}]}.
+    """
+    as_of = as_of or dt.date.today()
+    cut = as_of - dt.timedelta(days=closed_days)
+    closed_dates, lots = closed_dates or {}, lots or {}
+    out = []
+    for c in contracts or []:
+        if (c.get("base") or "").upper() != base.upper() or str(c.get("status") or "").lower() != "closed":
+            continue
+        cid = c.get("id") or c.get("contract_id")
+        when = str(closed_dates.get(cid) or "")[:10]
+        try:
+            d = dt.date.fromisoformat(when)
+        except ValueError:
+            continue
+        if d < cut or d > as_of:
+            continue
+        cl = lots.get(cid) or []
+        prem = to_float(c.get("premium"), None)
+        cif = to_float(c.get("cif_usd_mt"), None) if c.get("cif_final") or c.get("final_cif_over_lots") else None
+        comm = str(c.get("commodity") or "")
+        out.append({
+            "contract_id": cid, "contract": c.get("contract") or cid, "supplier": c.get("supplier") or "",
+            "origin": comm.upper().split("-")[1] if "-" in comm else ORIGIN_CODE.get(str(c.get("origin") or "").upper(), ""),
+            "total": to_float(c.get("qty_mt"), 0.0) or 0.0,
+            "received": to_float(c.get("delivered_mt"), 0.0) or 0.0,
+            "used": to_float(c.get("consumed_mt"), 0.0) or 0.0,
+            "premium": prem, "futures": (c.get("contract_month") or {}).get("code") if isinstance(c.get("contract_month"), dict)
+            else (c.get("futures_month") or ""),
+            "fx_contract": to_float(c.get("fx"), None) if str(c.get("fx_basis") or "").lower().startswith("form 4") else None,
+            "fixed_cbot": _fixed_cbot(cl, cif, factor, prem),
+            "receiving_date": str(c.get("storage_start") or "")[:10], "vessel": "", "shipment": "",
+            "lots": cl, "closed": when})
+    out.sort(key=lambda r: (r["closed"], r["contract"]), reverse=True)
+    return out
 
 
 def has_contract_number(name: Any) -> bool:

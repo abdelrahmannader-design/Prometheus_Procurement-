@@ -200,3 +200,23 @@ def test_recently_closed_group_has_its_own_subtotal():
     sub = cr + 3
     assert ws[f"A{sub}"].value == "Total recently closed" and '"closed"' in ws[f"C{sub}"].value
     assert out["closed_totals"]["priced"] == pytest.approx(2032.09)
+
+
+from prometheus_core.contracts_position import closed_rows
+
+
+def test_closed_rows_keep_only_recent_closures_with_a_date():
+    contracts = [
+        {"id": "C1", "contract": "SC-33609-CH.2", "base": "CORN", "status": "Closed", "commodity": "CORN-BRZ",
+         "supplier": "COFCO", "qty_mt": 2000, "delivered_mt": 2000, "consumed_mt": 2000, "premium": 175,
+         "contract_month": {"code": "DEC-26"}, "fx": 53.58, "fx_basis": "Form 4", "storage_start": "2026-10-20"},
+        {"id": "C2", "contract": "OLD", "base": "CORN", "status": "Closed", "qty_mt": 2000},
+        {"id": "C3", "contract": "NO-DATE", "base": "CORN", "status": "Closed", "qty_mt": 2000},
+        {"id": "C4", "contract": "OPEN", "base": "CORN", "status": "Open", "qty_mt": 2000}]
+    rows = closed_rows(contracts, "CORN", {"C1": "2026-11-05", "C2": "2026-10-01", "C3": ""},
+                       {"C1": [{"date": "2026-10-28", "mt": 1016.04, "cbot": 451.75},
+                               {"date": "2026-10-30", "mt": 1016.05, "cbot": 447.75}]}, dt.date(2026, 11, 18), 15)
+    assert [r["contract"] for r in rows] == ["SC-33609-CH.2"]
+    r = rows[0]
+    assert r["closed"] == "2026-11-05" and r["fx_contract"] == 53.58 and r["origin"] == "BRZ"
+    assert r["futures"] == "DEC-26" and r["fixed_cbot"] == pytest.approx((451.75 * 1016.04 + 447.75 * 1016.05) / 2032.09)
