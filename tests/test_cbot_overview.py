@@ -205,6 +205,16 @@ class WorkbookTests(unittest.TestCase):
             self.assertEqual(rv.cell(r9, 16).value, "Cheaper to fix now (indicative)")
             self.assertAlmostEqual(rv.cell(r9, 11).value, 449.75 - 446.0)   # open, not consumed: day 0 against now
             self.assertEqual(rv.cell(rows["REF-C8"], 4).value, "Not received")
+            # every open contract, received or not, in one total (C1 is closed in the app)
+            tot_r = next(r_ for r_ in range(5, rx.max_row + 1)
+                         if str(rx.cell(r_, 1).value or "").startswith("Total — open contracts"))
+            self.assertEqual(rx.cell(tot_r, 1).value, "Total — open contracts (3)")
+            self.assertEqual(rx.cell(tot_r, 5).value, f"=SUM(E{rows['OPEN-9']},E{rows['REF-C3']},E{rows['REF-C8']})"
+                             if rows["OPEN-9"] < rows["REF-C3"] else rx.cell(tot_r, 5).value)
+            self.assertAlmostEqual(rv.cell(tot_r, 5).value,
+                                   sum(rv.cell(rows[k], 5).value or 0 for k in ("OPEN-9", "REF-C3", "REF-C8")))
+            self.assertEqual(res["open_contracts_n"], 3)
+            self.assertAlmostEqual(rv.cell(tot_r, 5).value, res["open_contracts_mt"])
             self.assertEqual(rx.cell(4, 17).value, "Receiving end")         # the receiving period, start to end
             self.assertEqual(rv.cell(r1, 17).value.date().isoformat(), "2026-10-19")
             self.assertEqual(rv.cell(r3, 17).value, "end not entered")

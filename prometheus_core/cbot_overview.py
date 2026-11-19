@@ -912,7 +912,7 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
             lines.append((x["t"]["received"], "Not fixed", "Open contracts", x))
             seen.add(cid)
     lines.sort(key=lambda z: z[0], reverse=True)
-    recv_rows, recv_values = {}, {}
+    recv_rows, recv_values, open_rows = {}, {}, []
     row = 5
     for date, kind, sh, x in lines:
         q = f"'{sh}'!"
@@ -953,6 +953,8 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
             italic=not end_, color=None if end_ else GREY)
         put_consumption(row, (rc.get(cid) or {}).get("consumption"), cid)
         recv_rows[cid] = row
+        if not ((rc.get(cid) or {}).get("closed_status") or (rc.get(cid) or {}).get("closed")):
+            open_rows.append((row, x["r_mt"] if sh != "Open contracts" else _n(x["t"].get("mt"))))
         recv_values[(cid, "date")] = _d(date)
         recv_values[(cid, "end")] = end_ if end_ else "end not entered"
         f(wr_, row, 11, f'=IF({isn(f"J{row}", f"G{row}")},J{row}-G{row},"")', diff, S2, bold=True)
@@ -1004,9 +1006,21 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
             put(wr_, row, 18, "—", align="center", color=GREY); put(wr_, row, 19, "—", align="center", color=GREY)
             put(wr_, row, 20, "not received: not on the FIFO walk", italic=True, color=GREY)
             recv_rows[cid], recv_values[(cid, "date")], recv_values[(cid, "end")] = row, "Not received", "—"
+            if not (v.get("closed_status") or v.get("closed")):
+                open_rows.append((row, _n(v.get("mt"))))
             row += 1
     if not lines and not pending:
         put(wr_, 5, 1, "No receiving dates were given.", italic=True, color=GREY)
+    open_mt = None
+    if open_rows:                                   # every open contract: received (fixed or not) and not received
+        row += 1
+        open_mt = sum(m or 0 for _r, m in open_rows)
+        put(wr_, row, 1, f"Total — open contracts ({len(open_rows)})", bold=True)
+        f(wr_, row, 5, "=SUM(" + ",".join(f"E{r_}" for r_, _m in open_rows) + ")", open_mt, F0, bold=True)
+        put(wr_, row, 6, "received + not received", italic=True, color=GREY)
+        for c in range(1, 17):
+            wr_.cell(row, c).fill = PatternFill("solid", fgColor=TOTAL_FILL)
+        row += 1
     basis = next((v["consumption"].get("basis") for v in rc.values() if v.get("consumption")), "")
     if basis:
         row += 1
@@ -1190,4 +1204,5 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
             "open_contracts": len(refs_open), "received_rows": n_recv, "formulas": sum(len(v) for v in cache.values()),
             "fixed_usd": sum(x["usd"] for x in refs_fixed), "fixed_mt": sum(x["mt"] for x in refs_fixed),
             "position_rows": pos["rows"] if pos else 0, "till_pricing": till["summary"],
-            "mtm_sections": (mtm_res or {}).get("sections") or [], "recv_rows": recv_rows}
+            "mtm_sections": (mtm_res or {}).get("sections") or [], "recv_rows": recv_rows,
+            "open_contracts_mt": open_mt, "open_contracts_n": len(open_rows)}
