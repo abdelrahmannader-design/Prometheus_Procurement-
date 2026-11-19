@@ -4,8 +4,8 @@ The CBOT export (prometheus_core.cbot_overview) shows each contract's receiving 
 in the workbook, either in the "Receiving end" column of the Receiving date sheet or in a block header on the
 Fixed / Not fixed consumption sheets ("received 2026-10-26 (end 2026-10-28)" or "received X to Y"). This
 module finds those dates and matches them to the app's contracts: by the exact contract name, else by a
-contract whose name begins the workbook's (".1", " 2000" added in the workbook) and that has the same
-receiving date. Nothing is matched on a guess: ambiguous or unmatched rows are reported, not applied.
+contract whose name and the workbook's differ only by a suffix (".1" or " 2000" added in the workbook, "-COPY"
+in the app) and that has the same receiving date. Nothing is matched on a guess: ambiguous or unmatched rows are reported, not applied.
 """
 
 from __future__ import annotations
@@ -25,6 +25,11 @@ def _iso(v):
     if isinstance(v, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", v.strip()):
         return v.strip()
     return ""
+
+
+def _extends(longer, shorter):
+    """``longer`` is ``shorter`` plus a suffix after a separator ('TRADE#SC-33039.1', '460/20050010-COPY')."""
+    return longer != shorter and longer.startswith(shorter) and longer[len(shorter):len(shorter) + 1] in _SEP
 
 
 def norm(name):
@@ -82,10 +87,10 @@ def plan_updates(contracts, found):
         how = "same name"
         if len(cands) > 1 and start:
             cands = [cid for cid in cands if str(contracts[cid].get("storage_start") or "")[:10] == start]
-        if not cands:                                   # the workbook added a suffix: same receiving date needed
+        if not cands:            # a suffix on one side (".1" in the workbook, "-COPY" in the app): same date needed
             how = "name + same receiving date"
             cands = [cid for name, ids in by_name.items() for cid in ids
-                     if key.startswith(name) and key[len(name):len(name) + 1] in _SEP and start
+                     if (_extends(key, name) or _extends(name, key)) and start
                      and str(contracts[cid].get("storage_start") or "")[:10] == start]
         line = {"contract": f["contract"], "start": start, "end": end, "where": f.get("where", ""), "cid": "",
                 "app_name": "", "app_start": "", "current": "", "action": "skip", "note": ""}

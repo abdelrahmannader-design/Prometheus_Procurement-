@@ -22,7 +22,8 @@ def _book(path):
             ("460/20050610 2000", dt.datetime(2026, 11, 15), "Still receiving"),
             ("460/20050340 2000", dt.datetime(2026, 11, 10), dt.datetime(2026, 11, 16)),
             ("460/20050000", dt.datetime(2026, 10, 26), None),
-            ("TRADE#SC-33039.1", dt.datetime(2026, 10, 1), None)]
+            ("TRADE#SC-33039.1", dt.datetime(2026, 10, 1), None),
+            ("460/20050010", dt.datetime(2026, 10, 26), dt.datetime(2026, 10, 30))]
     for i, (n, s, e) in enumerate(rows, 5):
         rd.cell(i, 1, n); rd.cell(i, 4, s); rd.cell(i, 17, e)
     fx = wb.create_sheet("Fixed consumption")
@@ -41,13 +42,14 @@ def test_read_and_match_the_typed_end_dates():
         found = read_end_dates(fp)
     got = {f["contract"]: f["end"] for f in found}
     assert got == {"SC-34179-CH.1": "2026-11-19", "460/20050340 2000": "2026-11-16", "460/20050000": "2026-10-28",
-                   "TRADE#SC-33039.1": "2026-10-03", "TRADE#SC-33039.2": "2026-10-02"}
+                   "TRADE#SC-33039.1": "2026-10-03", "TRADE#SC-33039.2": "2026-10-02", "460/20050010": "2026-10-30"}
     contracts = {
         "C0175": {"name": "SC-34179-CH.1", "storage_start": ""},
         "C0177": {"name": "460/20050340", "storage_start": "2026-11-10"},
         "C0179": {"name": "460/20050340 1000MT", "storage_start": "2026-11-10"},
         "C0165": {"name": "460/20050000", "storage_start": "2026-10-26", "receiving_end": "2026-10-28"},
         "C0152": {"name": "TRADE#SC-33039", "storage_start": "2026-10-01"},
+        "C0181": {"name": "460/20050010-COPY", "storage_start": "2026-10-26"},
         "C0153": {"name": "TRADE#SC-33039", "storage_start": "2026-09-29", "receiving_end": "2026-09-30"}}
     plan = {p["contract"]: p for p in plan_updates(contracts, found)}
     assert (plan["SC-34179-CH.1"]["cid"], plan["SC-34179-CH.1"]["action"]) == ("C0175", "set")
@@ -55,7 +57,8 @@ def test_read_and_match_the_typed_end_dates():
     assert plan["460/20050000"]["action"] == "same"
     assert (plan["TRADE#SC-33039.1"]["cid"], plan["TRADE#SC-33039.1"]["action"]) == ("C0152", "set")
     assert (plan["TRADE#SC-33039.2"]["cid"], plan["TRADE#SC-33039.2"]["action"]) == ("C0153", "replace")
-    assert apply_updates(contracts, list(plan.values()), stamp="t") == 4
+    assert (plan["460/20050010"]["cid"], plan["460/20050010"]["action"]) == ("C0181", "set")   # '-COPY' in the app
+    assert apply_updates(contracts, list(plan.values()), stamp="t") == 5
     assert contracts["C0177"]["receiving_end"] == "2026-11-16" and contracts["C0153"]["receiving_end"] == "2026-10-02"
     assert "receiving_end" not in contracts["C0179"]
 
