@@ -1,4 +1,5 @@
 """The one-screen-wide CBOT fixed vs consumption workbook."""
+import datetime as dt
 import os
 import pathlib
 import sys
@@ -82,7 +83,7 @@ class WorkbookTests(unittest.TestCase):
             wf, wv = openpyxl.load_workbook(fp), openpyxl.load_workbook(fp, data_only=True)
             self.assertEqual(wf.sheetnames, list(ov.SHEETS))
             for ws in wf.worksheets:                              # nothing to scroll sideways on the visible sheets
-                self.assertLessEqual(ws.max_column, 25 if ws.title == "Summary" else 17 if ws.title == "Receiving date" else 16,
+                self.assertLessEqual(ws.max_column, 25 if ws.title == "Summary" else 20 if ws.title == "Receiving date" else 16,
                                      ws.title)
             self.assertEqual(wf["Summary"].sheet_state, "hidden")
             self.assertEqual(wf.active.title, "Receiving date")
@@ -138,7 +139,10 @@ class WorkbookTests(unittest.TestCase):
                      "lots": [{"date": "2026-10-31", "mt": 1000.0}],
                      "window": [{"date": "2026-10-30", "cbot": 455.0, "local_excl": 15100.0},
                                 {"date": "2026-10-31", "cbot": 447.75, "local_excl": 15200.0}]},
-              "C9": {"date": "2026-11-02", "vessel": "PHILIPPAKOS", "contract": "OPEN-9", "mt": 5000.0},
+              "C9": {"date": "2026-11-02", "vessel": "PHILIPPAKOS", "contract": "OPEN-9", "mt": 5000.0,
+                     "consumption": {"first": "2026-11-12", "last": "2026-11-25", "used_mt": 3000.0, "qty": 5000.0,
+                                     "finished": True, "first_projected": False, "last_projected": True,
+                                     "basis": "500 MT/day from each delivery", "fifo_from": "2026-11-02"}},
               "C8": {"date": "", "vessel": "ALPHA TEAM", "contract": "REF-C8", "mt": 5000.0}}
         t = dict(trail(), vessel="PHILIPPAKOS", received="2026-11-02")
         fix = 245.66 / FACTOR - 175.0
@@ -203,6 +207,16 @@ class WorkbookTests(unittest.TestCase):
             self.assertEqual(rx.cell(4, 17).value, "Receiving end")         # the receiving period, start to end
             self.assertEqual(rv.cell(r1, 17).value.date().isoformat(), "2026-10-19")
             self.assertEqual(rv.cell(r3, 17).value, "end not entered")
+            # consumption days from the app's FIFO walk; the projected end is marked
+            self.assertEqual([rx.cell(4, c).value for c in (18, 19, 20)],
+                             ["Consumption start (FIFO)", "Consumption end (FIFO)", "Consumption (FIFO) — status"])
+            self.assertEqual(rv.cell(r9, 18).value.date().isoformat(), "2026-11-12")
+            self.assertEqual(rv.cell(r9, 19).value.date().isoformat(), "2026-11-25")
+            self.assertTrue(rx.cell(r9, 19).font.italic)
+            self.assertEqual(rv.cell(r9, 20).value, "Consuming — 3,000 of 5,000 MT used (rest projected)")
+            self.assertEqual(rv.cell(r1, 20).value, "not on the FIFO walk")
+            self.assertTrue(any("500 MT/day from each delivery" in str(rx.cell(r, 1).value or "")
+                                for r in range(5, rx.max_row + 1)))
             # the summary reads both, and the pricing window
             sx, sv_ = wf["Summary"], wv["Summary"]
             self.assertEqual(sx["O10"].value, f"='Receiving date'!M{r1}")
@@ -242,6 +256,27 @@ class WorkbookTests(unittest.TestCase):
         self.assertEqual(ov.status_text(None, True), "  ·  still open")
         self.assertEqual(ov.status_text({"date": "2026-04-30", "lots": lots, "closed_status": True}),
                          "  ·  received 2026-04-30 (end not entered) → last lot priced 2026-10-30  ·  closed (date not recorded)")
+
+    def test_fifo_consumption_dates(self):
+        lots = [{"lot_id": "CONTRACT-A", "original_mt": 1000.0}, {"lot_id": "CONTRACT-B", "original_mt": 1000.0},
+                {"lot_id": "CONTRACT-C", "original_mt": 5000.0}, {"lot_id": "LOCAL-1", "original_mt": 100.0}]
+        draws = ([{"date": f"2026-11-{d:02d}", "mt": 500.0, "lot_id": "CONTRACT-A"} for d in (1, 2)]
+                 + [{"date": f"2026-11-{d:02d}", "mt": 500.0, "lot_id": "CONTRACT-B"} for d in (3, 4)]
+                 + [{"date": f"2026-11-{d:02d}", "mt": 500.0, "lot_id": "CONTRACT-C"} for d in range(5, 12)]
+                 + [{"date": "2026-11-05", "mt": 50.0, "lot_id": "LOCAL-1"}])
+        out = ov.fifo_consumption_dates(draws, lots, dt.date(2026, 11, 3), "500 MT/day")
+        self.assertEqual(sorted(out), ["A", "B", "C"])                     # local purchases are not contracts
+        a, b, c = out["A"], out["B"], out["C"]
+        self.assertEqual((a["first"], a["last"], a["finished"], a["last_projected"]), ("2026-11-01", "2026-11-02", True, False))
+        self.assertEqual((b["first"], b["last"], b["used_mt"], b["last_projected"]), ("2026-11-03", "2026-11-04", 500.0, True))
+        self.assertEqual((c["first"], c["last"], c["finished"], c["first_projected"]), ("2026-11-05", "", False, True))
+        self.assertEqual(ov.consumption_text(a), "consumed (FIFO) 2026-11-01 to 2026-11-02")
+        self.assertEqual(ov.consumption_text(b), "consumed (FIFO) from 2026-11-03, ends ~2026-11-04 (projected)")
+        self.assertEqual(ov.consumption_text(c), "consumption (FIFO) starts ~2026-11-05, end beyond the projection")
+        self.assertEqual(ov.consumption_text(None), "")
+        self.assertEqual(a["fifo_from"], "")                                # no delivery date on these lots
+        self.assertIn("  ·  consumed (FIFO) 2026-11-01 to 2026-11-02 → ",
+                      ov.status_text({"date": "2026-10-30", "consumption": a, "closed": ""}))
 
     def test_lots_and_first_notice_day(self):
         self.assertEqual(ov.lots_by_day([{"date": "2026-10-28", "mt": 508.02}, {"date": "2026-10-28", "qty_mt": 508.02},

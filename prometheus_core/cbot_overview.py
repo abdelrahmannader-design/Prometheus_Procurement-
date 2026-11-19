@@ -216,6 +216,57 @@ def receiving_text(start, end):
     return f"received {start}" + (f" to {end}" if end else " (end not entered)")
 
 
+def fifo_consumption_dates(draws, lots, today, basis=""):
+    """First and last consumption day of each contract on the app's FIFO walk.
+
+    ``draws``: the walk's withdrawals ({date, mt, lot_id 'CONTRACT-<id>'}), run past ``today`` so the stock
+    still on hand is followed to its end at the same daily rate; ``lots``: the walk's lots (original_mt).
+    Returns {contract id: {first, last, used_mt (by today), qty, finished, first_projected, last_projected,
+    basis}}; ``last`` is '' when the walk ends before the contract is used up."""
+    today = str(today)[:10]
+    qty = {str(l.get("lot_id"))[9:]: float(l.get("original_mt") or 0.0) for l in lots or []
+           if str(l.get("lot_id") or "").startswith("CONTRACT-")}
+    landed = {str(l.get("lot_id"))[9:]: str(l.get("delivery_date") or "")[:10] for l in lots or []
+              if str(l.get("lot_id") or "").startswith("CONTRACT-")}
+    out = {}
+    for d in draws or []:
+        lid = str(d.get("lot_id") or "")
+        if not lid.startswith("CONTRACT-") or not d.get("mt"):
+            continue
+        day, mt = str(d.get("date"))[:10], float(d["mt"])
+        rec = out.setdefault(lid[9:], {"first": day, "last": day, "used_mt": 0.0, "drawn_mt": 0.0})
+        rec["first"], rec["last"] = min(rec["first"], day), max(rec["last"], day)
+        rec["drawn_mt"] += mt
+        if day <= today:
+            rec["used_mt"] += mt
+    for cid, rec in out.items():
+        q = qty.get(cid)
+        rec.update(qty=q, finished=q is None or rec["drawn_mt"] >= q - 0.5, basis=basis, fifo_from=landed.get(cid, ""))
+        if not rec["finished"]:
+            rec["last"] = ""
+        rec["first_projected"] = rec["first"] > today
+        rec["last_projected"] = bool(rec["last"]) and rec["last"] > today
+    return out
+
+
+def consumption_text(cd):
+    """'consumed (FIFO) 2026-10-26 to 2026-11-03', or the projected part marked as such."""
+    if not cd:
+        return ""
+    first, last = cd.get("first") or "", cd.get("last") or ""
+    if not last:
+        end = "end beyond the projection"
+    elif cd.get("last_projected"):
+        end = f"ends ~{last} (projected)"
+    else:
+        end = f"to {last}"
+    if cd.get("first_projected"):
+        return f"consumption (FIFO) starts ~{first}, {end}"
+    if cd.get("last_projected") or not last:
+        return f"consumed (FIFO) from {first}, {end}"
+    return f"consumed (FIFO) {first} {end}"
+
+
 def status_text(rv, still_open=False):
     """'received X → last lot priced Y · closed in the app Z' for a contract block's header.
 
@@ -226,7 +277,8 @@ def status_text(rv, still_open=False):
     lots = lots_by_day(rv.get("lots"))
     last = max(lots) if lots else None
     closed, is_closed = rv.get("closed") or "", bool(rv.get("closed_status") or rv.get("closed"))
-    head = f"  ·  {receiving_text(rv.get('date'), rv.get('receiving_end'))} → "
+    cons = consumption_text(rv.get("consumption"))
+    head = f"  ·  {receiving_text(rv.get('date'), rv.get('receiving_end'))}" + (f"  ·  {cons}" if cons else "") + " → "
     if last:
         tail = f"last lot priced {last.isoformat()}"
         if closed:
@@ -384,7 +436,7 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
                 "is not a trading day), on the whole contract quantity. GREEN = we fixed below the market of that day (we "
                 "paid less than the market); RED = we fixed above it. A contract not fixed yet is compared with the latest "
                 "CBOT instead: green = it is cheaper to fix now than it was on the receiving date (indicative).",
-                [24, 15, 20, 12, 8, 12, 10, 8, 10, 10, 11, 9, 11, 13, 11, 31, 14])
+                [24, 15, 20, 12, 8, 12, 10, 8, 10, 10, 11, 9, 11, 13, 11, 31, 14, 14, 14, 40])
 
     # ── Fixed consumption: pricing days and the market from the receiving date to the window end ──
     W = [20, 9, 11, 11, 10, 12, 12, 12, 13, 13, 26, 11, 12, 12]
@@ -819,9 +871,33 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
     wo.freeze_panes = "A4"
 
     # ── Receiving date: one row per contract ──
+    def put_consumption(row_, cd, cid_=None):
+        """Columns R:T — the contract's first and last day on the app's FIFO walk; projected days in italics."""
+        if not cd:
+            put(wr_, row_, 18, "—", align="center", color=GREY); put(wr_, row_, 19, "—", align="center", color=GREY)
+            put(wr_, row_, 20, "not on the FIFO walk", italic=True, color=GREY)
+            return
+        for col_, key, proj in ((18, "first", "first_projected"), (19, "last", "last_projected")):
+            v_ = _d(cd.get(key))
+            put(wr_, row_, col_, v_ if v_ else "beyond the projection", DF if v_ else None, align="center",
+                italic=bool(cd.get(proj)) or not v_, color=GREY if (cd.get(proj) or not v_) else None)
+        used, qty_ = cd.get("used_mt") or 0.0, cd.get("qty")
+        if cd.get("finished") and not cd.get("last_projected"):
+            st = "Fully consumed"
+        elif cd.get("first_projected"):
+            st = "Not started — projected"
+        else:
+            st = f"Consuming — {used:,.0f} of {qty_:,.0f} MT used (rest projected)" if qty_ else "Consuming"
+        recv_ = str((rc.get(cid_) or {}).get("date") or "")[:10] if cid_ else ""
+        if cd.get("fifo_from") and recv_ and cd["fifo_from"] != recv_:
+            st += f" · check: FIFO counts it from its delivery date {cd['fifo_from']}"
+        put(wr_, row_, 20, st, italic=st != "Fully consumed",
+            color=RED if "check:" in st else None)
+
     heads(wr_, 4, ["Contract", "Vessel", "Shipment", "Receiving date", "MT", "Pricing", f"Fixed / latest CBOT {unit}",
                    "Factor to $/MT", "FX (contract)", f"CBOT on receiving date {unit}", f"Market − our fixing {unit}", "USD/MT",
-                   "USD", "EGP", "Local − landed EGP/MT", "In words", "Receiving end"])
+                   "USD", "EGP", "Local − landed EGP/MT", "In words", "Receiving end",
+                   "Consumption start (FIFO)", "Consumption end (FIFO)", "Consumption (FIFO) — status"])
     lines = []
     for kind, refs, sh in (("Fixed", refs_fixed, "Fixed consumption"), ("Not fixed", refs_unfixed, "Not fixed consumption")):
         for x in refs:
@@ -872,6 +948,7 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
         end_ = _d((rc.get(cid) or {}).get("receiving_end"))
         put(wr_, row, 17, end_ if end_ else "end not entered", DF if end_ else None, inp=bool(end_), align="center",
             italic=not end_, color=None if end_ else GREY)
+        put_consumption(row, (rc.get(cid) or {}).get("consumption"), cid)
         f(wr_, row, 11, f'=IF({isn(f"J{row}", f"G{row}")},J{row}-G{row},"")', diff, S2, bold=True)
         f(wr_, row, 12, f'=IF({isn(f"K{row}", f"H{row}")},K{row}*H{row},"")', _mul(diff, fac), S2)
         f(wr_, row, 13, f'=IF({isn(f"L{row}", f"E{row}")},L{row}*E{row},"")', usd, S0, bold=True)
@@ -917,9 +994,18 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
             put(wr_, row, 1, v.get("contract") or cid, bold=True); put(wr_, row, 2, v.get("vessel") or "")
             put(wr_, row, 3, v.get("shipment") or ""); put(wr_, row, 4, "Not received", italic=True, color=GREY)
             put(wr_, row, 5, _n(v.get("mt")), F0)
+            put(wr_, row, 17, "—", align="center", color=GREY)
+            put(wr_, row, 18, "—", align="center", color=GREY); put(wr_, row, 19, "—", align="center", color=GREY)
+            put(wr_, row, 20, "not received: not on the FIFO walk", italic=True, color=GREY)
             row += 1
     if not lines and not pending:
         put(wr_, 5, 1, "No receiving dates were given.", italic=True, color=GREY)
+    basis = next((v["consumption"].get("basis") for v in rc.values() if v.get("consumption")), "")
+    if basis:
+        row += 1
+        put(wr_, row, 1, "Consumption dates (columns R:T) come from the app's FIFO walk: " + basis +
+            ". Days after today (grey, italic) are projected at the same rate; actual plant use can differ.",
+            italic=True, color=GREY)
     wr_.freeze_panes = "B5"
 
     # ── Summary: one row per contract, read from the blocks ──
