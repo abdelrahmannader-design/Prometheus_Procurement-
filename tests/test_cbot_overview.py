@@ -83,7 +83,8 @@ class WorkbookTests(unittest.TestCase):
             wf, wv = openpyxl.load_workbook(fp), openpyxl.load_workbook(fp, data_only=True)
             self.assertEqual(wf.sheetnames, list(ov.SHEETS))
             for ws in wf.worksheets:                              # nothing to scroll sideways on the visible sheets
-                self.assertLessEqual(ws.max_column, 25 if ws.title == "Summary" else 20 if ws.title == "Receiving date" else 16,
+                self.assertLessEqual(ws.max_column, 25 if ws.title == "Summary" else 20 if ws.title == "Receiving date"
+                                     else 17 if ws.title == "Fixed till pricing" else 16,
                                      ws.title)
             self.assertEqual(wf["Summary"].sheet_state, "hidden")
             self.assertEqual(wf.active.title, "Receiving date")
@@ -215,6 +216,26 @@ class WorkbookTests(unittest.TestCase):
             self.assertTrue(rx.cell(r9, 19).font.italic)
             self.assertEqual(rv.cell(r9, 20).value, "Consuming — 3,000 of 5,000 MT used (rest projected)")
             self.assertEqual(rv.cell(r1, 20).value, "not on the FIFO walk")
+            # Fixed till pricing: C1 is fully priced (2,000 MT) on 23 Oct, so 26 Oct is left out
+            till = res["till_pricing"]
+            self.assertEqual([t_["name"] for t_ in till], ["REF-C1"])
+            t1 = till[0]
+            self.assertEqual((t1["d0"].isoformat(), t1["d1"].isoformat(), t1["n"], t1["cut"], t1["done"]),
+                             ("2026-10-17", "2026-10-23", 6, 1, True))
+            tcb = [470.0, 467.75, 459.0, 464.25, 456.0, 455.0]
+            self.assertAlmostEqual(t1["avg"], sum(tcb) / 6)
+            self.assertAlmostEqual(t1["da"], sum(tcb) / 6 - fix)
+            self.assertAlmostEqual(t1["fa"], (sum(tcb) / 6 - fix) * FACTOR * 2000.0)
+            tx, tv = wf["Fixed till pricing"], wv["Fixed till pricing"]
+            self.assertEqual(wf.sheetnames.index("Fixed till pricing"), wf.sheetnames.index("Fixed consumption") + 1)
+            self.assertEqual(tx["A5"].value, "REF-C1")
+            self.assertEqual(tv["C5"].value.date().isoformat(), "2026-10-23")
+            self.assertEqual(tx["G5"].value, f"=C{t1['a']}")
+            self.assertAlmostEqual(tv["G5"].value, sum(tcb) / 6)
+            self.assertEqual(tx.cell(t1["a"], 3).value, f'=IF(COUNT(C{t1["first"]}:C{t1["last"]})>0,'
+                                                         f'AVERAGE(C{t1["first"]}:C{t1["last"]}),"")')
+            self.assertEqual(tx.cell(t1["first"], 3).value, "=IF(ISNUMBER('Fixed consumption'!C8),'Fixed consumption'!C8,\"\")")
+            self.assertEqual(tv["Q5"].value, "Fully priced · last lot 23 Oct")
             self.assertTrue(any("500 MT/day from each delivery" in str(rx.cell(r, 1).value or "")
                                 for r in range(5, rx.max_row + 1)))
             # the summary reads both, and the pricing window

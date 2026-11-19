@@ -27,7 +27,8 @@ F0, F2, F4 = "#,##0;-#,##0", "#,##0.00;-#,##0.00", "0.0000"
 S0, S2 = "[>=0.5]+#,##0;[<=-0.5]-#,##0;0", "[>=0.005]+#,##0.00;[<=-0.005]-#,##0.00;0.00"
 DF = "yyyy-mm-dd"
 EPOCH = dt.date(1899, 12, 30)
-SHEETS = ("Summary", "Receiving date", "Fixed consumption", "Not fixed consumption", "Open contracts")
+SHEETS = ("Summary", "Receiving date", "Fixed consumption", "Fixed till pricing", "Not fixed consumption",
+          "Open contracts")
 RECV_FILL = "E3F1E5"
 RECV_FMT = '"Received "yyyy-mm-dd'
 
@@ -1119,6 +1120,10 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
             signs(ws0, f"R{a}:S{b_ + 1}"); signs(ws0, f"X{a}:Y{b_}")
     ws0.freeze_panes = f"B{hr + 1}"
 
+    # ── Fixed till pricing: each fixed contract from receiving to its last priced lot only ──
+    from .fixed_till_pricing import write_fixed_till_pricing
+    till = write_fixed_till_pricing(wb, cache, band=_n(ws0["C6"].value) or 1.0, base=base)
+
     for s in wb.worksheets:
         s.page_setup.orientation = "landscape"
         s.page_setup.paperSize = s.PAPERSIZE_A4
@@ -1164,4 +1169,4 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
             "unfixed_contracts": len(refs_unfixed), "unfixed_days": sum(len(x["b"]["days"]) for x in refs_unfixed),
             "open_contracts": len(refs_open), "received_rows": n_recv, "formulas": sum(len(v) for v in cache.values()),
             "fixed_usd": sum(x["usd"] for x in refs_fixed), "fixed_mt": sum(x["mt"] for x in refs_fixed),
-            "position_rows": pos["rows"] if pos else 0}
+            "position_rows": pos["rows"] if pos else 0, "till_pricing": till["summary"]}
