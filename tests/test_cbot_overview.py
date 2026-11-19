@@ -236,6 +236,22 @@ class WorkbookTests(unittest.TestCase):
                                                          f'AVERAGE(C{t1["first"]}:C{t1["last"]}),"")')
             self.assertEqual(tx.cell(t1["first"], 3).value, "=IF(ISNUMBER('Fixed consumption'!C8),'Fixed consumption'!C8,\"\")")
             self.assertEqual(tv["Q5"].value, "Fully priced · last lot 23 Oct")
+            # with the MTM tables: 'MTM DAILY & LOCKED' first, its receiving columns on the right rows
+            self.assertEqual(res["recv_rows"]["C1"], r1)
+            day = {"contract_id": "C1", "ref": "REF-C1", "commodity": "CORN", "tag": "improved", "cbot_today": 449.0,
+                   "cbot_prior": 444.0, "sav_today": 100.0, "sav_prior": 90.0, "from_cbot": 5.0, "from_fx": 0.0,
+                   "from_local": 5.0, "other": 0.0, "total_today": 200000.0, "total_prior": 180000.0,
+                   "qty_today": 2000.0, "qty_prior": 2000.0, "in_today": True, "in_prior": True, "why_complete": True}
+            fp2 = os.path.join(tmp, "ov2.xlsx")
+            res2 = ov.write_overview(m, fp2, "CORN", [t], receipts=rc, only={"C1", "C3", "C9", "C8"},
+                                     mtm={"daily": {"rows": [day], "today": "2026-11-19", "prior": "2026-11-18"},
+                                          "locked": {"groups": []}, "live": {"groups": []}})
+            w2, v2 = openpyxl.load_workbook(fp2), openpyxl.load_workbook(fp2, data_only=True)
+            self.assertEqual(w2.sheetnames, ["MTM DAILY & LOCKED"] + list(ov.SHEETS))
+            self.assertEqual(w2.active.title, "MTM DAILY & LOCKED")
+            self.assertEqual(w2["MTM DAILY & LOCKED"]["B3"].value, f"='Receiving date'!D{r1}")
+            self.assertEqual(v2["MTM DAILY & LOCKED"]["C3"].value.date().isoformat(), "2026-10-19")
+            self.assertEqual([x["rows"] for x in res2["mtm_sections"]], [2, 0, 0])   # 1 contract + its TOTAL row
             self.assertTrue(any("500 MT/day from each delivery" in str(rx.cell(r, 1).value or "")
                                 for r in range(5, rx.max_row + 1)))
             # the summary reads both, and the pricing window

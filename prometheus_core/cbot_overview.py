@@ -326,7 +326,8 @@ def lead_days(trading_days, ref, n=3):
     return before[-n:] if n > 0 else []
 
 
-def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=None, only=None, position=None):
+def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=None, only=None, position=None,
+                   mtm=None):
     """Write the workbook. ``open_trails``: one dict per open contract with keys contract_id, contract,
     supplier, commodity, mt, pricing, entered, storage_start, day0 (ISO), premium, factor, fixed_cif,
     fixed_fx, fx_basis, discharge, clearance, other_fee and days: [{date, cbot, market_fx, local_excl,
@@ -911,6 +912,7 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
             lines.append((x["t"]["received"], "Not fixed", "Open contracts", x))
             seen.add(cid)
     lines.sort(key=lambda z: z[0], reverse=True)
+    recv_rows, recv_values = {}, {}
     row = 5
     for date, kind, sh, x in lines:
         q = f"'{sh}'!"
@@ -950,6 +952,9 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
         put(wr_, row, 17, end_ if end_ else "end not entered", DF if end_ else None, inp=bool(end_), align="center",
             italic=not end_, color=None if end_ else GREY)
         put_consumption(row, (rc.get(cid) or {}).get("consumption"), cid)
+        recv_rows[cid] = row
+        recv_values[(cid, "date")] = _d(date)
+        recv_values[(cid, "end")] = end_ if end_ else "end not entered"
         f(wr_, row, 11, f'=IF({isn(f"J{row}", f"G{row}")},J{row}-G{row},"")', diff, S2, bold=True)
         f(wr_, row, 12, f'=IF({isn(f"K{row}", f"H{row}")},K{row}*H{row},"")', _mul(diff, fac), S2)
         f(wr_, row, 13, f'=IF({isn(f"L{row}", f"E{row}")},L{row}*E{row},"")', usd, S0, bold=True)
@@ -998,6 +1003,7 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
             put(wr_, row, 17, "—", align="center", color=GREY)
             put(wr_, row, 18, "—", align="center", color=GREY); put(wr_, row, 19, "—", align="center", color=GREY)
             put(wr_, row, 20, "not received: not on the FIFO walk", italic=True, color=GREY)
+            recv_rows[cid], recv_values[(cid, "date")], recv_values[(cid, "end")] = row, "Not received", "—"
             row += 1
     if not lines and not pending:
         put(wr_, 5, 1, "No receiving dates were given.", italic=True, color=GREY)
@@ -1155,9 +1161,23 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
                 irows = [r for r in irows if r.get("contract_id") in only or r.get("closed")]
             inv = write_inventory_sheet(wb, irows, as_of=_d(as_of) or dt.date.today(),
                                         factor=position.get("factor") or 0.3937, fx_now=position.get("fx"),
-                                        title=position.get("title") or "YC Contracts position", index=1,
+                                        title=position.get("title") or "YC Contracts position", index=0,
                                         closed_days=position.get("closed_days") or 15)
             cache[INV_SHEET] = inv["cache"]
+        for s_ in wb.worksheets:
+            s_.sheet_view.tabSelected = False
+        wb.active = 0
+        wb.worksheets[0].sheet_view.tabSelected = True
+    mtm_res = None
+    if mtm is not None:
+        from .mtm_locked_sheet import write_mtm_sheet
+        mtm_res = write_mtm_sheet(wb, cache, daily=mtm.get("daily"), locked=mtm.get("locked"), live=mtm.get("live"),
+                                  recv_rows=recv_rows, recv_values=recv_values, index=0)
+        s_ = wb.worksheets[0]
+        s_.page_setup.orientation = "landscape"
+        s_.sheet_properties.pageSetUpPr.fitToPage = True
+        s_.page_setup.fitToWidth, s_.page_setup.fitToHeight = 1, 0
+        s_.oddFooter.center.text = "&A · page &P of &N"
         for s_ in wb.worksheets:
             s_.sheet_view.tabSelected = False
         wb.active = 0
@@ -1169,4 +1189,5 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
             "unfixed_contracts": len(refs_unfixed), "unfixed_days": sum(len(x["b"]["days"]) for x in refs_unfixed),
             "open_contracts": len(refs_open), "received_rows": n_recv, "formulas": sum(len(v) for v in cache.values()),
             "fixed_usd": sum(x["usd"] for x in refs_fixed), "fixed_mt": sum(x["mt"] for x in refs_fixed),
-            "position_rows": pos["rows"] if pos else 0, "till_pricing": till["summary"]}
+            "position_rows": pos["rows"] if pos else 0, "till_pricing": till["summary"],
+            "mtm_sections": (mtm_res or {}).get("sections") or [], "recv_rows": recv_rows}
