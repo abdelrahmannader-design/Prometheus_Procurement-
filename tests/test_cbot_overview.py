@@ -82,7 +82,8 @@ class WorkbookTests(unittest.TestCase):
             wf, wv = openpyxl.load_workbook(fp), openpyxl.load_workbook(fp, data_only=True)
             self.assertEqual(wf.sheetnames, list(ov.SHEETS))
             for ws in wf.worksheets:                              # nothing to scroll sideways on the visible sheets
-                self.assertLessEqual(ws.max_column, 25 if ws.title == "Summary" else 16, ws.title)
+                self.assertLessEqual(ws.max_column, 25 if ws.title == "Summary" else 17 if ws.title == "Receiving date" else 16,
+                                     ws.title)
             self.assertEqual(wf["Summary"].sheet_state, "hidden")
             self.assertEqual(wf.active.title, "Receiving date")
             fx, fv = wf["Fixed consumption"], wv["Fixed consumption"]
@@ -130,7 +131,7 @@ class WorkbookTests(unittest.TestCase):
               (("2026-10-17", 470.0, 53.5, False),               # received on a Saturday: the last close is carried
                ("2026-10-19", 467.75, 53.874, True), ("2026-10-20", 459.0, 54.269, True), ("2026-10-21", 464.25, 54.391, True),
                ("2026-10-22", 456.0, 55.073, True), ("2026-10-23", 455.0, 55.651, True), ("2026-10-26", 448.75, 53.0, True))]
-        rc = {"C1": {"date": "2026-10-17", "vessel": "ELENI M II", "shipment": "2nd half October", "closed": "2026-10-28",
+        rc = {"C1": {"date": "2026-10-17", "receiving_end": "2026-10-19", "vessel": "ELENI M II", "shipment": "2nd half October", "closed": "2026-10-28",
                      "pricing_window": pw, "contract": "REF-C1", "mt": 2000.0,
                      "lots": [{"date": "2026-10-21", "mt": 500.0}, {"date": "2026-10-23", "mt": 1500.0}]},
               "C3": {"date": "2026-10-30", "vessel": "MEGAN HOPE", "cbot": 455.0, "local_excl": 15100.0, "contract": "REF-C3",
@@ -149,7 +150,7 @@ class WorkbookTests(unittest.TestCase):
             wf, wv = openpyxl.load_workbook(fp), openpyxl.load_workbook(fp, data_only=True)
             fx, fv = wf["Fixed consumption"], wv["Fixed consumption"]
             self.assertIn("vessel ELENI M II", fx["A4"].value)
-            self.assertIn("received 2026-10-17 → last lot priced 2026-10-23  ·  closed in the app 2026-10-28", fx["A4"].value)
+            self.assertIn("received 2026-10-17 to 2026-10-19 → last lot priced 2026-10-23  ·  closed in the app 2026-10-28", fx["A4"].value)
             self.assertEqual([c.value for c in fx[7]][11:], ["Market FX", "Market FX vs contract FX", "FX effect EGP/MT"])
             # the receiving date, then the trading days; MT on the days lots were priced
             self.assertEqual([fv.cell(r, 1).value.date().isoformat() for r in range(8, 15)], [w["date"] for w in pw])
@@ -199,6 +200,9 @@ class WorkbookTests(unittest.TestCase):
             self.assertEqual(rv.cell(r9, 16).value, "Cheaper to fix now (indicative)")
             self.assertAlmostEqual(rv.cell(r9, 11).value, 449.75 - 446.0)   # open, not consumed: day 0 against now
             self.assertEqual(rv.cell(rows["REF-C8"], 4).value, "Not received")
+            self.assertEqual(rx.cell(4, 17).value, "Receiving end")         # the receiving period, start to end
+            self.assertEqual(rv.cell(r1, 17).value.date().isoformat(), "2026-10-19")
+            self.assertEqual(rv.cell(r3, 17).value, "end not entered")
             # the summary reads both, and the pricing window
             sx, sv_ = wf["Summary"], wv["Summary"]
             self.assertEqual(sx["O10"].value, f"='Receiving date'!M{r1}")
@@ -227,15 +231,17 @@ class WorkbookTests(unittest.TestCase):
     def test_status_text_leads_with_the_last_priced_lot(self):
         lots = [{"date": "2026-10-28", "mt": 1016.04}, {"date": "2026-10-30", "mt": 1016.05}]
         self.assertEqual(ov.status_text({"date": "2026-10-20", "lots": lots, "closed": "2026-11-05", "closed_status": True}),
-                         "  ·  received 2026-10-20 → last lot priced 2026-10-30  ·  closed in the app 2026-11-05")
+                         "  ·  received 2026-10-20 (end not entered) → last lot priced 2026-10-30  ·  closed in the app 2026-11-05")
+        self.assertEqual(ov.status_text({"date": "2026-10-20", "receiving_end": "2026-10-24", "closed": ""}),
+                         "  ·  received 2026-10-20 to 2026-10-24 → still open")
         self.assertEqual(ov.status_text({"date": "2026-04-30", "lots": [], "closed": "", "closed_status": True}),
-                         "  ·  received 2026-04-30 → closed (date not recorded)")
+                         "  ·  received 2026-04-30 (end not entered) → closed (date not recorded)")
         self.assertEqual(ov.status_text({"date": "2026-09-10", "closed": "2026-09-10", "closed_status": True}),
-                         "  ·  received 2026-09-10 → closed in the app 2026-09-10")
-        self.assertEqual(ov.status_text({"date": "2026-11-10", "closed": ""}), "  ·  received 2026-11-10 → still open")
+                         "  ·  received 2026-09-10 (end not entered) → closed in the app 2026-09-10")
+        self.assertEqual(ov.status_text({"date": "2026-11-10", "closed": ""}), "  ·  received 2026-11-10 (end not entered) → still open")
         self.assertEqual(ov.status_text(None, True), "  ·  still open")
         self.assertEqual(ov.status_text({"date": "2026-04-30", "lots": lots, "closed_status": True}),
-                         "  ·  received 2026-04-30 → last lot priced 2026-10-30  ·  closed (date not recorded)")
+                         "  ·  received 2026-04-30 (end not entered) → last lot priced 2026-10-30  ·  closed (date not recorded)")
 
     def test_lots_and_first_notice_day(self):
         self.assertEqual(ov.lots_by_day([{"date": "2026-10-28", "mt": 508.02}, {"date": "2026-10-28", "qty_mt": 508.02},

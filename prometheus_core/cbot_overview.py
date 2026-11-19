@@ -209,6 +209,13 @@ def merge_window(days, rv, carry=()):
     return out
 
 
+def receiving_text(start, end):
+    """'received 2026-10-26 to 2026-10-30' — the receiving period from its first to its last day."""
+    if not start:
+        return ""
+    return f"received {start}" + (f" to {end}" if end else " (end not entered)")
+
+
 def status_text(rv, still_open=False):
     """'received X → last lot priced Y · closed in the app Z' for a contract block's header.
 
@@ -219,7 +226,7 @@ def status_text(rv, still_open=False):
     lots = lots_by_day(rv.get("lots"))
     last = max(lots) if lots else None
     closed, is_closed = rv.get("closed") or "", bool(rv.get("closed_status") or rv.get("closed"))
-    head = f"  ·  received {rv.get('date')} → "
+    head = f"  ·  {receiving_text(rv.get('date'), rv.get('receiving_end'))} → "
     if last:
         tail = f"last lot priced {last.isoformat()}"
         if closed:
@@ -377,7 +384,7 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
                 "is not a trading day), on the whole contract quantity. GREEN = we fixed below the market of that day (we "
                 "paid less than the market); RED = we fixed above it. A contract not fixed yet is compared with the latest "
                 "CBOT instead: green = it is cheaper to fix now than it was on the receiving date (indicative).",
-                [24, 15, 20, 12, 8, 12, 10, 8, 10, 10, 11, 9, 11, 13, 11, 31])
+                [24, 15, 20, 12, 8, 12, 10, 8, 10, 10, 11, 9, 11, 13, 11, 31, 14])
 
     # ── Fixed consumption: pricing days and the market from the receiving date to the window end ──
     W = [20, 9, 11, 11, 10, 12, 12, 12, 13, 13, 26, 11, 12, 12]
@@ -744,7 +751,8 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
         bar(wo, r, f"{tr_.get('contract')}  ·  {tr_.get('supplier') or ''}  ·  {money(_n(tr_.get('mt')))} MT  ·  "
                    f"{tr_.get('pricing') or ''}  ·  FX: {fx_txt}"
                    + (f"  ·  vessel {tr_.get('vessel')}" if tr_.get("vessel") else "")
-                   + (f"  ·  received {tr_.get('received')}" if tr_.get("received")
+                   + (f"  ·  {receiving_text(tr_.get('received'), (rc.get(tr_.get('contract_id')) or {}).get('receiving_end'))}"
+                      if tr_.get("received")
                       else f"  ·  not received yet (entered {tr_.get('entered') or '—'})"), 12)
         heads(wo, r + 1, [f"Premium {unit}", "Factor to $/MT", "Fixed CIF $/MT", "Form 4 FX", "Discharge", "Clearance",
                           "Other fees", "MT", "Day 0", f"CBOT on day 0 {unit}", "Market FX on day 0", ""])
@@ -813,7 +821,7 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
     # ── Receiving date: one row per contract ──
     heads(wr_, 4, ["Contract", "Vessel", "Shipment", "Receiving date", "MT", "Pricing", f"Fixed / latest CBOT {unit}",
                    "Factor to $/MT", "FX (contract)", f"CBOT on receiving date {unit}", f"Market − our fixing {unit}", "USD/MT",
-                   "USD", "EGP", "Local − landed EGP/MT", "In words"])
+                   "USD", "EGP", "Local − landed EGP/MT", "In words", "Receiving end"])
     lines = []
     for kind, refs, sh in (("Fixed", refs_fixed, "Fixed consumption"), ("Not fixed", refs_unfixed, "Not fixed consumption")):
         for x in refs:
@@ -861,6 +869,9 @@ def write_overview(model, path, base="CORN", open_trails=None, lead=3, receipts=
         wr_.cell(row, 1).font = Font(bold=True, color="1F5FBF", underline="single")
         put(wr_, row, 2, vessel_of(cid)); put(wr_, row, 3, (rc.get(cid) or {}).get("shipment") or "")
         put(wr_, row, 6, kind, align="center")
+        end_ = _d((rc.get(cid) or {}).get("receiving_end"))
+        put(wr_, row, 17, end_ if end_ else "end not entered", DF if end_ else None, inp=bool(end_), align="center",
+            italic=not end_, color=None if end_ else GREY)
         f(wr_, row, 11, f'=IF({isn(f"J{row}", f"G{row}")},J{row}-G{row},"")', diff, S2, bold=True)
         f(wr_, row, 12, f'=IF({isn(f"K{row}", f"H{row}")},K{row}*H{row},"")', _mul(diff, fac), S2)
         f(wr_, row, 13, f'=IF({isn(f"L{row}", f"E{row}")},L{row}*E{row},"")', usd, S0, bold=True)

@@ -100,7 +100,8 @@ def position_rows(open_rows, base="CORN", receipts=None, lots=None, final_cif=No
             "used": to_float(o.get("consumed_mt"), 0.0) or 0.0,
             "port": 0.0, "priced": priced, "premium": premium, "futures": o.get("futures") or "",
             "fixed_cbot": _fixed_cbot(cl, final_cif.get(cid), factor, premium) if priced > 0 else None,
-            "receiving_date": recv, "vessel": rv.get("vessel") or "", "shipment": rv.get("shipment") or "",
+            "receiving_date": recv, "receiving_end": str(rv.get("receiving_end") or o.get("receiving_end") or "")[:10],
+            "vessel": rv.get("vessel") or "", "shipment": rv.get("shipment") or "",
             "discharge": to_float(o.get("discharge"), None), "clearance": to_float(o.get("clearance"), None),
             "freight": to_float(o.get("freight"), None), "local": to_float(o.get("local_excl"), None),
             "local_date": str(o.get("local_date") or "")[:10],
@@ -148,7 +149,8 @@ def closed_rows(contracts, base="CORN", closed_dates=None, lots=None, as_of=None
             else (c.get("futures_month") or ""),
             "fx_contract": to_float(c.get("fx"), None) if str(c.get("fx_basis") or "").lower().startswith("form 4") else None,
             "fixed_cbot": _fixed_cbot(cl, cif, factor, prem),
-            "receiving_date": str(c.get("storage_start") or "")[:10], "vessel": "", "shipment": "",
+            "receiving_date": str(c.get("storage_start") or "")[:10],
+            "receiving_end": str(c.get("receiving_end") or "")[:10], "vessel": "", "shipment": "",
             "lots": cl, "closed": when})
     out.sort(key=lambda r: (r["closed"], r["contract"]), reverse=True)
     return out
@@ -194,7 +196,8 @@ def label(r) -> str:
 def delivery_text(r, as_of: dt.date | None = None) -> str:
     bits = [r["vessel"]] if r["vessel"] else []
     if r["receiving_date"]:
-        bits.append("received " + r["receiving_date"])
+        end = r.get("receiving_end") or ""
+        bits.append("received " + r["receiving_date"] + (f" → {end}" if end else " → end not entered"))
     else:
         bits.append(r["shipment"] or "not received yet")
     return " · ".join(bits)
@@ -997,8 +1000,9 @@ def write_inventory_sheet(wb, rows, *, as_of, factor=0.3937, fx_now=None, title=
         cr = r                                          # the contract row
         lot_rows = list(range(cr + 1, cr + 1 + len(lots)))
         put(cr, 1, label(row), bold=True, fill=band)
-        when = (f"received {short(row['receiving_date'])}" if row.get("receiving_date") else
-                (row.get("shipment") or "not received yet"))
+        when = ((f"received {short(row['receiving_date'])}"
+                 + (f" → {short(row['receiving_end'])}" if row.get("receiving_end") else " → end not entered"))
+                if row.get("receiving_date") else (row.get("shipment") or "not received yet"))
         put(cr, 2, f"{row['contract']}  ·  " + (f"{row['vessel']} · " if row.get("vessel") else "") + when
                    + (f"  ·  closed {short(row['closed'])}" if is_closed else ""), fill=band)
         put(cr, 3, total, F0, bold=True, fill=INPUT, align="right")

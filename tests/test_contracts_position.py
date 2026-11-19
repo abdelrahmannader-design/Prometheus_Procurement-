@@ -156,7 +156,7 @@ def test_consumed_and_pricing_status():
 def test_inventory_sheet_lots_and_totals():
     base = {"supplier": "ADM", "origin": "ARG", "futures": "DEC-26", "vessel": "", "shipment": ""}
     rows = [dict(base, contract="460/20050000", total=2000, received=2000, used=1200, premium=180, fx_contract=55.2974,
-                 fixed_cbot=446.5, receiving_date="2026-10-26",
+                 fixed_cbot=446.5, receiving_date="2026-10-26", receiving_end="2026-10-30",
                  lots=[{"date": dt.date(2026, 11, 10), "mt": 508.02, "cbot": 441.25},
                        {"date": dt.date(2026, 11, 11), "mt": 1000, "cbot": None}]),
             dict(base, contract="460/20050610 3000", total=3000, received=0, used=0, premium=198, fx_contract=None,
@@ -173,6 +173,7 @@ def test_inventory_sheet_lots_and_totals():
     assert c["P9"] == 446.5 and c["Q9"] == pytest.approx((446.5 + 180) * 0.3937)   # no CBOT: implied
     assert c["Q7"] == pytest.approx((508.02 * c["Q8"] + 1000 * c["Q9"]) / 1508.02)
     assert ws["D10"].value == "pending" and c["E10"] == "Not arrived" and c["G10"] == 3000
+    assert "received 26 Oct → 30 Oct" in ws["B7"].value                  # the receiving period, start to end
     tr = out["total_row"]
     assert ws[f"C{tr}"].value.startswith('=SUMIF($W$7:$W$10,"contract"') and c[f"C{tr}"] == 5000
     assert c[f"L{tr}"] == pytest.approx(1508.02)                    # lot lines are not counted twice
@@ -194,6 +195,7 @@ def test_recently_closed_group_has_its_own_subtotal():
     assert ws[f"A{tr}"].value == "Total Feed (open contracts)" and c[f"C{tr}"] == 2000 and c[f"L{tr}"] == 0
     names = [ws.cell(r, 2).value for r in range(tr, ws.max_row + 1)]
     assert any(n and n.startswith("SC-33609-CH.2") and "closed 5 Nov" in n for n in names)
+    assert any(n and "received 20 Oct → end not entered" in n for n in names)
     assert not any(n and n.startswith("OLD") for n in names)               # closed too long ago
     cr = next(r for r in range(tr, ws.max_row + 1) if (ws.cell(r, 2).value or "").startswith("SC-33609-CH.2"))
     assert c[f"L{cr}"] == pytest.approx(2032.09) and c[f"M{cr}"] == "Fully priced" and c[f"J{cr}"] == 2000
@@ -209,7 +211,8 @@ def test_closed_rows_keep_only_recent_closures_with_a_date():
     contracts = [
         {"id": "C1", "contract": "SC-33609-CH.2", "base": "CORN", "status": "Closed", "commodity": "CORN-BRZ",
          "supplier": "COFCO", "qty_mt": 2000, "delivered_mt": 2000, "consumed_mt": 2000, "premium": 175,
-         "contract_month": {"code": "DEC-26"}, "fx": 53.58, "fx_basis": "Form 4", "storage_start": "2026-10-20"},
+         "contract_month": {"code": "DEC-26"}, "fx": 53.58, "fx_basis": "Form 4", "storage_start": "2026-10-20",
+         "receiving_end": "2026-10-24"},
         {"id": "C2", "contract": "OLD", "base": "CORN", "status": "Closed", "qty_mt": 2000},
         {"id": "C3", "contract": "NO-DATE", "base": "CORN", "status": "Closed", "qty_mt": 2000},
         {"id": "C4", "contract": "OPEN", "base": "CORN", "status": "Open", "qty_mt": 2000}]
@@ -218,5 +221,14 @@ def test_closed_rows_keep_only_recent_closures_with_a_date():
                                {"date": "2026-10-30", "mt": 1016.05, "cbot": 447.75}]}, dt.date(2026, 11, 18), 15)
     assert [r["contract"] for r in rows] == ["SC-33609-CH.2"]
     r = rows[0]
+    assert r["receiving_end"] == "2026-10-24"
     assert r["closed"] == "2026-11-05" and r["fx_contract"] == 53.58 and r["origin"] == "BRZ"
     assert r["futures"] == "DEC-26" and r["fixed_cbot"] == pytest.approx((451.75 * 1016.04 + 447.75 * 1016.05) / 2032.09)
+
+
+def test_delivery_text_shows_the_receiving_period():
+    from prometheus_core.contracts_position import delivery_text
+    r = {"vessel": "PHILIPPAKOS", "receiving_date": "2026-11-02", "receiving_end": "2026-11-19", "shipment": ""}
+    assert delivery_text(r) == "PHILIPPAKOS · received 2026-11-02 → 2026-11-19"
+    assert delivery_text(dict(r, receiving_end="")) == "PHILIPPAKOS · received 2026-11-02 → end not entered"
+    assert delivery_text(dict(r, receiving_date="", shipment="December delivery")) == "PHILIPPAKOS · December delivery"
