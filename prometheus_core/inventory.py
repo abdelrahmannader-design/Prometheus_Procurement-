@@ -117,9 +117,73 @@ def _rate_by_base(consumption_rates):
     return out
 
 
+def _count_schedule(count_events, base, as_of_d):
+    """{date: counted MT} for ``base``: on every count date, the latest count of each of its commodity keys
+    (CORN-BRZ, CORN, CORN-ARG …) on or before that date, added up — as the Inventory baseline reads them."""
+    rows = []
+    for e in count_events or []:
+        if not isinstance(e, dict) or not e.get("is_adjustment") or base_commodity(e.get("commodity")) != base:
+            continue
+        d = _date(e.get("date"))
+        if d is None or d > as_of_d:
+            continue
+        rows.append((d, str(e.get("commodity") or "").strip().upper(), max(_to_float(e.get("adjusted_qty"), 0.0) or 0.0, 0.0)))
+    out = {}
+    for d in sorted({r[0] for r in rows}):
+        latest = {}
+        for rd, alias, q in sorted(rows):
+            if rd <= d:
+                latest[alias] = q
+        out[d] = sum(latest.values())
+    return out
+
+
+def _reset_to_count(layers, qty, draws, when, base, issues):
+    """Set the FIFO stock to a physical count at the end of ``when``. Below the model: the difference is drawn
+    from the oldest layers (kind "count"). Above it: the walk drew too much, so the newest layers get tonnes
+    back (up to what they held) and their latest draws are reduced by as much; stock beyond every identified
+    receipt becomes an explicit unknown-cost lot. Returns (counted, modelled)."""
+    modelled = sum(max(_to_float(x.get("remaining_mt"), 0.0) or 0.0, 0.0) for x in layers)
+    if qty < modelled - 1e-9:
+        _consume_fifo(layers, modelled - qty, draws, when, "count")
+    elif qty > modelled + 1e-9:
+        need = qty - modelled
+        for layer in sorted(layers, key=lambda x: (x.get("delivery_date") or "", x.get("contract_id") or "",
+                                                   x.get("lot_id") or ""), reverse=True):
+            if need <= 1e-9:
+                break
+            orig = _to_float(layer.get("original_mt"), 0.0) or 0.0
+            rem = _to_float(layer.get("remaining_mt"), 0.0) or 0.0
+            give = min(max(orig - rem, 0.0), need)
+            if give <= 1e-9:
+                continue
+            layer["remaining_mt"] = rem + give
+            layer["consumed_mt"] = max((_to_float(layer.get("consumed_mt"), 0.0) or 0.0) - give, 0.0)
+            need -= give
+            if draws is not None:
+                left = give
+                for d in reversed(draws):
+                    if left <= 1e-9:
+                        break
+                    if d.get("lot_id") == layer.get("lot_id") and d.get("mt"):
+                        take = min(d["mt"], left)
+                        d["mt"] -= take
+                        left -= take
+                draws[:] = [d for d in draws if (d.get("mt") or 0) > 1e-9]
+        if need > 1e-9:
+            layers.append({"lot_id": f"PHYSICAL-{base}-{when.isoformat()}", "contract_id": "",
+                           "contract_ref": "Physical stock adjustment", "commodity": base, "base_commodity": base,
+                           "delivery_date": when.isoformat(), "original_mt": need, "remaining_mt": need,
+                           "consumed_mt": 0.0, "cost_egp_mt": None, "status": "Physical adjustment",
+                           "source": "physical_adjustment_unallocated"})
+            issues.append(f"Physical count on {when.isoformat()} exceeds identified receipts by {need:,.0f} MT; "
+                          "cost is unallocated.")
+    return qty, modelled
+
+
 def build_daily_fifo_inventory(lots, events=None, consumption_rates=None, as_of=None,
                                estimate_daily=True, record_draws=False,
-                               start_on_delivery=False):
+                               start_on_delivery=False, count_events=None):
     """Build current FIFO layers for every base commodity.
 
     Parameters
@@ -146,6 +210,11 @@ def build_daily_fifo_inventory(lots, events=None, consumption_rates=None, as_of=
         With no actual entry and no physical count to start from, begin the
         daily estimate on the day the first cargo lands rather than the day
         after. Off by default, which keeps every existing figure unchanged.
+    count_events:
+        Physical counts that reset the daily estimate: at the end of each count
+        day the stock is set to the counted tonnes by FIFO (newest cargo kept),
+        then the estimate carries on. Used by the daily-rate walk, which takes
+        no other events; each reset is listed under ``count_resets``.
     """
     as_of_d = _date(as_of) or dt.date.today()
     as_of_s = as_of_d.isoformat()
@@ -193,6 +262,7 @@ def build_daily_fifo_inventory(lots, events=None, consumption_rates=None, as_of=
         consumed_actual = 0.0
         consumed_estimated = 0.0
         draws = [] if record_draws else None
+        count_resets = []
 
         if baseline_date is not None:
             pre = [_layer_from_lot(x) for x in delivered if (_date(x.get("delivery_date")) or dt.date.min) <= baseline_date]
@@ -324,12 +394,17 @@ def build_daily_fifo_inventory(lots, events=None, consumption_rates=None, as_of=
                         "status": "Manual receipt",
                         "source": "consumption_log_receipt",
                     })
+            schedule = _count_schedule(count_events, base, as_of_d)
             while current <= as_of_d:
                 for layer in remaining_receipts.get(current, []):
                     layers.append(layer)
                 layers.sort(key=lambda x: (x.get("delivery_date") or "9999-12-31", x.get("contract_id") or "", x.get("lot_id") or ""))
                 consumed_estimated += rate
                 shortage += _consume_fifo(layers, rate, draws, current, "estimated")
+                if current in schedule:
+                    counted, modelled = _reset_to_count(layers, schedule[current], draws, current, base, issues)
+                    count_resets.append({"date": current.isoformat(), "counted_mt": counted,
+                                         "modelled_mt": modelled, "difference_mt": counted - modelled})
                 estimate_days += 1
                 current += dt.timedelta(days=1)
         else:
@@ -390,6 +465,7 @@ def build_daily_fifo_inventory(lots, events=None, consumption_rates=None, as_of=
             "inbound": inbound,
             "inbound_mt": sum(_to_float(x.get("original_mt"), 0.0) or 0.0 for x in inbound),
             "issues": issues,
+            "count_resets": count_resets,
         }
         if record_draws:
             results[base]["draws"] = draws

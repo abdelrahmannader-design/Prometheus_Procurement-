@@ -145,3 +145,58 @@ class ScenarioTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ── physical counts reset the daily-rate walk ─────────────────────────────
+def _count_lots():
+    return [{"lot_id": "CONTRACT-A", "contract_id": "A", "commodity": "CORN-BRZ", "delivery_date": "2026-11-01",
+             "original_mt": 2000.0, "cost_egp_mt": 14000.0},
+            {"lot_id": "CONTRACT-B", "contract_id": "B", "commodity": "CORN-BRZ", "delivery_date": "2026-11-03",
+             "original_mt": 2000.0, "cost_egp_mt": 14500.0}]
+
+
+def _count(day, qty, comm="CORN-BRZ"):
+    return {"date": day, "commodity": comm, "is_adjustment": True, "adjusted_qty": qty}
+
+
+def _walk(counts, as_of="2026-11-06"):
+    return build_daily_fifo_inventory(_count_lots(), events=[], consumption_rates={"CORN-BRZ": 500.0}, as_of=as_of,
+                                      estimate_daily=True, record_draws=True, start_on_delivery=True,
+                                      count_events=counts)["CORN"]
+
+
+def test_count_above_the_model_gives_tonnes_back_to_the_newest_cargo():
+    plain = _walk(None, as_of="2026-11-04")
+    assert plain["remaining_mt"] == 2000.0                       # 4 days × 500 drawn from A
+    row = _walk([_count("2026-11-04", 3000.0)], as_of="2026-11-04")
+    assert row["remaining_mt"] == 3000.0
+    left = {l["contract_id"]: l["remaining_mt"] for l in row["layers"]}
+    assert left == {"A": 1000.0, "B": 2000.0}                    # FIFO: the newest cargo is what is left
+    assert sum(d["mt"] for d in row["draws"] if d["lot_id"] == "CONTRACT-A") == 1000.0
+    assert row["count_resets"] == [{"date": "2026-11-04", "counted_mt": 3000.0, "modelled_mt": 2000.0,
+                                    "difference_mt": 1000.0}]
+    after = _walk([_count("2026-11-04", 3000.0)], as_of="2026-11-06")    # the estimate carries on from the count
+    assert after["remaining_mt"] == 2000.0
+
+
+def test_count_below_the_model_draws_the_difference_from_the_oldest():
+    row = _walk([_count("2026-11-04", 1500.0)], as_of="2026-11-04")
+    assert row["remaining_mt"] == 1500.0
+    assert {l["contract_id"]: l["remaining_mt"] for l in row["layers"]} == {"B": 1500.0}
+    counted = [d for d in row["draws"] if d["kind"] == "count"]
+    assert sum(d["mt"] for d in counted) == 500.0 and counted[0]["date"].isoformat() == "2026-11-04"
+
+
+def test_count_beyond_every_receipt_is_an_unknown_cost_lot():
+    row = _walk([_count("2026-11-04", 5000.0)], as_of="2026-11-04")
+    assert row["remaining_mt"] == 5000.0
+    phys = [l for l in row["layers"] if l.get("source") == "physical_adjustment_unallocated"]
+    assert phys and phys[0]["remaining_mt"] == 1000.0
+    assert any("exceeds identified receipts by 1,000 MT" in i for i in row["issues"])
+
+
+def test_counts_of_the_corn_keys_on_one_day_are_added_up():
+    row = _walk([_count("2026-11-04", 2500.0), _count("2026-11-04", 500.0, "CORN"),
+                 _count("2026-11-04", 0.0, "CORN-ARG")], as_of="2026-11-04")
+    assert row["remaining_mt"] == 3000.0
+    assert _walk(None)["count_resets"] == []
