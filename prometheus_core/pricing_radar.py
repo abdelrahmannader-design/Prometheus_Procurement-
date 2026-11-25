@@ -205,3 +205,37 @@ def radar(contracts, today=None, quotes=None):
             alerts.append(("Medium", f"{r['contract']}: {r['unpriced']:,.0f} MT unpriced with no futures month",
                            "Set the contract's Futures month so its pricing deadline is tracked"))
     return {"rows": rows, "months": sorted(months.values(), key=lambda g: g["fnd"]), "alerts": alerts}
+
+
+def quote_for_contract(c, curve_rows=None, front=None, today=None):
+    """The CBOT quote for the futures month on contract ``c`` (a rolled contract is valued on its own month,
+    not the front month). ``curve_rows``: stored futures-curve rows ({symbol, price, as_of, source}); ``front``:
+    the front quote as {symbol, price, as_of, source}. Returns {price, futures, symbol, as_of, source, matched,
+    note}; matched is False when the contract's month is not quoted and the front month was used instead."""
+    base = base_of(c)
+    today = _d(today) or dt.date.today()
+    front = front or {}
+    by_symbol = {}
+    for r in curve_rows or ():
+        p = r.get("price") if isinstance(r, dict) else None
+        if r.get("symbol") and isinstance(p, (int, float)) and not isinstance(p, bool):
+            by_symbol[str(r["symbol"]).upper()] = r
+    out = {"price": front.get("price"), "futures": "", "symbol": front.get("symbol") or "",
+           "as_of": front.get("as_of") or "", "source": front.get("source") or "", "matched": False, "note": ""}
+    ym = resolve_month((c or {}).get("futures_month"), base, (c or {}).get("delivery_date")
+                       or (c or {}).get("storage_start") or today)
+    if not ym:
+        out["note"] = "no futures month on the contract — front month used"
+        return out
+    k = _contract(base, *ym)
+    out["futures"] = k["futures"]
+    if str(front.get("symbol") or "").upper() == k["symbol"].upper() and front.get("price") is not None:
+        out.update(symbol=k["symbol"], matched=True)
+        return out
+    row = by_symbol.get(k["symbol"].upper())
+    if row:
+        out.update(price=float(row["price"]), symbol=k["symbol"], as_of=row.get("as_of") or out["as_of"],
+                   source=row.get("source") or out["source"], matched=True)
+        return out
+    out["note"] = f"{k['futures']} not quoted — front month used; refresh the futures curve"
+    return out

@@ -59,3 +59,21 @@ def test_levels_close_to_and_after_the_deadline():
     watch = radar(c, dt.date(2026, 11, 13))
     assert watch["rows"][0]["level"] == "watch" and watch["alerts"][0][0] == "Medium"   # 10 trading days left
     assert radar(c, dt.date(2026, 11, 9))["rows"][0]["level"] == "ok"       # 14 trading days left
+
+
+def test_quote_for_contract_uses_own_month():
+    from prometheus_core.pricing_radar import quote_for_contract
+    rows = [{"symbol": "ZCZ26.CBT", "price": 433.0, "as_of": "t1"},
+            {"symbol": "ZCH27.CBT", "price": 449.25, "as_of": "t2", "source": "curve"}]
+    front = {"symbol": "ZCZ26.CBT", "price": 433.0, "as_of": "t0", "source": "YAHOO"}
+    today = "2026-11-25"
+    q = quote_for_contract({"commodity": "CORN-BRZ", "futures_month": "March", "delivery_date": "2026-11-17"},
+                           rows, front, today)
+    assert q["price"] == 449.25 and q["futures"] == "MAR-27" and q["matched"]
+    q = quote_for_contract({"commodity": "CORN-BRZ", "futures_month": "DEC", "delivery_date": "2026-11-01"},
+                           rows, front, today)
+    assert q["price"] == 433.0 and q["futures"] == "DEC-26" and q["matched"] and q["as_of"] == "t0"
+    q = quote_for_contract({"commodity": "CORN", "futures_month": "MAY-27"}, rows, front, today)
+    assert q["price"] == 433.0 and not q["matched"] and "MAY-27" in q["note"]
+    q = quote_for_contract({"commodity": "CORN"}, rows, front, today)
+    assert q["price"] == 433.0 and not q["matched"]
