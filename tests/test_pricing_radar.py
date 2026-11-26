@@ -77,3 +77,23 @@ def test_quote_for_contract_uses_own_month():
     assert q["price"] == 433.0 and not q["matched"] and "MAY-27" in q["note"]
     q = quote_for_contract({"commodity": "CORN"}, rows, front, today)
     assert q["price"] == 433.0 and not q["matched"]
+
+
+def test_open_premium_and_blended_cif():
+    from prometheus_core.pricing_radar import blended_cif, open_premium
+    assert open_premium({"premium_cents": 190}) == 190
+    assert open_premium({"premium_cents": 190, "open_premium_cents": 173.75}) == 173.75
+    lots = [{"qty_mt": 1000, "cbot": 440.0, "premium_cents": 190.0},
+            {"qty_mt": 1000, "cbot": 436.0, "premium_cents": 190.0}]
+    r = blended_cif(lots, 4000, 449.25, 173.75, 0.3937)
+    want = (1000 * 630 + 1000 * 626 + 2000 * (449.25 + 173.75)) / 4000 * 0.3937
+    assert abs(r["cif"] - want) < 1e-9 and r["priced_mt"] == 2000 and r["unpriced_mt"] == 2000
+    assert abs(r["priced_cbot"] - 438.0) < 1e-9 and "2,000 MT open (449.25+173.75)" in r["formula"]
+    full = blended_cif(lots, 2000, None, None, 0.3937)          # fully priced: no live quote needed
+    assert abs(full["cif"] - 628 * 0.3937) < 1e-9 and full["unpriced_mt"] == 0
+    capped = blended_cif(lots, 1500, None, None, 0.3937)        # lots above the contract qty are scaled
+    assert abs(capped["cif"] - 628 * 0.3937) < 1e-9 and capped["priced_mt"] == 1500
+    nocbot = blended_cif([{"qty_mt": 500, "premium_cents": 190.0}], 1000, 433.0, 173.75, 0.3937)
+    assert abs(nocbot["cif"] - (500 * 623 + 500 * 606.75) / 1000 * 0.3937) < 1e-9
+    assert blended_cif([], 1000, 433, 190, 0.3937) is None
+    assert blended_cif(lots, 4000, None, 173.75, 0.3937) is None

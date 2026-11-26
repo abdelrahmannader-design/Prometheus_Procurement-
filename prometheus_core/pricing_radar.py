@@ -239,3 +239,57 @@ def quote_for_contract(c, curve_rows=None, front=None, today=None):
         return out
     out["note"] = f"{k['futures']} not quoted — front month used; refresh the futures curve"
     return out
+
+
+def open_premium(c):
+    """Premium (¢/bu or $/st) of the unpriced remainder: after a roll it differs from the priced lots
+    (``open_premium_cents``); otherwise the contract premium."""
+    for k in ("open_premium_cents", "premium_cents"):
+        v = (c or {}).get(k)
+        try:
+            if v not in (None, ""):
+                return float(v)
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
+def blended_cif(lots, qty, live_cbot, open_prem, factor):
+    """CIF $/MT of a part-priced contract: each priced lot at its own fixed CBOT + premium, the unpriced
+    remainder at the live CBOT of its (possibly rolled) month + the remainder premium. A lot without a fixed
+    CBOT is marked at the live CBOT with its own premium. Returns None when the lots carry no quantities or a
+    needed number is missing; else {cif, priced_mt, unpriced_mt, priced_cbot, priced_premium, formula}."""
+    def f(v):
+        try:
+            return None if v in (None, "") else float(v)
+        except (TypeError, ValueError):
+            return None
+    qty = f(qty) or 0.0
+    rows = [(f(l.get("qty_mt")), f(l.get("cbot")), f(l.get("premium_cents"))) for l in lots or ()
+            if isinstance(l, dict)]
+    rows = [r for r in rows if r[0] and r[0] > 0]
+    if qty <= 0 or not rows or not factor:
+        return None
+    priced = min(sum(r[0] for r in rows), qty)
+    scale = priced / sum(r[0] for r in rows)          # lots over the contract quantity are capped to it
+    total, w_cbot, w_prem = 0.0, 0.0, 0.0
+    for q, cb, pr in rows:
+        cb = cb if cb is not None else live_cbot
+        pr = pr if pr is not None else open_prem
+        if cb is None or pr is None:
+            return None
+        q *= scale
+        total += q * (cb + pr)
+        w_cbot += q * cb
+        w_prem += q * pr
+    unpriced = max(qty - priced, 0.0)
+    if unpriced > 1e-6:
+        if live_cbot is None or open_prem is None:
+            return None
+        total += unpriced * (live_cbot + open_prem)
+    pc, pp = w_cbot / priced, w_prem / priced
+    formula = f"{priced:,.0f} MT priced ({pc:.2f}+{pp:.2f})"
+    if unpriced > 1e-6:
+        formula += f" + {unpriced:,.0f} MT open ({live_cbot:.2f}+{open_prem:.2f})"
+    return {"cif": total / qty * factor, "priced_mt": priced, "unpriced_mt": unpriced, "priced_cbot": pc,
+            "priced_premium": pp, "formula": formula + f" ×{factor:.5g}"}
